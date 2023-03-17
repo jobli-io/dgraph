@@ -1,0 +1,38 @@
+[
+    {
+      "firstName": "James",
+      "lastName": "Doe",
+      "age": 25.0,
+      "dob": "1996-01-01",
+      "houseNumber": "2-F",
+      "street": "Park Street",
+      "city": "Langsdown",
+      "country": "USA",
+      "zip": "234234",
+      "addressType": "residential"
+    },
+    {
+      "firstName": "James",
+      "lastName": "Doe",
+      "age": 25.0,
+      "dob": "1996-01-01",
+      "digitalAddress": "999-22-1.abc.com",
+      "addressType": "digital"
+    },
+    {
+      "firstName": "James",
+      "lastName": "Doe",
+      "age": 25.0,
+      "dob": "1996-01-01",
+      "pobox": "999-xyz",
+      "street": "Park Street",
+      "city": "Langsdown",
+      "country": "USA",
+      "zip": "234234",
+      "availableHoursStart": "09:00",
+      "availableHoursEnd": "17:00",
+      "addressType": "office"
+    }
+  ]
+  
+  
