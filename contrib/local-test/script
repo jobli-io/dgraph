@@ -1,0 +1,78 @@
+docker pull dgraph/dgraph:v22.0.2
+DGRAPH_VERSION=v22.0.2 make up
+curl localhost:8080/health | jq
+dgraph live --alpha localhost:9080 -f sample-dataset.json 
+
+Running transaction with dgraph endpoint: localhost:9080
+Found 1 data file(s) to process
+Processing data file "sample-dataset.json"
+Number of TXs run            : 1                                                                    
+Number of N-Quads processed  : 28
+Time spent                   : 409.062969ms
+N-Quads processed per second : 28
+
+curl -X POST localhost:8080/alter -d '{"drop_all": true}' | jq
+
+curl -H "Content-Type: application/dql" -X POST localhost:8080/query -d $'
+{
+  qPerson(func: has(firstName)) {
+    firstName 
+    lastName 
+    age 
+    dob
+    houseNumber
+    street
+    city
+    country
+    zip
+    digitalAddress
+    pobox
+    availableHoursStart
+    availableHoursEnd
+    addressType
+  }
+}' | jq
+
+{
+  "data": {
+    "qPerson": [
+      {
+        "firstName": "James",
+        "lastName": "Doe",
+        "age": 25,
+        "dob": "1996-01-01",
+        "houseNumber": "2-F",
+        "street": "Park Street",
+        "city": "Langsdown",
+        "country": "USA",
+        "zip": "234234",
+        "addressType": "residential"
+      },
+      {
+        "firstName": "James",
+        "lastName": "Doe",
+        "age": 25,
+        "dob": "1996-01-01",
+        "digitalAddress": "999-22-1.abc.com",
+        "addressType": "digital"
+      },
+      {
+        "firstName": "James",
+        "lastName": "Doe",
+        "age": 25,
+        "dob": "1996-01-01",
+        "street": "Park Street",
+        "city": "Langsdown",
+        "country": "USA",
+        "zip": "234234",
+        "pobox": "999-xyz",
+        "availableHoursStart": "09:00",
+        "availableHoursEnd": "17:00",
+        "addressType": "office"
+      }
+    ]
+  },
+}
+
+n.b.
+fix make up script makefile
