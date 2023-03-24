@@ -3,6 +3,10 @@ DGRAPH_VERSION=v22.0.2 make up
 curl localhost:8080/health | jq
 dgraph live --alpha localhost:9080 -f sample-dataset.json
 
+docker run -it --rm -v /home/joshua/Developer/dgraph/blog:/tmp dgraph/dgraph:v22.0.2 \
+  dgraph live --alpha localhost:9080 -f /tmp/sample-dataset.json
+
+
 Running transaction with dgraph endpoint: localhost:9080
 Found 1 data file(s) to process
 Processing data file "sample-dataset.json"
@@ -99,3 +103,6 @@ click schema, add types, and select relevant fields
 
 n.b.
 fix make up script makefile
+
+schema
+curl -H "Content-Type: application/dql" -X POST localhost:8080/query -d $'schema{}' | jq
