@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"sort"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -30,11 +29,11 @@ import (
 )
 
 func TestIncrementalRestore(t *testing.T) {
-	conf := dgraphtest.NewClusterConfig().WithNumAlphas(6).WithNumZeros(3).WithReplicas(3).WithACL(time.Hour)
-	c, err := dgraphtest.NewLocalCluster(conf)
-	require.NoError(t, err)
-	defer c.Cleanup()
-	c.Start()
+	// conf := dgraphtest.NewClusterConfig().WithNumAlphas(6).WithNumZeros(3).WithReplicas(3).WithACL(time.Hour)
+	c := dgraphtest.NewComposeCluster()
+	// require.NoError(t, err)
+	// defer c.Cleanup()
+	// c.Start()
 
 	uids := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
 	c.AssignUids(uint64(len(uids)))
@@ -47,7 +46,7 @@ func TestIncrementalRestore(t *testing.T) {
 			require.NoError(t, err)
 		}
 		t.Logf("taking backup #%v\n", i)
-		require.NoError(t, dgraphtest.Backup(c, i == 1, dgraphtest.DefaultBackupDir))
+		require.NoError(t, dgraphtest.Backup(c, i == 1, "backups"))
 	}
 
 	for i := 2; i <= len(uids); i += 2 {
@@ -57,7 +56,7 @@ func TestIncrementalRestore(t *testing.T) {
 		if i == 2 {
 			incrFrom = 0
 		}
-		require.NoError(t, dgraphtest.Restore(c, dgraphtest.DefaultBackupDir, "", incrFrom, i, ""))
+		require.NoError(t, dgraphtest.Restore(c, "backups", "", incrFrom, i, ""))
 		require.NoError(t, dgraphtest.WaitForRestore(c))
 
 		for j := 1; j <= i; j++ {

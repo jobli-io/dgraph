@@ -19,6 +19,7 @@
 package query
 
 import (
+	"log"
 	"testing"
 	"time"
 
@@ -27,36 +28,70 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	conf := dgraphtest.NewClusterConfig().WithNumAlphas(3).WithNumZeros(3).WithReplicas(3).
-		WithACL(20 * time.Second).WithEncryption().WithVersion("0c9f60156")
-	c, err := dgraphtest.NewLocalCluster(conf)
-	x.Panic(err)
-	defer c.Cleanup()
-	c.Start()
+	mutate := func(c dgraphtest.Cluster) {
+		dg, err := c.Client()
+		x.Panic(err)
 
-	// setup the global Cluster var
-	dc = c
-
-	// setup client
-	dg, err := c.Client()
-	if err != nil {
-		panic(err)
+		client = dg
+		dc = c
+		populateCluster()
 	}
-	client = dg
 
-	// do mutations
-	populateCluster()
+	query := func(c dgraphtest.Cluster) {
+		dg, err := c.Client()
+		x.Panic(err)
 
-	// upgrade
-	x.Panic(c.Upgrade("v23.0.0-beta1"))
-
-	// setup the client again
-	dg, err = c.Client()
-	if err != nil {
-		panic(err)
+		client = dg
+		dc = c
+		if m.Run() != 0 {
+			panic("tests failed")
+		}
 	}
-	client = dg
 
-	// Run tests
-	_ = m.Run()
+	runTest := func(before, after string) {
+		conf := dgraphtest.NewClusterConfig().WithNumAlphas(1).WithNumZeros(1).
+			WithReplicas(1).WithACL(time.Hour).WithVersion(before)
+		c, err := dgraphtest.NewLocalCluster(conf)
+		x.Panic(err)
+		defer c.Cleanup()
+		c.Start()
+
+		mutate(c)
+		x.Panic(c.Upgrade(after, dgraphtest.BackupRestore))
+		query(c)
+	}
+
+	comboVersions := []struct {
+		before, after string
+	}{
+		// {"v20.11.3", "v23.0.0-beta1"},
+		// {"v21.03.0", "v23.0.0-beta1"},
+		{"v21.03.0-92-g0c9f60156", "v23.0.0-beta1"},
+		// {"v21.03.0-96-g65fff46c4-slash", "v23.0.0-beta1"},
+		// {"v21.03.0-98-g19f71a78a-slash", "v23.0.0-beta1"},
+		// {"v21.03.0-99-g4a03c144a-slash", "v23.0.0-beta1"},
+		// {"v21.03.1", "v23.0.0-beta1"},
+		// {"v21.03.2", "v23.0.0-beta1"},
+		// {"v21.12.0", "v23.0.0-beta1"},
+		// {"v22.0.0", "v23.0.0-beta1"},
+		{"v22.0.1", "v23.0.0-beta1"},
+		// {"v22.0.2", "v23.0.0-beta1"},
+	}
+	for _, cv := range comboVersions {
+		log.Printf("running: backup in [%v], restore in [%v]", cv.before, cv.after)
+		runTest(cv.before, cv.after)
+	}
 }
+
+// userClient, err := testutil.DgraphClient("0.0.0.0:33196")
+// x.Panic(err)
+// x.Panic(userClient.LoginIntoNamespace(context.Background(), "groot", "password", 0))
+// client = userClient
+// m.Run()
+// setup schema
+
+// do mutations in namespace 0 -- 10
+
+// delete namespace 5 & 10
+
+// queries using two different users, one with access and one without
