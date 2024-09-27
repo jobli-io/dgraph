@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,7 +84,8 @@ var (
 		priorityKeys: make([]*pooledKeys, 2),
 	}
 
-	globalCache = &GlobalCache{items: make(map[string]*CachePL, 100)}
+	globalCache = newShardedMap()
+	numShards   = uint64(256)
 )
 
 func init() {
@@ -133,24 +133,19 @@ func (ir *incrRollupi) rollUpKey(writer *TxnWriter, key []byte) error {
 		return err
 	}
 
-	globalCache.Lock()
-	val, ok := globalCache.items[string(key)]
-	if ok {
-		val.list = nil
-	}
-	globalCache.Unlock()
+	globalCache.Del(z.MemHash(key))
 	// TODO Update cache with rolled up results
 	// If we do a rollup, we typically won't need to update the key in cache.
 	// The only caveat is that the key written by rollup would be written at +1
 	// timestamp, hence bumping the latest TS for the key by 1. The cache should
 	// understand that.
 	const N = uint64(1000)
-	if glog.*CachePL(2) {
+	if glog.V(2) {
 		if count := atomic.AddUint64(&ir.count, 1); count%N == 0 {
-			glog.*CachePL(2).Infof("Rolled up %d keys", count)
+			glog.V(2).Infof("Rolled up %d keys", count)
 		}
 	}
-	return writer.Write(&bpb.K*CachePLList{Kv: kvs})
+	return writer.Write(&bpb.KVList{Kv: kvs})
 }
 
 // TODO: When the opRollup is not running the keys from keysPool of ir are dropped. Figure out some
@@ -319,7 +314,7 @@ func (txn *Txn) CommitToDisk(writer *TxnWriter, commitTs uint64) error {
 				if len(data) == 0 {
 					continue
 				}
-				if ts := cache.max*CachePLersions[key]; ts >= commitTs {
+				if ts := cache.maxVersions[key]; ts >= commitTs {
 					// Skip write because we already have a write at a higher ts.
 					// Logging here can cause a lot of output when doing Raft log replay. So, let's
 					// not output anything here.
@@ -327,7 +322,7 @@ func (txn *Txn) CommitToDisk(writer *TxnWriter, commitTs uint64) error {
 				}
 				err := btxn.SetEntry(&badger.Entry{
 					Key:      []byte(key),
-					*CachePLalue:    data,
+					Value:    data,
 					UserMeta: BitDeltaPosting,
 				})
 				if err != nil {
@@ -344,9 +339,7 @@ func (txn *Txn) CommitToDisk(writer *TxnWriter, commitTs uint64) error {
 }
 
 func ResetCache() {
-	globalCache.Lock()
-	globalCache.items = make(map[string]*CachePL)
-	globalCache.Unlock()
+	globalCache.Clear()
 }
 
 type shardedMap struct {
@@ -355,7 +348,7 @@ type shardedMap struct {
 
 func newShardedMap() *shardedMap {
 	sm := &shardedMap{
-		shards: make([]*lockedMap, int(8)),
+		shards: make([]*lockedMap, int(numShards)),
 	}
 	for i := range sm.shards {
 		sm.shards[i] = newLockedMap()
@@ -367,20 +360,20 @@ func (sm *shardedMap) Get(key uint64) (*CachePL, bool) {
 	return sm.shards[key%numShards].Get(key)
 }
 
-func (sm *shardedMap[*CachePL]) Set(i *CachePL) {
+func (sm *shardedMap) Set(key uint64, i *CachePL) {
 	if i == nil {
 		// If item is nil make this Set a no-op.
 		return
 	}
 
-	sm.shards[i.getKey()%numShards].Set(i)
+	sm.shards[key%numShards].Set(i)
 }
 
-func (sm *shardedMap[*CachePL]) Del(key uint64) (uint64, *CachePL) {
-	return sm.shards[key%numShards].Del(key)
+func (sm *shardedMap) Del(key uint64) {
+	sm.shards[key%numShards].Del(key)
 }
 
-func (sm *shardedMap[*CachePL]) Clear() {
+func (sm *shardedMap) Clear() {
 	for i := uint64(0); i < numShards; i++ {
 		sm.shards[i].Clear()
 	}
@@ -391,13 +384,13 @@ type lockedMap struct {
 	data map[uint64]*CachePL
 }
 
-func newLockedMap() *lockedMap[*CachePL] {
-	return &lockedMap[*CachePL]{
-		data: make(map[uint64]storeItem[*CachePL]),
+func newLockedMap() *lockedMap {
+	return &lockedMap{
+		data: make(map[uint64]*CachePL),
 	}
 }
 
-func (m *lockedMap) Get(key, conflict uint64) (*CachePL, bool) {
+func (m *lockedMap) Get(key uint64) (*CachePL, bool) {
 	m.RLock()
 	defer m.RUnlock()
 	item, ok := m.data[key]
@@ -417,29 +410,22 @@ func (m *lockedMap) Set(i *CachePL) {
 
 func (m *lockedMap) Del(key uint64) {
 	m.Lock()
-	item, ok := m.data[key]
-	if !ok {
-		m.Unlock()
-	}
-
 	delete(m.data, key)
 	m.Unlock()
 }
 
-func (m *lockedMap) Clear(onEvict func(item *CachePL)) {
+func (m *lockedMap) Clear() {
 	m.Lock()
-	i := &Item[*CachePL]{}
-	m.data = make(map[uint64]storeItem[*CachePL])
+	m.data = make(map[uint64]*CachePL)
 	m.Unlock()
 }
 
 func (c *CachePL) getKey() uint64 {
 	if c.list == nil {
-	return 0
+		return 0
 	}
 
-
-
+	return z.MemHash(c.list.key)
 }
 
 func NewCachePL() *CachePL {
@@ -461,20 +447,18 @@ func (txn *Txn) UpdateCachedKeys(commitTs uint64) {
 		if !ShouldGoInCache(pk) {
 			continue
 		}
-		globalCache.Lock()
-		val, ok := globalCache.items[key]
+		keyHash := z.MemHash([]byte(key))
+		// TODO under the same lock
+		val, ok := globalCache.Get(keyHash)
 		if !ok {
 			val = NewCachePL()
 			val.lastUpdate = commitTs
-			globalCache.items[key] = val
+			globalCache.Set(keyHash, val)
+			continue
 		}
 		if commitTs != 0 {
 			// TODO Delete this if the values are too old in an async thread
 			val.lastUpdate = commitTs
-		}
-		if !ok {
-			globalCache.Unlock()
-			continue
 		}
 
 		val.count -= 1
@@ -484,7 +468,6 @@ func (txn *Txn) UpdateCachedKeys(commitTs uint64) {
 			x.Check(p.Unmarshal(delta))
 			val.list.setMutationAfterCommit(txn.StartTs, commitTs, delta)
 		}
-		globalCache.Unlock()
 	}
 }
 
@@ -494,7 +477,7 @@ func unmarshalOrCopy(plist *pb.PostingList, item *badger.Item) error {
 			hex.Dump(item.Key()))
 	}
 
-	return item.*CachePLalue(func(val []byte) error {
+	return item.Value(func(val []byte) error {
 		if len(val) == 0 {
 			// empty pl
 			return nil
@@ -543,12 +526,12 @@ func ReadPostingList(key []byte, it *badger.Iterator) (*List, error) {
 	}()
 
 	// Iterates from highest Ts to lowest Ts
-	for it.*CachePLalid() {
+	for it.Valid() {
 		item := it.Item()
 		if !bytes.Equal(item.Key(), l.key) {
 			break
 		}
-		l.maxTs = x.Max(l.maxTs, item.*CachePLersion())
+		l.maxTs = x.Max(l.maxTs, item.Version())
 		if item.IsDeletedOrExpired() {
 			// Don't consider any more versions.
 			break
@@ -556,28 +539,28 @@ func ReadPostingList(key []byte, it *badger.Iterator) (*List, error) {
 
 		switch item.UserMeta() {
 		case BitEmptyPosting:
-			l.minTs = item.*CachePLersion()
+			l.minTs = item.Version()
 			return l, nil
 		case BitCompletePosting:
 			if err := unmarshalOrCopy(l.plist, item); err != nil {
 				return nil, err
 			}
-			l.minTs = item.*CachePLersion()
+			l.minTs = item.Version()
 
 			// No need to do Next here. The outer loop can take care of skipping
 			// more versions of the same key.
 			return l, nil
 		case BitDeltaPosting:
-			err := item.*CachePLalue(func(val []byte) error {
+			err := item.Value(func(val []byte) error {
 				pl := &pb.PostingList{}
 				if err := pl.Unmarshal(val); err != nil {
 					return err
 				}
-				pl.CommitTs = item.*CachePLersion()
+				pl.CommitTs = item.Version()
 				for _, mpost := range pl.Postings {
 					// commitTs, startTs are meant to be only in memory, not
 					// stored on disk.
-					mpost.CommitTs = item.*CachePLersion()
+					mpost.CommitTs = item.Version()
 				}
 				if l.mutationMap == nil {
 					l.mutationMap = make(map[uint64]*pb.PostingList)
@@ -596,7 +579,7 @@ func ReadPostingList(key []byte, it *badger.Iterator) (*List, error) {
 			return nil, errors.Errorf(
 				"Unexpected meta: %d for key: %s", item.UserMeta(), hex.Dump(key))
 		}
-		if item.DiscardEarlier*CachePLersions() {
+		if item.DiscardEarlierVersions() {
 			break
 		}
 		it.Next()
@@ -627,7 +610,7 @@ func (c *CachePL) Set(l *List, readTs uint64) {
 }
 
 func ShouldGoInCache(pk x.ParsedKey) bool {
-	return (!pk.IsData() && strings.HasSuffix(pk.Attr, "dgraph.type"))
+	return true
 }
 
 func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
@@ -636,13 +619,14 @@ func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
 	}
 
 	pk, _ := x.Parse(key)
+	keyHash := z.MemHash(key)
 
 	if ShouldGoInCache(pk) {
-		globalCache.Lock()
-		cacheItem, ok := globalCache.items[string(key)]
+		cacheItem, ok := globalCache.Get(keyHash)
 		if !ok {
 			cacheItem = NewCachePL()
-			globalCache.items[string(key)] = cacheItem
+			// TODO see if this is reuqired
+			globalCache.Set(keyHash, cacheItem)
 		}
 		cacheItem.count += 1
 
@@ -654,11 +638,9 @@ func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
 				cacheItem.list.RLock()
 				lCopy := copyList(cacheItem.list)
 				cacheItem.list.RUnlock()
-				globalCache.Unlock()
 				return lCopy, nil
 			}
 		}
-		globalCache.Unlock()
 	}
 
 	txn := pstore.NewTransactionAt(readTs, false)
@@ -681,20 +663,19 @@ func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
 	// the latest version of the PL. We also check that we're reading a version
 	// from Badger, which is higher than the write registered by the cache.
 	if ShouldGoInCache(pk) {
-		globalCache.Lock()
 		l.RLock()
-		cacheItem, ok := globalCache.items[string(key)]
+		// TODO fix Get and Set to be under one lock
+		cacheItem, ok := globalCache.Get(keyHash)
 		if !ok {
 			cacheItemNew := NewCachePL()
 			cacheItemNew.count = 1
 			cacheItemNew.list = copyList(l)
 			cacheItemNew.lastUpdate = l.maxTs
-			globalCache.items[string(key)] = cacheItemNew
+			globalCache.Set(keyHash, cacheItemNew)
 		} else {
 			cacheItem.Set(copyList(l), readTs)
 		}
 		l.RUnlock()
-		globalCache.Unlock()
 	}
 
 	return l, nil
