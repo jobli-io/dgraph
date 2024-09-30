@@ -626,7 +626,7 @@ func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
 		if !ok {
 			cacheItem = NewCachePL()
 			// TODO see if this is reuqired
-			globalCache.Set(keyHash, cacheItem)
+			//globalCache.Set(keyHash, cacheItem)
 		}
 		cacheItem.count += 1
 
@@ -662,7 +662,7 @@ func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
 	// Only set l to the cache if readTs >= latestTs, which implies that l is
 	// the latest version of the PL. We also check that we're reading a version
 	// from Badger, which is higher than the write registered by the cache.
-	if ShouldGoInCache(pk) {
+	if ShouldGoInCache(pk) && l != nil {
 		l.RLock()
 		// TODO fix Get and Set to be under one lock
 		cacheItem, ok := globalCache.Get(keyHash)
