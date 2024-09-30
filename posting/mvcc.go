@@ -1,7 +1,7 @@
 /*
  * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
  *
- * Licensed under the Apache License, *CachePLersion 2.0 (the "License");
+ * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
@@ -366,7 +366,7 @@ func (sm *shardedMap) Set(key uint64, i *CachePL) {
 		return
 	}
 
-	sm.shards[key%numShards].Set(i)
+	sm.shards[key%numShards].Set(key, i)
 }
 
 func (sm *shardedMap) Del(key uint64) {
@@ -397,7 +397,7 @@ func (m *lockedMap) Get(key uint64) (*CachePL, bool) {
 	return item, ok
 }
 
-func (m *lockedMap) Set(i *CachePL) {
+func (m *lockedMap) Set(key uint64, i *CachePL) {
 	if i == nil {
 		// If the item is nil make this Set a no-op.
 		return
@@ -405,7 +405,7 @@ func (m *lockedMap) Set(i *CachePL) {
 
 	m.Lock()
 	defer m.Unlock()
-	m.data[i.getKey()] = i
+	m.data[key] = i
 }
 
 func (m *lockedMap) Del(key uint64) {
@@ -626,7 +626,7 @@ func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
 		if !ok {
 			cacheItem = NewCachePL()
 			// TODO see if this is reuqired
-			//globalCache.Set(keyHash, cacheItem)
+			globalCache.Set(keyHash, cacheItem)
 		}
 		cacheItem.count += 1
 
@@ -662,7 +662,7 @@ func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
 	// Only set l to the cache if readTs >= latestTs, which implies that l is
 	// the latest version of the PL. We also check that we're reading a version
 	// from Badger, which is higher than the write registered by the cache.
-	if ShouldGoInCache(pk) && l != nil {
+	if ShouldGoInCache(pk) {
 		l.RLock()
 		// TODO fix Get and Set to be under one lock
 		cacheItem, ok := globalCache.Get(keyHash)

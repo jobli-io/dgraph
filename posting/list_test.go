@@ -530,9 +530,8 @@ func TestReadSingleValue(t *testing.T) {
 		edge := &pb.DirectedEdge{
 			Value: []byte("ho hey there" + strconv.Itoa(i)),
 		}
-		txn := NewTxn(uint64(i))
-		txn.cache.plists[string(key)] = ol
-		addMutationHelper(t, ol, edge, Set, txn)
+		txn := Txn{StartTs: uint64(i)}
+		addMutationHelper(t, ol, edge, Set, &txn)
 		require.NoError(t, ol.commitMutation(uint64(i), uint64(i)+1))
 		kData := ol.getMutation(uint64(i))
 		writer := NewTxnWriter(pstore)
@@ -540,14 +539,13 @@ func TestReadSingleValue(t *testing.T) {
 			require.NoError(t, err)
 		}
 		writer.Flush()
-		txn.Update()
-		txn.UpdateCachedKeys(uint64(i) + 1)
 
 		if i%10 == 0 {
 			// Do frequent rollups, and store data in old timestamp
 			kvs, err := ol.Rollup(nil, txn.StartTs-3)
 			require.NoError(t, err)
 			require.NoError(t, writePostingListToDisk(kvs))
+			// Delete item from global cache before reading, as we are not updating the cache in the test
 			globalCache.Del(z.MemHash(key))
 			ol, err = getNew(key, ps, math.MaxUint64)
 			require.NoError(t, err)

@@ -127,17 +127,26 @@ func BenchmarkTestCache(b *testing.B) {
 		l, _ := GetNoStore(x.DataKey(attr, i), 1)
 		// No index entries added here as we do not call AddMutationWithIndex.
 		txn.cache.SetIfAbsent(string(l.key), l)
-		l.addMutation(context.Background(), txn, edge)
+		err := l.addMutation(context.Background(), txn, edge)
+		if err != nil {
+			panic(err)
+		}
 	}
 	txn.Update()
 	writer := NewTxnWriter(pstore)
-	txn.CommitToDisk(writer, 2)
+	err := txn.CommitToDisk(writer, 2)
+	if err != nil {
+		panic(err)
+	}
 	writer.Flush()
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			key := keys[rand.Intn(int(N)-1)]
-			getNew(key, pstore, math.MaxUint64)
+			_, err = getNew(key, pstore, math.MaxUint64)
+			if err != nil {
+				panic(err)
+			}
 		}
 	})
 
@@ -199,6 +208,8 @@ func TestPostingListRead(t *testing.T) {
 	writer := NewTxnWriter(pstore)
 	require.NoError(t, writer.SetAt(key, []byte{}, BitEmptyPosting, 6))
 	require.NoError(t, writer.Flush())
+	// Delete the key from cache as we have just updated it
+	globalCache.Del(z.MemHash(key))
 	assertLength(7, 0)
 
 	addEdgeToUID(t, attr, 1, 4, 7, 8)
@@ -211,6 +222,7 @@ func TestPostingListRead(t *testing.T) {
 	writer = NewTxnWriter(pstore)
 	require.NoError(t, writer.SetAt(key, data, BitCompletePosting, 10))
 	require.NoError(t, writer.Flush())
+	globalCache.Del(z.MemHash(key))
 	assertLength(10, 0)
 
 	addEdgeToUID(t, attr, 1, 5, 11, 12)
