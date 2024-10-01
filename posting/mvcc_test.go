@@ -19,7 +19,6 @@ package posting
 import (
 	"context"
 	"math"
-	"math/rand"
 	"testing"
 	"time"
 
@@ -96,60 +95,6 @@ func TestCacheAfterDeltaUpdateRecieved(t *testing.T) {
 	l1, err := GetNoStore(key, 20)
 	require.NoError(t, err)
 	require.Equal(t, len(l1.mutationMap), 1)
-}
-
-func BenchmarkTestCache(b *testing.B) {
-	//lCache, _ = ristretto.NewCache[[]byte, *List](&ristretto.Config[[]byte, *List]{
-	//	// Use 5% of cache memory for storing counters.
-	//	NumCounters: int64(1000 * (1 << 20) * 0.05 * 2),
-	//	MaxCost:     int64(1000 * (1 << 20) * 0.95),
-	//	BufferItems: 64,
-	//	Metrics:     true,
-	//	Cost: func(val *List) int64 {
-	//		return 0
-	//	},
-	//})
-
-	attr := x.GalaxyAttr("cache")
-	keys := make([][]byte, 0)
-	N := 500
-	txn := Oracle().RegisterStartTs(1)
-
-	for i := 1; i < N; i++ {
-		key := x.DataKey(attr, uint64(i))
-		keys = append(keys, key)
-		edge := &pb.DirectedEdge{
-			ValueId: 2,
-			Attr:    attr,
-			Entity:  1,
-			Op:      pb.DirectedEdge_SET,
-		}
-		l, _ := GetNoStore(key, 1)
-		// No index entries added here as we do not call AddMutationWithIndex.
-		txn.cache.SetIfAbsent(string(l.key), l)
-		err := l.addMutation(context.Background(), txn, edge)
-		if err != nil {
-			panic(err)
-		}
-	}
-	txn.Update()
-	writer := NewTxnWriter(pstore)
-	err := txn.CommitToDisk(writer, 2)
-	if err != nil {
-		panic(err)
-	}
-	writer.Flush()
-
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			key := keys[rand.Intn(N-1)]
-			_, err = getNew(key, pstore, math.MaxUint64)
-			if err != nil {
-				panic(err)
-			}
-		}
-	})
-
 }
 
 func TestRollupTimestamp(t *testing.T) {
