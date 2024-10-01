@@ -85,7 +85,7 @@ var (
 	}
 
 	globalCache = newShardedMap()
-	numShards   = uint64(256)
+	numShards   = 256
 )
 
 func init() {
@@ -348,7 +348,7 @@ type shardedMap struct {
 
 func newShardedMap() *shardedMap {
 	sm := &shardedMap{
-		shards: make([]*lockedMap, int(numShards)),
+		shards: make([]*lockedMap, numShards),
 	}
 	for i := range sm.shards {
 		sm.shards[i] = newLockedMap()
@@ -357,7 +357,7 @@ func newShardedMap() *shardedMap {
 }
 
 func (sm *shardedMap) Get(key uint64) (*CachePL, bool) {
-	return sm.shards[key%numShards].Get(key)
+	return sm.shards[key%uint64(numShards)].Get(key)
 }
 
 func (sm *shardedMap) Set(key uint64, i *CachePL) {
@@ -366,15 +366,15 @@ func (sm *shardedMap) Set(key uint64, i *CachePL) {
 		return
 	}
 
-	sm.shards[key%numShards].Set(key, i)
+	sm.shards[key%uint64(numShards)].Set(key, i)
 }
 
 func (sm *shardedMap) Del(key uint64) {
-	sm.shards[key%numShards].Del(key)
+	sm.shards[key%uint64(numShards)].Del(key)
 }
 
 func (sm *shardedMap) Clear() {
-	for i := uint64(0); i < numShards; i++ {
+	for i := 0; i < numShards; i++ {
 		sm.shards[i].Clear()
 	}
 }
@@ -418,14 +418,6 @@ func (m *lockedMap) Clear() {
 	m.Lock()
 	m.data = make(map[uint64]*CachePL)
 	m.Unlock()
-}
-
-func (c *CachePL) getKey() uint64 {
-	if c.list == nil {
-		return 0
-	}
-
-	return z.MemHash(c.list.key)
 }
 
 func NewCachePL() *CachePL {

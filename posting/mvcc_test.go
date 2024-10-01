@@ -112,11 +112,11 @@ func BenchmarkTestCache(b *testing.B) {
 
 	attr := x.GalaxyAttr("cache")
 	keys := make([][]byte, 0)
-	N := uint64(500)
+	N := 500
 	txn := Oracle().RegisterStartTs(1)
 
-	for i := uint64(1); i < N; i++ {
-		key := x.DataKey(attr, i)
+	for i := 1; i < N; i++ {
+		key := x.DataKey(attr, uint64(i))
 		keys = append(keys, key)
 		edge := &pb.DirectedEdge{
 			ValueId: 2,
@@ -124,7 +124,7 @@ func BenchmarkTestCache(b *testing.B) {
 			Entity:  1,
 			Op:      pb.DirectedEdge_SET,
 		}
-		l, _ := GetNoStore(x.DataKey(attr, i), 1)
+		l, _ := GetNoStore(key, 1)
 		// No index entries added here as we do not call AddMutationWithIndex.
 		txn.cache.SetIfAbsent(string(l.key), l)
 		err := l.addMutation(context.Background(), txn, edge)
@@ -142,7 +142,7 @@ func BenchmarkTestCache(b *testing.B) {
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			key := keys[rand.Intn(int(N)-1)]
+			key := keys[rand.Intn(N-1)]
 			_, err = getNew(key, pstore, math.MaxUint64)
 			if err != nil {
 				panic(err)
