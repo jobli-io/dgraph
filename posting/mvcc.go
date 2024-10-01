@@ -646,7 +646,7 @@ func (c *CachePL) Set(l *List, readTs uint64) {
 }
 
 func ShouldGoInCache(pk x.ParsedKey) bool {
-	return true
+	return !pk.IsData()
 }
 
 func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
