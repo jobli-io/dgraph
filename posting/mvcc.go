@@ -360,6 +360,19 @@ func (sm *shardedMap) Get(key uint64) (*CachePL, bool) {
 	return sm.shards[key%uint64(numShards)].Get(key)
 }
 
+func (sm *shardedMap) get(key uint64) (*CachePL, bool) {
+	return sm.shards[key%uint64(numShards)].get(key)
+}
+
+func (sm *shardedMap) set(key uint64, i *CachePL) {
+	if i == nil {
+		// If item is nil make this Set a no-op.
+		return
+	}
+
+	sm.shards[key%uint64(numShards)].set(key, i)
+}
+
 func (sm *shardedMap) Set(key uint64, i *CachePL) {
 	if i == nil {
 		// If item is nil make this Set a no-op.
@@ -371,6 +384,22 @@ func (sm *shardedMap) Set(key uint64, i *CachePL) {
 
 func (sm *shardedMap) Del(key uint64) {
 	sm.shards[key%uint64(numShards)].Del(key)
+}
+
+func (sm *shardedMap) UnlockKey(key uint64) {
+	sm.shards[key%uint64(numShards)].Unlock()
+}
+
+func (sm *shardedMap) LockKey(key uint64) {
+	sm.shards[key%uint64(numShards)].Lock()
+}
+
+func (sm *shardedMap) RLockKey(key uint64) {
+	sm.shards[key%uint64(numShards)].RLock()
+}
+
+func (sm *shardedMap) RUnlockKey(key uint64) {
+	sm.shards[key%uint64(numShards)].RUnlock()
 }
 
 func (sm *shardedMap) Clear() {
@@ -390,6 +419,11 @@ func newLockedMap() *lockedMap {
 	}
 }
 
+func (m *lockedMap) get(key uint64) (*CachePL, bool) {
+	item, ok := m.data[key]
+	return item, ok
+}
+
 func (m *lockedMap) Get(key uint64) (*CachePL, bool) {
 	m.RLock()
 	defer m.RUnlock()
@@ -397,15 +431,19 @@ func (m *lockedMap) Get(key uint64) (*CachePL, bool) {
 	return item, ok
 }
 
-func (m *lockedMap) Set(key uint64, i *CachePL) {
+func (m *lockedMap) set(key uint64, i *CachePL) {
 	if i == nil {
 		// If the item is nil make this Set a no-op.
 		return
 	}
 
+	m.data[key] = i
+}
+
+func (m *lockedMap) Set(key uint64, i *CachePL) {
 	m.Lock()
 	defer m.Unlock()
-	m.data[key] = i
+	m.set(key, i)
 }
 
 func (m *lockedMap) Del(key uint64) {
@@ -441,11 +479,13 @@ func (txn *Txn) UpdateCachedKeys(commitTs uint64) {
 		}
 		keyHash := z.MemHash([]byte(key))
 		// TODO under the same lock
-		val, ok := globalCache.Get(keyHash)
+		globalCache.LockKey(keyHash)
+		val, ok := globalCache.get(keyHash)
 		if !ok {
 			val = NewCachePL()
 			val.lastUpdate = commitTs
-			globalCache.Set(keyHash, val)
+			globalCache.set(keyHash, val)
+			globalCache.UnlockKey(keyHash)
 			continue
 		}
 		if commitTs != 0 {
@@ -460,6 +500,7 @@ func (txn *Txn) UpdateCachedKeys(commitTs uint64) {
 			x.Check(p.Unmarshal(delta))
 			val.list.setMutationAfterCommit(txn.StartTs, commitTs, delta)
 		}
+		globalCache.UnlockKey(keyHash)
 	}
 }
 
@@ -655,19 +696,21 @@ func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
 	// the latest version of the PL. We also check that we're reading a version
 	// from Badger, which is higher than the write registered by the cache.
 	if ShouldGoInCache(pk) {
+		globalCache.LockKey(keyHash)
 		l.RLock()
 		// TODO fix Get and Set to be under one lock
-		cacheItem, ok := globalCache.Get(keyHash)
+		cacheItem, ok := globalCache.get(keyHash)
 		if !ok {
 			cacheItemNew := NewCachePL()
 			cacheItemNew.count = 1
 			cacheItemNew.list = copyList(l)
 			cacheItemNew.lastUpdate = l.maxTs
-			globalCache.Set(keyHash, cacheItemNew)
+			globalCache.set(keyHash, cacheItemNew)
 		} else {
 			cacheItem.Set(copyList(l), readTs)
 		}
 		l.RUnlock()
+		globalCache.UnlockKey(keyHash)
 	}
 
 	return l, nil
