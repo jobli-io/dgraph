@@ -485,12 +485,15 @@ func (txn *Txn) UpdateCachedKeys(commitTs uint64) {
 			val = NewCachePL()
 			val.lastUpdate = commitTs
 			globalCache.set(keyHash, val)
-			globalCache.UnlockKey(keyHash)
-			continue
 		}
 		if commitTs != 0 {
 			// TODO Delete this if the values are too old in an async thread
 			val.lastUpdate = commitTs
+		}
+
+		if !ok {
+			globalCache.UnlockKey(keyHash)
+			continue
 		}
 
 		val.count -= 1
