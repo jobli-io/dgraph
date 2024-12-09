@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bits-and-blooms/bitset"
 	c "github.com/dgraph-io/dgraph/v24/tok/constraints"
 	"github.com/dgraph-io/dgraph/v24/tok/index"
 	opt "github.com/dgraph-io/dgraph/v24/tok/options"
@@ -45,7 +44,6 @@ type persistentHNSW[T c.Float] struct {
 	// nodeAllEdges[65443][1][3] indicates the 3rd neighbor in the first
 	// layer for uuid 65443. The result will be a neighboring uuid.
 	nodeAllEdges map[uint64][][]uint64
-	visitedUids  bitset.BitSet
 	deadNodes    map[uint64]struct{}
 }
 
@@ -215,9 +213,6 @@ func (ph *persistentHNSW[T]) searchPersistentLayer(
 		var eVec []T
 		improved := false
 		for _, currUid := range allLayerEdges[level] {
-			if ph.visitedUids.Test(uint(currUid)) {
-				continue
-			}
 			if r.indexVisited(currUid) {
 				continue
 			}
@@ -238,7 +233,6 @@ func (ph *persistentHNSW[T]) searchPersistentLayer(
 				currDist, currUid, filteredOut)
 			r.addToVisited(*currElement)
 			r.incrementDistanceComputations()
-			ph.visitedUids.Set(uint(currUid))
 
 			// If we have not yet found k candidates, we can consider
 			// any candidate. Otherwise, only consider those that
@@ -345,8 +339,8 @@ func (ph *persistentHNSW[T]) PickStartNode(
 
 	entry := BytesToUint64(data.([]byte))
 	err = ph.getVecFromUid(entry, c, startVec)
-	if err != nil {
-		fmt.Println(err)
+	if err != nil && !strings.Contains(err.Error(), "Nil vector returned") {
+		return 0, err
 	}
 
 	if len(*startVec) == 0 {
@@ -366,8 +360,6 @@ func (ph *persistentHNSW[T]) SearchWithPath(
 	start := time.Now().UnixMilli()
 	r = index.NewSearchPathResult()
 
-	ph.visitedUids.ClearAll()
-
 	// 0-profile_vector_entry
 	var startVec []T
 	entry, err := ph.PickStartNode(ctx, c, &startVec)
@@ -377,7 +369,7 @@ func (ph *persistentHNSW[T]) SearchWithPath(
 
 	// Calculates best entry for last level (maxLevels-1) by searching each
 	// layer and using new best entry.
-	for level := 0; level < ph.maxLevels-1; level++ {
+	for level := range ph.maxLevels - 1 {
 		if isEqual(startVec, query) {
 			break
 		}
@@ -451,9 +443,7 @@ func (ph *persistentHNSW[T]) insertHelper(ctx context.Context, tc *TxnCache,
 	inLevel := getInsertLayer(ph.maxLevels) // calculate layer to insert node at (randomized every time)
 	var layerErr error
 
-	ph.visitedUids.ClearAll()
-
-	for level := 0; level < inLevel; level++ {
+	for level := range inLevel {
 		// perform insertion for layers [level, max_level) only, when level < inLevel just find better start
 		err := ph.getVecFromUid(entry, tc, &startVec)
 		if err != nil {
@@ -490,7 +480,7 @@ func (ph *persistentHNSW[T]) insertHelper(ctx context.Context, tc *TxnCache,
 		entry = layerResult.bestNeighbor().index
 
 		nns := layerResult.neighbors
-		for i := 0; i < len(nns); i++ {
+		for i := range nns {
 			nnUidArray = append(nnUidArray, nns[i].index)
 			if inboundEdgesAllLayersMap[nns[i].index] == nil {
 				inboundEdgesAllLayersMap[nns[i].index] = make([][]uint64, ph.maxLevels)
@@ -504,7 +494,7 @@ func (ph *persistentHNSW[T]) insertHelper(ctx context.Context, tc *TxnCache,
 		}
 	}
 	edge, err := ph.addNeighbors(ctx, tc, inUuid, outboundEdgesAllLayers)
-	for i := 0; i < len(nnUidArray); i++ {
+	for i := range nnUidArray {
 		edge, err := ph.addNeighbors(
 			ctx, tc, nnUidArray[i], inboundEdgesAllLayersMap[nnUidArray[i]])
 		if err != nil {

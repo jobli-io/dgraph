@@ -48,7 +48,7 @@ import (
 
 	"github.com/dgraph-io/dgraph/v24/testutil"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 var (
@@ -969,7 +969,7 @@ func run() error {
 	closer := z.NewCloser(N)
 	testCh := make(chan task)
 	errCh := make(chan error, 1000)
-	for i := 0; i < N; i++ {
+	for range N {
 		go func() {
 			if err := runTests(testCh, closer); err != nil {
 				errCh <- err

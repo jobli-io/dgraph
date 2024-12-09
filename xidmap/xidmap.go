@@ -36,7 +36,7 @@ import (
 	"github.com/dgraph-io/dgo/v240"
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 var maxLeaseRegex = regexp.MustCompile(`currMax:([0-9]+)`)
@@ -116,7 +116,7 @@ func New(opts XidMapOptions) *XidMap {
 		// If DB is provided, let's load up all the xid -> uid mappings in memory.
 		xm.writer = opts.DB.NewWriteBatch()
 
-		for i := 0; i < 16; i++ {
+		for range 16 {
 			xm.wg.Add(1)
 			go xm.dbWriter()
 		}

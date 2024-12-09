@@ -34,6 +34,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/minio/minio-go/v6"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	bpb "github.com/dgraph-io/badger/v4/pb"
@@ -44,7 +45,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/types"
 	"github.com/dgraph-io/dgraph/v24/types/facets"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 // DefaultExportFormat stores the name of the default format for exports.
@@ -549,6 +550,14 @@ func (r *remoteExportStorage) OpenFile(fileName string) (*ExportWriter, error) {
 }
 
 func (r *remoteExportStorage) FinishWriting(w *Writers) (ExportedFiles, error) {
+
+	defer func() {
+		glog.Infof("Deleting temporary export directory %s\n", r.les.destination)
+		if err := os.RemoveAll(r.les.destination); err != nil {
+			glog.Errorf("error deleting temporary export directory: %w", err)
+		}
+	}()
+
 	files, err := r.les.FinishWriting(w)
 	if err != nil {
 		return nil, err
@@ -845,7 +854,7 @@ func exportInternal(ctx context.Context, in *pb.ExportRequest, db *badger.DB,
 		kv := &bpb.KV{}
 		return buf.SliceIterate(func(s []byte) error {
 			kv.Reset()
-			if err := kv.Unmarshal(s); err != nil {
+			if err := proto.Unmarshal(s, kv); err != nil {
 				return err
 			}
 			return WriteExport(writers, kv, in.Format)
@@ -949,7 +958,7 @@ func SchemaExportKv(attr string, val []byte, skipZero bool) (*bpb.KV, error) {
 	}
 
 	var update pb.SchemaUpdate
-	if err := update.Unmarshal(val); err != nil {
+	if err := proto.Unmarshal(val, &update); err != nil {
 		return nil, err
 	}
 	return toSchema(attr, &update), nil
@@ -957,7 +966,7 @@ func SchemaExportKv(attr string, val []byte, skipZero bool) (*bpb.KV, error) {
 
 func TypeExportKv(attr string, val []byte) (*bpb.KV, error) {
 	var update pb.TypeUpdate
-	if err := update.Unmarshal(val); err != nil {
+	if err := proto.Unmarshal(val, &update); err != nil {
 		return nil, err
 	}
 	return toType(attr, update), nil
@@ -1048,7 +1057,7 @@ func ExportOverNetwork(ctx context.Context, input *pb.ExportRequest) (ExportedFi
 	}
 
 	var allFiles ExportedFiles
-	for i := 0; i < len(gids); i++ {
+	for range gids {
 		pair := <-ch
 		if pair.error != nil {
 			rerr := errors.Wrapf(pair.error, "Export failed at readTs %d", readTs)

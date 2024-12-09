@@ -38,6 +38,7 @@ import (
 	"go.opencensus.io/tag"
 	otrace "go.opencensus.io/trace"
 	"golang.org/x/net/trace"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	bpb "github.com/dgraph-io/badger/v4/pb"
@@ -48,7 +49,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/schema"
 	"github.com/dgraph-io/dgraph/v24/types"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 type operation struct {
@@ -309,7 +310,7 @@ func (n *node) applyConfChange(e raftpb.Entry) {
 		n.DeletePeer(cc.NodeID)
 	} else if len(cc.Context) > 0 {
 		var rc pb.RaftContext
-		x.Check(rc.Unmarshal(cc.Context))
+		x.Check(proto.Unmarshal(cc.Context, &rc))
 		n.Connect(rc.Id, rc.Addr)
 	}
 
@@ -387,7 +388,7 @@ func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr 
 		// Propose initial types as well after a drop all as they would have been cleared.
 		initialTypes := schema.InitialTypes(x.GalaxyNamespace)
 		for _, t := range initialTypes {
-			if err := updateType(t.GetTypeName(), *t, 1); err != nil {
+			if err := updateType(t.GetTypeName(), t, 1); err != nil {
 				return err
 			}
 		}
@@ -494,8 +495,6 @@ func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr 
 	// It is possible that the user gives us multiple versions of the same edge, one with no facets
 	// and another with facets. In that case, use stable sort to maintain the ordering given to us
 	// by the user.
-	// TODO: Do this in a way, where we don't break multiple updates for the same Edge across
-	// different goroutines.
 	sort.SliceStable(m.Edges, func(i, j int) bool {
 		ei := m.Edges[i]
 		ej := m.Edges[j]
@@ -538,22 +537,43 @@ func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr 
 	if numGo == 1 {
 		return process(m.Edges)
 	}
+
+	// We need to create batches such that no two batches contains the same entry (<Entity> + <Predicate>)
+	// combination. We have already sorted the edges, all we need to do is increase the batch size until we reach
+	// the next different entry. New number of chans would ne less than NumGo. So we can create the chan with
+	// numGo.
+	sameAttrAndUid := func(i, j int) bool {
+		ei := m.Edges[i]
+		ej := m.Edges[j]
+		if ei.GetAttr() != ej.GetAttr() {
+			return false
+		}
+		return ei.GetEntity() == ej.GetEntity()
+	}
+	numChanCreated := 0
+
 	errCh := make(chan error, numGo)
-	for i := 0; i < numGo; i++ {
-		start := i * width
-		end := start + width
+	for i := 0; i < len(m.Edges); {
+		end := i + width
 		if end > len(m.Edges) {
 			end = len(m.Edges)
 		}
+
+		for end < len(m.Edges) && sameAttrAndUid(end, end-1) {
+			end++
+		}
+
+		numChanCreated += 1
 		go func(start, end int) {
 			errCh <- process(m.Edges[start:end])
-		}(start, end)
+		}(i, end)
+		i = end
 	}
 	// Earlier we were returning after even if one thread had an error. We should wait for
 	// all the transactions to finish. We call txn.Update() when this function exists. This could cause
 	// a deadlock with runMutation.
 	var errs error
-	for i := 0; i < numGo; i++ {
+	for range numChanCreated {
 		if err := <-errCh; err != nil {
 			if errs == nil {
 				errs = errors.New("Got error while running mutation")
@@ -649,7 +669,7 @@ func (n *node) applyCommitted(proposal *pb.Proposal, key uint64) error {
 		n.elog.Printf("Creating snapshot: %+v", snap)
 		glog.Infof("Creating snapshot at Index: %d, ReadTs: %d\n", snap.Index, snap.ReadTs)
 
-		data, err := snap.Marshal()
+		data, err := proto.Marshal(snap)
 		x.Check(err)
 		for {
 			// We should never let CreateSnapshot have an error.
@@ -763,7 +783,7 @@ func (n *node) processApplyCh() {
 
 			var proposal pb.Proposal
 			key := binary.BigEndian.Uint64(entry.Data[:8])
-			x.Check(proposal.Unmarshal(entry.Data[8:]))
+			x.Check(proto.Unmarshal(entry.Data[8:], &proposal))
 			proposal.Index = entry.Index
 			updateStartTs(&proposal)
 
@@ -921,13 +941,13 @@ func (n *node) Snapshot() (*pb.Snapshot, error) {
 		return nil, err
 	}
 	res := &pb.Snapshot{}
-	if err := res.Unmarshal(snap.Data); err != nil {
+	if err := proto.Unmarshal(snap.Data, res); err != nil {
 		return nil, err
 	}
 	return res, nil
 }
 
-func (n *node) retrieveSnapshot(snap pb.Snapshot) error {
+func (n *node) retrieveSnapshot(snap *pb.Snapshot) error {
 	closer, err := n.startTask(opSnapshot)
 	if err != nil {
 		return err
@@ -986,10 +1006,10 @@ func (n *node) proposeCDCState(ts uint64) error {
 		},
 	}
 	glog.V(2).Infof("Proposing new CDC state ts: %d\n", ts)
-	data := make([]byte, 8+proposal.Size())
-	sz, err := proposal.MarshalToSizedBuffer(data[8:])
+	sz := proto.Size(proposal)
+	data := make([]byte, 8+sz)
+	x.Check2(x.MarshalToSizedBuffer(data[8:], proposal))
 	data = data[:8+sz]
-	x.Check(err)
 	return n.Raft().Propose(n.ctx, data)
 }
 
@@ -1018,10 +1038,10 @@ func (n *node) proposeSnapshot() error {
 		Snapshot: snap,
 	}
 	glog.V(2).Infof("Proposing snapshot: %+v\n", snap)
-	data := make([]byte, 8+proposal.Size())
-	sz, err := proposal.MarshalToSizedBuffer(data[8:])
+	sz := proto.Size(proposal)
+	data := make([]byte, 8+sz)
+	x.Check2(x.MarshalToSizedBuffer(data[8:], proposal))
 	data = data[:8+sz]
-	x.Check(err)
 	return n.Raft().Propose(n.ctx, data)
 }
 
@@ -1291,8 +1311,8 @@ func (n *node) Run() {
 				// We don't send snapshots to other nodes. But, if we get one, that means
 				// either the leader is trying to bring us up to state; or this is the
 				// snapshot that I created. Only the former case should be handled.
-				var snap pb.Snapshot
-				x.Check(snap.Unmarshal(rd.Snapshot.Data))
+				snap := &pb.Snapshot{}
+				x.Check(proto.Unmarshal(rd.Snapshot.Data, snap))
 				rc := snap.GetContext()
 				x.AssertTrue(rc.GetGroup() == n.gid)
 				if rc.Id != n.Id {
@@ -1660,9 +1680,9 @@ func (n *node) calculateSnapshot(startIdx, lastIdx, minPendingStart uint64) (*pb
 	if err != nil {
 		return nil, err
 	}
-	var snap pb.Snapshot
+	snap := &pb.Snapshot{}
 	if len(rsnap.Data) > 0 {
-		if err := snap.Unmarshal(rsnap.Data); err != nil {
+		if err := proto.Unmarshal(rsnap.Data, snap); err != nil {
 			return nil, err
 		}
 	}
@@ -1709,7 +1729,7 @@ func (n *node) calculateSnapshot(startIdx, lastIdx, minPendingStart uint64) (*pb
 				continue
 			}
 			var proposal pb.Proposal
-			if err := proposal.Unmarshal(entry.Data[8:]); err != nil {
+			if err := proto.Unmarshal(entry.Data[8:], &proposal); err != nil {
 				span.Annotatef(nil, "Error: %v", err)
 				return nil, err
 			}

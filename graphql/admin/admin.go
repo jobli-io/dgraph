@@ -25,6 +25,7 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
 
 	badgerpb "github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/dgraph/v24/edgraph"
@@ -34,7 +35,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/query"
 	"github.com/dgraph-io/dgraph/v24/worker"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 const (
@@ -667,7 +668,7 @@ func newAdminResolver(
 
 		// Unmarshal the incoming posting list.
 		pl := &pb.PostingList{}
-		err := pl.Unmarshal(kv.GetValue())
+		err := proto.Unmarshal(kv.GetValue(), pl)
 		if err != nil {
 			glog.Errorf("Unable to unmarshal the posting list for graphql schema update %s", err)
 			return

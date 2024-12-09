@@ -28,10 +28,11 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 func getUids(size int) []uint64 {
@@ -54,7 +55,7 @@ func TestUidPack(t *testing.T) {
 	require.Equal(t, 0, ApproxLen(&pb.UidPack{}))
 	require.Equal(t, 0, len(Decode(&pb.UidPack{}, 0)))
 
-	for i := 0; i < 13; i++ {
+	for range 13 {
 		size := rand.Intn(10e6)
 		if size < 0 {
 			size = 1e6
@@ -86,7 +87,7 @@ func TestBufferUidPack(t *testing.T) {
 	require.Equal(t, 0, buf.LenNoPadding())
 	require.NoError(t, buf.Release())
 
-	for i := 0; i < 13; i++ {
+	for range 13 {
 		size := rand.Intn(10e6)
 		if size < 0 {
 			size = 1e6
@@ -276,7 +277,7 @@ func benchmarkUidPackEncode(b *testing.B, blockSize int) {
 	var data []byte
 	for i := 0; i < b.N; i++ {
 		pack := Encode(uids, blockSize)
-		out, err := pack.Marshal()
+		out, err := proto.Marshal(pack)
 		FreePack(pack)
 		if err != nil {
 			b.Fatalf("Error marshaling uid pack: %s", err.Error())
@@ -311,7 +312,7 @@ func benchmarkUidPackDecode(b *testing.B, blockSize int) {
 	b.Logf("Dataset Len=%d. Size: %s", len(uids), humanize.Bytes(sz))
 
 	pack := Encode(uids, blockSize)
-	data, err := pack.Marshal()
+	data, err := proto.Marshal(pack)
 	defer FreePack(pack)
 	x.Check(err)
 	b.Logf("Output size: %s. Compression: %.2f",
@@ -335,7 +336,7 @@ func TestEncoding(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
 	var lengths = []int{0, 1, 2, 3, 5, 13, 18, 100, 99, 98}
 
-	for tc := 0; tc < len(lengths); tc++ {
+	for tc := range lengths {
 		ints := make([]uint64, lengths[tc])
 
 		for i := 0; i < 50 && i < lengths[tc]; i++ {

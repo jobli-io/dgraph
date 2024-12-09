@@ -27,12 +27,13 @@ import (
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/dgraph/v24/posting"
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
 	"github.com/dgraph-io/dgraph/v24/types"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 const (
@@ -237,7 +238,7 @@ func (cdc *CDC) processCDCEvents() {
 		}
 
 		var proposal pb.Proposal
-		if err := proposal.Unmarshal(entry.Data[8:]); err != nil {
+		if err := proto.Unmarshal(entry.Data[8:], &proposal); err != nil {
 			glog.Warningf("CDC: unmarshal failed with error %v. Ignoring.", err)
 			return
 		}

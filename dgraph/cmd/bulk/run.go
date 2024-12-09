@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/dgraph/v24/ee"
@@ -38,7 +39,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/tok"
 	"github.com/dgraph-io/dgraph/v24/worker"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 // Bulk is the sub-command invoked when running "dgraph bulk".
@@ -289,7 +290,7 @@ func run() {
 
 	// Delete and recreate the output dirs to ensure they are empty.
 	x.Check(os.RemoveAll(opt.OutDir))
-	for i := 0; i < opt.ReduceShards; i++ {
+	for i := range opt.ReduceShards {
 		dir := filepath.Join(opt.OutDir, strconv.Itoa(i), "p")
 		x.Check(os.MkdirAll(dir, 0700))
 		opt.shardOutputDirs = append(opt.shardOutputDirs, dir)
@@ -325,7 +326,7 @@ func run() {
 		}
 
 		var bulkMeta pb.BulkMeta
-		if err = bulkMeta.Unmarshal(bulkMetaData); err != nil {
+		if err = proto.Unmarshal(bulkMetaData, &bulkMeta); err != nil {
 			fmt.Fprintln(os.Stderr, "Error deserializing bulk meta file")
 			os.Exit(1)
 		}
@@ -343,7 +344,7 @@ func run() {
 			SchemaMap: loader.schema.schemaMap,
 			Types:     loader.schema.types,
 		}
-		bulkMetaData, err := bulkMeta.Marshal()
+		bulkMetaData, err := proto.Marshal(&bulkMeta)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "Error serializing bulk meta file")
 			os.Exit(1)

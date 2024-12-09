@@ -179,7 +179,7 @@ func ParseEdges(s string) ([]uint64, error) {
 		// Splitting based on comma-separation.
 		values := strings.Split(trimmed, ",")
 		result := make([]uint64, len(values))
-		for i := 0; i < len(values); i++ {
+		for i := range values {
 			trimmedVal := strings.TrimSpace(values[i])
 			val, err := strconv.ParseUint(trimmedVal, 10, 64)
 			if err != nil {
@@ -191,7 +191,7 @@ func ParseEdges(s string) ([]uint64, error) {
 	}
 	values := strings.Split(trimmed, " ")
 	result := make([]uint64, 0, len(values))
-	for i := 0; i < len(values); i++ {
+	for i := range values {
 		if len(values[i]) == 0 {
 			// skip if we have an empty string. This can naturally
 			// occur if input s was "[1.0     2.0]"
@@ -296,7 +296,7 @@ func getDataFromKeyWithCacheType(keyString string, uid uint64, c index.CacheType
 	key := DataKey(keyString, uid)
 	data, err := c.Get(key)
 	if err != nil {
-		return nil, errors.New(err.Error() + plError + keyString + " with uid" + strconv.FormatUint(uid, 10))
+		return nil, errors.New(err.Error() + plError + keyString + " with uid " + strconv.FormatUint(uid, 10))
 	}
 	return data, nil
 }
@@ -355,7 +355,7 @@ func getInsertLayer(maxLevels int) int {
 	// multFactor is a multiplicative factor used to normalize the distribution
 	var level int
 	randFloat := rand.Float64()
-	for i := 0; i < maxLevels; i++ {
+	for i := range maxLevels {
 		// calculate level based on section 3.1 here
 		if randFloat < math.Pow(1.0/float64(5), float64(maxLevels-1-i)) {
 			level = i
@@ -373,7 +373,7 @@ func (ph *persistentHNSW[T]) getVecFromUid(uid uint64, c index.CacheType, vec *[
 		if strings.Contains(err.Error(), plError) {
 			// no vector. Return empty array of floats
 			index.BytesAsFloatArray([]byte{}, vec, ph.floatBits)
-			return errors.New("Nil vector returned")
+			return errors.New(fmt.Sprintf("Nil vector returned %s", err.Error()))
 		}
 		return err
 	}
@@ -614,7 +614,7 @@ func (ph *persistentHNSW[T]) addNeighbors(ctx context.Context, tc *TxnCache,
 		}
 	}
 	var inVec, outVec []T
-	for level := 0; level < ph.maxLevels; level++ {
+	for level := range ph.maxLevels {
 		allLayerEdges[level], nnEdgesErr = ph.removeDeadNodes(allLayerEdges[level], tc)
 		if nnEdgesErr != nil {
 			return nil, nnEdgesErr

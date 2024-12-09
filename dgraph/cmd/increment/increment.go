@@ -34,7 +34,7 @@ import (
 	"github.com/dgraph-io/dgo/v240"
 	"github.com/dgraph-io/dgo/v240/protos/api"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 // Increment is the sub-command invoked when calling "dgraph increment".
@@ -218,7 +218,7 @@ func run(conf *viper.Viper) {
 
 	// Run things serially first, if conc > 1.
 	if conc > 1 {
-		for i := 0; i < conc; i++ {
+		for range conc {
 			err := processOne(0)
 			x.Check(err)
 			num--
@@ -241,7 +241,7 @@ func run(conf *viper.Viper) {
 		}
 	}
 
-	for i := 0; i < conc; i++ {
+	for i := range conc {
 		wg.Add(1)
 		go f(i + 1)
 	}

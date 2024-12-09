@@ -27,6 +27,7 @@ import (
 	otrace "go.opencensus.io/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	bpb "github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/dgo/v240/protos/api"
@@ -37,7 +38,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/schema"
 	"github.com/dgraph-io/dgraph/v24/worker"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 type predsAndvars struct {
@@ -105,7 +106,7 @@ func (s *Server) Login(ctx context.Context,
 		RefreshJwt: refreshJwt,
 	}
 
-	jwtBytes, err := loginJwt.Marshal()
+	jwtBytes, err := proto.Marshal(&loginJwt)
 	if err != nil {
 		errMsg := fmt.Sprintf("unable to marshal jwt (userid=%s,addr=%s):%v",
 			user.UserID, addr, err)

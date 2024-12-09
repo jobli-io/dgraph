@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/dgraph/v24/codec"
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
@@ -316,7 +317,7 @@ func BenchmarkListIntersectRandom(b *testing.B) {
 	randomTests := func(arrSz int, overlap float64) {
 		limit := int64(float64(arrSz) / overlap)
 		u1, v1 := make([]uint64, arrSz), make([]uint64, arrSz)
-		for i := 0; i < arrSz; i++ {
+		for i := range arrSz {
 			u1[i] = uint64(rand.Int63n(limit))
 			v1[i] = uint64(rand.Int63n(limit))
 		}
@@ -379,10 +380,10 @@ func BenchmarkListIntersectCompressBin(b *testing.B) {
 
 			u1, v1 := make([]uint64, sz1), make([]uint64, sz2)
 			limit := int64(float64(sz) / overlap)
-			for i := 0; i < sz1; i++ {
+			for i := range sz1 {
 				u1[i] = uint64(rand.Int63n(limit))
 			}
-			for i := 0; i < sz2; i++ {
+			for i := range sz2 {
 				v1[i] = uint64(rand.Int63n(limit))
 			}
 			sort.Slice(u1, func(i, j int) bool { return u1[i] < u1[j] })
@@ -434,10 +435,10 @@ func BenchmarkListIntersectRatio(b *testing.B) {
 
 			u1, v1 := make([]uint64, sz1), make([]uint64, sz2)
 			limit := int64(float64(sz) / overlap)
-			for i := 0; i < sz1; i++ {
+			for i := range sz1 {
 				u1[i] = uint64(rand.Int63n(limit))
 			}
-			for i := 0; i < sz2; i++ {
+			for i := range sz2 {
 				v1[i] = uint64(rand.Int63n(limit))
 			}
 			sort.Slice(u1, func(i, j int) bool { return u1[i] < u1[j] })
@@ -450,7 +451,7 @@ func BenchmarkListIntersectRatio(b *testing.B) {
 			compressedUids := codec.Encode(v1, 256)
 
 			fmt.Printf("len: %d, compressed: %d, bytes/int: %f\n",
-				len(v1), compressedUids.Size(), float64(compressedUids.Size())/float64(len(v1)))
+				len(v1), proto.Size(compressedUids), float64(proto.Size(compressedUids))/float64(len(v1)))
 			b.Run(fmt.Sprintf(":IntersectWith:ratio=%d:size=%d:overlap=%.2f:", r, sz, overlap),
 				func(b *testing.B) {
 					for k := 0; k < b.N; k++ {
@@ -510,7 +511,7 @@ func fillNumsDiff(N1, N2, N3 int) ([]uint64, []uint64, []uint64) {
 	otherNums := make([]uint64, N1+N3)
 	allC := make(map[uint64]bool)
 
-	for i := 0; i < N1; i++ {
+	for i := range N1 {
 		val := rand.Uint64() % 1000
 		commonNums[i] = val
 		blockNums[i] = val
@@ -546,7 +547,7 @@ func fillNums(N1, N2 int) ([]uint64, []uint64, []uint64) {
 	blockNums := make([]uint64, N1+N2)
 	otherNums := make([]uint64, N1+N2)
 
-	for i := 0; i < N1; i++ {
+	for i := range N1 {
 		val := rand.Uint64()
 		commonNums[i] = val
 		blockNums[i] = val

@@ -34,6 +34,7 @@ import (
 	"github.com/pkg/errors"
 	ostats "go.opencensus.io/stats"
 	otrace "go.opencensus.io/trace"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
@@ -44,7 +45,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/tok/hnsw"
 	"github.com/dgraph-io/dgraph/v24/types"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 var emptyCountParams countParams
@@ -110,82 +111,85 @@ func (txn *Txn) addIndexMutations(ctx context.Context, info *indexMutationInfo) 
 		return []*pb.DirectedEdge{}, errors.New("invalid UID with value 0")
 	}
 
-	inKey := x.DataKey(info.edge.Attr, uid)
-	pl, err := txn.Get(inKey)
-	if err != nil {
-		return []*pb.DirectedEdge{}, err
-	}
-	data, err := pl.AllValues(txn.StartTs)
-	if err != nil {
-		return []*pb.DirectedEdge{}, err
-	}
-
-	if info.op == pb.DirectedEdge_DEL &&
-		len(data) > 0 && data[0].Tid == types.VFloatID {
-		// TODO look into better alternatives
-		//      The issue here is that we will create dead nodes in the Vector Index
-		//      assuming an HNSW index type. What we should do instead is invoke
-		//      index.Remove(<key to dead index value>). However, we currently do
-		//      not support this in VectorIndex code!!
-		// if a delete & dealing with vfloats, add this to dead node in persistent store.
-		// What we should do instead is invoke the factory.Remove(key) operation.
-		deadAttr := hnsw.ConcatStrings(info.edge.Attr, hnsw.VecDead)
-		deadKey := x.DataKey(deadAttr, 1)
-		pl, err := txn.Get(deadKey)
+	if len(info.factorySpecs) > 0 {
+		inKey := x.DataKey(info.edge.Attr, uid)
+		pl, err := txn.Get(inKey)
 		if err != nil {
 			return []*pb.DirectedEdge{}, err
 		}
-		var deadNodes []uint64
-		deadData, _ := pl.Value(txn.StartTs)
-		if deadData.Value == nil {
-			deadNodes = append(deadNodes, uid)
-		} else {
-			deadNodes, err = hnsw.ParseEdges(string(deadData.Value.([]byte)))
+		data, err := pl.AllValues(txn.StartTs)
+		if err != nil {
+			return []*pb.DirectedEdge{}, err
+		}
+
+		if info.op == pb.DirectedEdge_DEL &&
+			len(data) > 0 && data[0].Tid == types.VFloatID {
+			// TODO look into better alternatives
+			//      The issue here is that we will create dead nodes in the Vector Index
+			//      assuming an HNSW index type. What we should do instead is invoke
+			//      index.Remove(<key to dead index value>). However, we currently do
+			//      not support this in VectorIndex code!!
+			// if a delete & dealing with vfloats, add this to dead node in persistent store.
+			// What we should do instead is invoke the factory.Remove(key) operation.
+			deadAttr := hnsw.ConcatStrings(info.edge.Attr, hnsw.VecDead)
+			deadKey := x.DataKey(deadAttr, 1)
+			pl, err := txn.Get(deadKey)
 			if err != nil {
 				return []*pb.DirectedEdge{}, err
 			}
-			deadNodes = append(deadNodes, uid)
+			var deadNodes []uint64
+			deadData, _ := pl.Value(txn.StartTs)
+			if deadData.Value == nil {
+				deadNodes = append(deadNodes, uid)
+			} else {
+				deadNodes, err = hnsw.ParseEdges(string(deadData.Value.([]byte)))
+				if err != nil {
+					return []*pb.DirectedEdge{}, err
+				}
+				deadNodes = append(deadNodes, uid)
+			}
+			deadNodesBytes, marshalErr := json.Marshal(deadNodes)
+			if marshalErr != nil {
+				return []*pb.DirectedEdge{}, marshalErr
+			}
+			edge := &pb.DirectedEdge{
+				Entity:    1,
+				Attr:      deadAttr,
+				Value:     deadNodesBytes,
+				ValueType: pb.Posting_ValType(0),
+			}
+			if err := pl.addMutation(ctx, txn, edge); err != nil {
+				return nil, err
+			}
 		}
-		deadNodesBytes, marshalErr := json.Marshal(deadNodes)
-		if marshalErr != nil {
-			return []*pb.DirectedEdge{}, marshalErr
-		}
-		edge := &pb.DirectedEdge{
-			Entity:    1,
-			Attr:      deadAttr,
-			Value:     deadNodesBytes,
-			ValueType: pb.Posting_ValType(0),
-		}
-		if err := pl.addMutation(ctx, txn, edge); err != nil {
-			return nil, err
+
+		// TODO: As stated earlier, we need to validate that it is okay to assume
+		//       that we care about just data[0].
+		//       Similarly, the current assumption is that we have at most one
+		//       Vector Index, but this assumption may break later.
+		if info.op != pb.DirectedEdge_DEL &&
+			len(data) > 0 && data[0].Tid == types.VFloatID &&
+			len(info.factorySpecs) > 0 {
+			// retrieve vector from inUuid save as inVec
+			inVec := types.BytesAsFloatArray(data[0].Value.([]byte))
+			tc := hnsw.NewTxnCache(NewViTxn(txn), txn.StartTs)
+			indexer, err := info.factorySpecs[0].CreateIndex(attr)
+			if err != nil {
+				return []*pb.DirectedEdge{}, err
+			}
+			edges, err := indexer.Insert(ctx, tc, uid, inVec)
+			if err != nil {
+				return []*pb.DirectedEdge{}, err
+			}
+			pbEdges := []*pb.DirectedEdge{}
+			for _, e := range edges {
+				pbe := indexEdgeToPbEdge(e)
+				pbEdges = append(pbEdges, pbe)
+			}
+			return pbEdges, nil
 		}
 	}
 
-	// TODO: As stated earlier, we need to validate that it is okay to assume
-	//       that we care about just data[0].
-	//       Similarly, the current assumption is that we have at most one
-	//       Vector Index, but this assumption may break later.
-	if info.op == pb.DirectedEdge_SET &&
-		len(data) > 0 && data[0].Tid == types.VFloatID &&
-		len(info.factorySpecs) > 0 {
-		// retrieve vector from inUuid save as inVec
-		inVec := types.BytesAsFloatArray(data[0].Value.([]byte))
-		tc := hnsw.NewTxnCache(NewViTxn(txn), txn.StartTs)
-		indexer, err := info.factorySpecs[0].CreateIndex(attr)
-		if err != nil {
-			return []*pb.DirectedEdge{}, err
-		}
-		edges, err := indexer.Insert(ctx, tc, uid, inVec)
-		if err != nil {
-			return []*pb.DirectedEdge{}, err
-		}
-		pbEdges := []*pb.DirectedEdge{}
-		for _, e := range edges {
-			pbe := indexEdgeToPbEdge(e)
-			pbEdges = append(pbEdges, pbe)
-		}
-		return pbEdges, nil
-	}
 	tokens, err := indexTokens(ctx, info)
 	if err != nil {
 		// This data is not indexable
@@ -233,6 +237,18 @@ type countParams struct {
 	reverse     bool
 }
 
+// When we want to update count edges, we should set them with OVR instead of SET as SET will mess with count
+func shouldAddCountEdge(found bool, edge *pb.DirectedEdge) bool {
+	if found {
+		if edge.Op != pb.DirectedEdge_DEL {
+			edge.Op = pb.DirectedEdge_OVR
+		}
+		return true
+	} else {
+		return edge.Op != pb.DirectedEdge_DEL
+	}
+}
+
 func (txn *Txn) addReverseMutationHelper(ctx context.Context, plist *List,
 	hasCountIndex bool, edge *pb.DirectedEdge) (countParams, error) {
 	countBefore, countAfter := 0, 0
@@ -242,12 +258,14 @@ func (txn *Txn) addReverseMutationHelper(ctx context.Context, plist *List,
 	defer plist.Unlock()
 	if hasCountIndex {
 		countBefore, found, _ = plist.getPostingAndLengthNoSort(txn.StartTs, 0, edge.ValueId)
-		if countBefore == -1 {
+		if countBefore < 0 {
 			return emptyCountParams, errors.Wrapf(ErrTsTooOld, "Adding reverse mutation helper count")
 		}
 	}
-	if err := plist.addMutationInternal(ctx, txn, edge); err != nil {
-		return emptyCountParams, err
+	if !(hasCountIndex && !shouldAddCountEdge(found, edge)) {
+		if err := plist.addMutationInternal(ctx, txn, edge); err != nil {
+			return emptyCountParams, err
+		}
 	}
 	if hasCountIndex {
 		countAfter = countAfterMutation(countBefore, found, edge.Op)
@@ -311,7 +329,7 @@ func (txn *Txn) addReverseAndCountMutation(ctx context.Context, t *pb.DirectedEd
 	// entries for this key in the index are removed.
 	pred, ok := schema.State().Get(ctx, t.Attr)
 	isSingleUidUpdate := ok && !pred.GetList() && pred.GetValueType() == pb.Posting_UID &&
-		t.Op == pb.DirectedEdge_SET && t.ValueId != 0
+		t.Op != pb.DirectedEdge_DEL && t.ValueId != 0
 	if isSingleUidUpdate {
 		dataKey := x.DataKey(t.Attr, t.Entity)
 		dataList, err := getFn(dataKey)
@@ -458,7 +476,7 @@ func (txn *Txn) updateCount(ctx context.Context, params countParams) error {
 }
 
 func countAfterMutation(countBefore int, found bool, op pb.DirectedEdge_Op) int {
-	if !found && op == pb.DirectedEdge_SET {
+	if !found && op != pb.DirectedEdge_DEL {
 		return countBefore + 1
 	} else if found && op == pb.DirectedEdge_DEL {
 		return countBefore - 1
@@ -503,7 +521,7 @@ func (txn *Txn) addMutationHelper(ctx context.Context, l *List, doUpdateIndex bo
 
 	switch {
 	case hasCountIndex:
-		countBefore, found, currPost = l.getPostingAndLength(txn.StartTs, 0, getUID(t))
+		countBefore, found, currPost = l.getPostingAndLengthNoSort(txn.StartTs, 0, getUID(t))
 		if countBefore == -1 {
 			return val, false, emptyCountParams, errors.Wrapf(ErrTsTooOld, "Add mutation count index")
 		}
@@ -531,8 +549,10 @@ func (txn *Txn) addMutationHelper(ctx context.Context, l *List, doUpdateIndex bo
 		}
 	}
 
-	if err = l.addMutationInternal(ctx, txn, t); err != nil {
-		return val, found, emptyCountParams, err
+	if !(hasCountIndex && !shouldAddCountEdge(found && currPost.Op != Del, t)) {
+		if err = l.addMutationInternal(ctx, txn, t); err != nil {
+			return val, found, emptyCountParams, err
+		}
 	}
 
 	if found && doUpdateIndex {
@@ -596,7 +616,7 @@ func (l *List) AddMutationWithIndex(ctx context.Context, edge *pb.DirectedEdge, 
 				return err
 			}
 		}
-		if edge.Op == pb.DirectedEdge_SET {
+		if edge.Op != pb.DirectedEdge_DEL {
 			val = types.Val{
 				Tid:   types.TypeID(edge.ValueType),
 				Value: edge.Value,
@@ -702,19 +722,14 @@ func (r *rebuilder) RunWithoutTemp(ctx context.Context) error {
 			case BitDeltaPosting:
 				err := item.Value(func(val []byte) error {
 					pl := &pb.PostingList{}
-					if err := pl.Unmarshal(val); err != nil {
+					if err := proto.Unmarshal(val, pl); err != nil {
 						return err
 					}
 					pl.CommitTs = item.Version()
-					for _, mpost := range pl.Postings {
-						// commitTs, startTs are meant to be only in memory, not
-						// stored on disk.
-						mpost.CommitTs = item.Version()
-					}
 					if l.mutationMap == nil {
-						l.mutationMap = make(map[uint64]*pb.PostingList)
+						l.mutationMap = newMutableLayer()
 					}
-					l.mutationMap[pl.CommitTs] = pl
+					l.mutationMap.insertCommittedPostings(pl)
 					return nil
 				})
 				if err != nil {
@@ -790,7 +805,7 @@ func printTreeStats(txn *Txn) {
 				fmt.Println("Error while decoding", err)
 			}
 
-			for i := 0; i < len(temp); i++ {
+			for i := range temp {
 				if len(temp[i]) > 0 {
 					numNodes[i] += 1
 				}
@@ -800,15 +815,15 @@ func printTreeStats(txn *Txn) {
 		}
 	}
 
-	for i := 0; i < numLevels; i++ {
+	for i := range numLevels {
 		fmt.Printf("%d, ", numNodes[i])
 	}
 	fmt.Println("")
-	for i := 0; i < numLevels; i++ {
+	for i := range numLevels {
 		fmt.Printf("%d, ", numConnections[i])
 	}
 	fmt.Println("")
-	for i := 0; i < numLevels; i++ {
+	for i := range numLevels {
 		if numNodes[i] == 0 {
 			fmt.Printf("0, ")
 			continue
@@ -832,13 +847,13 @@ func decodeUint64MatrixUnsafe(data []byte, matrix *[][]uint64) error {
 
 	*matrix = make([][]uint64, rows)
 
-	for i := 0; i < int(rows); i++ {
+	for i := range rows {
 		// Read row length
 		rowLen := *(*uint64)(unsafe.Pointer(&data[offset]))
 		offset += 8
 
 		(*matrix)[i] = make([]uint64, rowLen)
-		for j := 0; j < int(rowLen); j++ {
+		for j := range rowLen {
 			(*matrix)[i][j] = *(*uint64)(unsafe.Pointer(&data[offset]))
 			offset += 8
 		}
@@ -895,15 +910,13 @@ func (r *rebuilder) Run(ctx context.Context) error {
 	// We set it to 1 in case there are no keys found and NewStreamAt is called with ts=0.
 	var counter uint64 = 1
 
-	var txn *Txn
-
 	tmpWriter := tmpDB.NewManagedWriteBatch()
 	stream := pstore.NewStreamAt(r.startTs)
 	stream.LogPrefix = fmt.Sprintf("Rebuilding index for predicate %s (1/2):", r.attr)
 	stream.Prefix = r.prefix
 	//TODO We need to create a single transaction irrespective of the type of the predicate
 	if pred.ValueType == pb.Posting_VFLOAT {
-		txn = NewTxn(r.startTs)
+		x.AssertTrue(false)
 	}
 	stream.KeyToList = func(key []byte, itr *badger.Iterator) (*bpb.KVList, error) {
 		// We should return quickly if the context is no longer valid.
@@ -923,44 +936,25 @@ func (r *rebuilder) Run(ctx context.Context) error {
 			return nil, errors.Wrapf(err, "error reading posting list from disk")
 		}
 
-		// We are using different transactions in each call to KeyToList function. This could
-		// be a problem for computing reverse count indexes if deltas for same key are added
-		// in different transactions. Such a case doesn't occur for now.
-		// TODO: Maybe we can always use txn initialized in rebuilder.Run().
-		streamTxn := txn
-		if streamTxn == nil {
-			streamTxn = NewTxn(r.startTs)
-		}
-		edges, err := r.fn(pk.Uid, l, streamTxn)
+		kvs, err := l.Rollup(nil, r.startTs)
 		if err != nil {
 			return nil, err
 		}
 
-		if txn != nil {
-			kvs := make([]*bpb.KV, 0, len(edges))
-			for _, edge := range edges {
-				version := atomic.AddUint64(&counter, 1)
-				key := x.DataKey(edge.Attr, edge.Entity)
-				pl, err := txn.GetFromDelta(key)
-				if err != nil {
-					return &bpb.KVList{}, nil
-				}
-				data := pl.getMutation(r.startTs)
-				kv := bpb.KV{
-					Key:      x.DataKey(edge.Attr, edge.Entity),
-					Value:    data,
-					UserMeta: []byte{BitDeltaPosting},
-					Version:  version,
-				}
-				kvs = append(kvs, &kv)
-			}
-			return &bpb.KVList{Kv: kvs}, nil
+		for _, kv := range kvs {
+			version := atomic.AddUint64(&counter, 1)
+			kv.Version = version
+		}
+
+		streamTxn := NewTxn(r.startTs)
+		_, err = r.fn(pk.Uid, l, streamTxn)
+		if err != nil {
+			return nil, err
 		}
 
 		// Convert data into deltas.
 		streamTxn.Update()
 		// txn.cache.Lock() is not required because we are the only one making changes to txn.
-		kvs := make([]*bpb.KV, 0, len(streamTxn.cache.deltas))
 		for key, data := range streamTxn.cache.deltas {
 			version := atomic.AddUint64(&counter, 1)
 			kv := bpb.KV{
@@ -1022,13 +1016,9 @@ func (r *rebuilder) Run(ctx context.Context) error {
 	tmpStream.Send = func(buf *z.Buffer) error {
 		return buf.SliceIterate(func(slice []byte) error {
 			kv := &bpb.KV{}
-			if err := kv.Unmarshal(slice); err != nil {
+			if err := proto.Unmarshal(slice, kv); err != nil {
 				return err
 			}
-			if len(kv.Value) == 0 {
-				return nil
-			}
-
 			// We choose to write the PL at r.startTs, so it won't be read by txns,
 			// which occurred before this schema mutation.
 			e := &badger.Entry{
@@ -1036,6 +1026,15 @@ func (r *rebuilder) Run(ctx context.Context) error {
 				Value:    kv.Value,
 				UserMeta: BitCompletePosting,
 			}
+
+			if len(kv.Value) == 0 {
+				e = &badger.Entry{
+					Key:      kv.Key,
+					Value:    kv.Value,
+					UserMeta: BitEmptyPosting,
+				}
+			}
+
 			if err := writer.SetEntryAt(e.WithDiscard(), r.startTs); err != nil {
 				return errors.Wrap(err, "error in writing index to pstore")
 			}
@@ -1589,7 +1588,7 @@ func prefixesToDropVectorIndexEdges(ctx context.Context, rb *IndexRebuild) [][]b
 	prefixes = append(prefixes, x.PredicatePrefix(hnsw.ConcatStrings(rb.Attr, hnsw.VecDead)))
 	prefixes = append(prefixes, x.PredicatePrefix(hnsw.ConcatStrings(rb.Attr, hnsw.VecKeyword)))
 
-	for i := 0; i < hnsw.VectorIndexMaxLevels; i++ {
+	for i := range hnsw.VectorIndexMaxLevels {
 		prefixes = append(prefixes, x.PredicatePrefix(hnsw.ConcatStrings(rb.Attr, hnsw.VecKeyword, fmt.Sprint(i))))
 	}
 
