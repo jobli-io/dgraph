@@ -27,7 +27,7 @@ import (
 
 func GenerateRandomVector(size int) []float32 {
 	vector := make([]float32, size)
-	for i := 0; i < size; i++ {
+	for i := range size {
 		vector[i] = rand.Float32() * 10
 	}
 	return vector
@@ -90,7 +90,7 @@ func UnmarshalVectorResp(resp *api.Response) ([][]float32, error) {
 	type Data struct {
 		Vector []struct {
 			UID                 string    `json:"uid"`
-			ProjectDescriptionV []float32 `json:"project_discription_v"`
+			ProjectDescriptionV []float32 `json:"project_description_v"`
 		} `json:"vector"`
 	}
 	var data Data

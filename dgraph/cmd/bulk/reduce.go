@@ -36,6 +36,7 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/golang/glog"
 	"github.com/golang/snappy"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	bo "github.com/dgraph-io/badger/v4/options"
@@ -45,7 +46,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/posting"
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 type reducer struct {
@@ -61,7 +62,7 @@ func (r *reducer) run() error {
 	x.AssertTrue(len(r.opt.shardOutputDirs) == r.opt.ReduceShards)
 
 	thr := y.NewThrottle(r.opt.NumReducers)
-	for i := 0; i < r.opt.ReduceShards; i++ {
+	for i := range r.opt.ReduceShards {
 		if err := thr.Do(); err != nil {
 			return err
 		}
@@ -234,7 +235,7 @@ func newMapIterator(filename string) (*pb.MapHeader, *mapIterator) {
 
 	x.Check2(io.ReadFull(reader, headerBuf))
 	header := &pb.MapHeader{}
-	err = header.Unmarshal(headerBuf)
+	err = proto.Unmarshal(headerBuf, header)
 	x.Check(err)
 
 	itr := &mapIterator{
@@ -351,7 +352,7 @@ func (r *reducer) startWriting(ci *countIndexer, writerCh chan *encodeRequest, c
 			kv := &bpb.KV{}
 			err := kvBuf.SliceIterate(func(s []byte) error {
 				kv.Reset()
-				x.Check(kv.Unmarshal(s))
+				x.Check(proto.Unmarshal(s, kv))
 				if lastStreamId == kv.StreamId {
 					return nil
 				}
@@ -465,7 +466,7 @@ func (r *reducer) reduce(partitionKeys [][]byte, mapItrs []*mapIterator, ci *cou
 	encoderCh := make(chan *encodeRequest, 2*cpu)
 	writerCh := make(chan *encodeRequest, 2*cpu)
 	encoderCloser := z.NewCloser(cpu)
-	for i := 0; i < cpu; i++ {
+	for range cpu {
 		// Start listening to encode entries
 		// For time being let's lease 100 stream id for each encoder.
 		go r.encode(encoderCh, encoderCloser)
@@ -500,7 +501,7 @@ func (r *reducer) reduce(partitionKeys [][]byte, mapItrs []*mapIterator, ci *cou
 		// Append nil for the last entries.
 		partitionKeys = append(partitionKeys, nil)
 
-		for i := 0; i < len(partitionKeys); i++ {
+		for i := range partitionKeys {
 			pkey := partitionKeys[i]
 			for _, itr := range mapItrs {
 				itr.Next(cbuf, pkey)
@@ -639,7 +640,7 @@ func (r *reducer) toList(req *encodeRequest) {
 			enc.Add(uid)
 			if pbuf := me.Plist(); len(pbuf) > 0 {
 				p := getPosting()
-				x.Check(p.Unmarshal(pbuf))
+				x.Check(proto.Unmarshal(pbuf, p))
 				pl.Postings = append(pl.Postings, p)
 			}
 		}
@@ -678,7 +679,7 @@ func (r *reducer) toList(req *encodeRequest) {
 			}
 		}
 
-		shouldSplit := pl.Size() > (1<<20)/2 && len(pl.Pack.Blocks) > 1
+		shouldSplit := proto.Size(pl) > (1<<20)/2 && len(pl.Pack.Blocks) > 1
 		if shouldSplit {
 			// Give ownership of pl.Pack away to list. Rollup would deallocate the Pack.
 			// We do rollup at math.MaxUint64 so that we don't change the allocated

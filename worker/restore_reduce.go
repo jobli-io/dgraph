@@ -29,11 +29,12 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/golang/glog"
 	"github.com/golang/snappy"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 const (
@@ -109,7 +110,7 @@ func newMapIterator(filename string) (*pb.MapHeader, *mapIterator) {
 
 	x.Check2(io.ReadFull(reader, headerBuf))
 	header := &pb.MapHeader{}
-	err = header.Unmarshal(headerBuf)
+	err = proto.Unmarshal(headerBuf, header)
 	x.Check(err)
 
 	itr := &mapIterator{
@@ -229,7 +230,7 @@ func (r *reducer) Reduce() error {
 		errCh <- r.process()
 	}()
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := <-errCh; err != nil {
 			return err
 		}

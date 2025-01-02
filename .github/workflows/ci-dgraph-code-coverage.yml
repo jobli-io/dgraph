@@ -1,41 +1,21 @@
 name: ci-dgraph-code-coverage
 on:
   push:
-    paths-ignore:
-      - '.github/CODEOWNERS'
-      - '.vscode/**'
-      - 'compose/**'
-      - 'contrib/systemd/**'
-      - 'licenses/**'
-      - 'paper/**'
-      - 'present/**'
-      - 'RFC/**'
-      - 'static/**'
-      - 'wiki/**'
-      - '**/**.dockerignore'
-      - '**/**.gitignore'
-      - '**/**.md'
-      - '**/**.png'
-      - '**/**.jpg'
-      - '**/**.gif'
-      - '**/**.ini'
+    paths:
+      - '**/*.go'
+      - '**/go.mod'
     branches:
       - main
       - 'release/**'
 jobs:
   dgraph-code-coverage:
-    runs-on: warp-ubuntu-latest-x64-16x
+    runs-on: warp-ubuntu-latest-x64-4x
     steps:
       - uses: actions/checkout@v4 # defaults to SHA of event that triggered workflow
-      - name: Get Go Version
-        run: |
-          #!/bin/bash
-          GOVERSION=$({ [ -f .go-version ] && cat .go-version; })
-          echo "GOVERSION=$GOVERSION" >> $GITHUB_ENV
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GOVERSION }}
+          go-version-file: go.mod
       - name: Make Linux Build and Docker Image with coverage enabled
         run: make coverage-docker-image
       - name: Build Test Binary
@@ -43,6 +23,8 @@ jobs:
           #!/bin/bash
           # build the test binary
           cd t; go build .
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
       - name: Clean Up Environment
         run: |
           #!/bin/bash

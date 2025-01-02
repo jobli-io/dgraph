@@ -23,10 +23,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 func TestIncrRollupGetsCancelledQuickly(t *testing.T) {
@@ -73,7 +74,7 @@ func TestCacheAfterDeltaUpdateRecieved(t *testing.T) {
 		CommitTs: 15,
 		Op:       1,
 	}}
-	delta, err := p.Marshal()
+	delta, err := proto.Marshal(p)
 	require.NoError(t, err)
 
 	// Write delta to disk and call update
@@ -89,12 +90,12 @@ func TestCacheAfterDeltaUpdateRecieved(t *testing.T) {
 	// Read key at timestamp 10. Make sure cache is not updated by this, as there is a later read.
 	l, err := GetNoStore(key, 10)
 	require.NoError(t, err)
-	require.Equal(t, len(l.mutationMap), 0)
+	require.Equal(t, l.mutationMap.len(), 0)
 
 	// Read at 20 should show the value
 	l1, err := GetNoStore(key, 20)
 	require.NoError(t, err)
-	require.Equal(t, len(l1.mutationMap), 1)
+	require.Equal(t, l1.mutationMap.len(), 1)
 }
 
 func TestRollupTimestamp(t *testing.T) {
@@ -159,7 +160,7 @@ func TestPostingListRead(t *testing.T) {
 	assertLength(9, 1)
 
 	var empty pb.PostingList
-	data, err := empty.Marshal()
+	data, err := proto.Marshal(&empty)
 	require.NoError(t, err)
 
 	writer = NewTxnWriter(pstore)

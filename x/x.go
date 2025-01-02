@@ -56,13 +56,14 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	bo "github.com/dgraph-io/badger/v4/options"
 	badgerpb "github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/dgo/v240"
 	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 // Error constants representing different types of errors.
@@ -1071,7 +1072,7 @@ func GetDgraphClient(conf *viper.Viper, login bool) (*dgo.Dgraph, CloseFunc) {
 
 	for _, d := range ds {
 		var conn *grpc.ClientConn
-		for i := 0; i < retries; i++ {
+		for range retries {
 			conn, err = SetupConnection(d, tlsCfg, false, dialOpts...)
 			if err == nil {
 				break
@@ -1359,6 +1360,11 @@ func ToHex(i uint64, rdf bool) []byte {
 	}
 
 	return out
+}
+
+func MarshalToSizedBuffer(buf []byte, m proto.Message) ([]byte, error) {
+	buf = buf[:0]
+	return proto.MarshalOptions{}.MarshalAppend(buf, m)
 }
 
 // RootTemplate defines the help template for dgraph command.

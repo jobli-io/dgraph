@@ -31,6 +31,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
 	c "github.com/dgraph-io/dgraph/v24/tok/constraints"
 	"github.com/viterin/vek/vek32"
+	"google.golang.org/protobuf/proto"
 )
 
 // GenerateMatrix generates a 2D slice of uint64 with varying lengths for each row.
@@ -198,12 +199,12 @@ func decodeUint64MatrixUnsafe(data []byte) ([][]uint64, error) {
 
 func encodeUint64MatrixWithProtobuf(protoMatrix *pb.SortResult) ([]byte, error) {
 	// Convert the matrix to the protobuf structure
-	return protoMatrix.Marshal()
+	return proto.Marshal(protoMatrix)
 }
 
 func decodeUint64MatrixWithProtobuf(data []byte, protoMatrix *pb.SortResult) error {
 	// Unmarshal the protobuf data into the protobuf structure
-	return protoMatrix.Unmarshal(data)
+	return proto.Unmarshal(data, protoMatrix)
 }
 
 // Combined benchmark function
@@ -280,7 +281,7 @@ func dotProductT[T c.Float](a, b []T, floatBits int) {
 	if len(a) != len(b) {
 		return
 	}
-	for i := 0; i < len(a); i++ {
+	for i := range a {
 		dotProduct += a[i] * b[i]
 	}
 }
@@ -374,7 +375,7 @@ func littleEndianBytesAsFloatArray[T c.Float](encoded []byte, retVal *[]T, float
 	if resultLen == 0 {
 		return
 	}
-	for i := 0; i < resultLen; i++ {
+	for range resultLen {
 		// Assume LittleEndian for encoding since this is
 		// the assumption elsewhere when reading from client.
 		// See dgraph-io/dgo/protos/api.pb.go

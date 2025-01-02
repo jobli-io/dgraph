@@ -33,7 +33,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
 	"github.com/dgraph-io/dgraph/v24/raftwal"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 // TaskStatusOverNetwork fetches the status of a task over the network. Alphas only know about the
@@ -150,7 +150,7 @@ func (t *tasks) Enqueue(req interface{}) (uint64, error) {
 	}
 
 	// Wait for upto 3 seconds to check for errors.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		time.Sleep(time.Second)
 
 		t.logMu.Lock()

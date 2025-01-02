@@ -759,3 +759,116 @@ func TestConcurrency2(t *testing.T) {
 		}
 	}
 }
+
+func TestUniqueUpsertWithoutSpaceInQuery(t *testing.T) {
+	schema := `email: string @unique  @index(exact)  .`
+	dg := setUpDgraph(t)
+	require.NoError(t, dg.SetupSchema(schema))
+	rdf := `_:a <email> "test@test.io"  .`
+	query := `{UNIQS as var(func: eq(userEmail, "test@test.io")) { count: count(uid) }}`
+
+	r := &api.Request{
+		Query: query,
+		Mutations: []*api.Mutation{
+			{
+				Cond:      "@if(eq(len(UNIQS), 0))",
+				SetNquads: []byte(rdf),
+			},
+		},
+		CommitNow: true,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	txn := dg.NewTxn()
+	_, err := txn.Do(ctx, r)
+	require.NoError(t, err)
+
+	txn = dg.NewTxn()
+	_, err = txn.Do(ctx, r)
+
+	require.Error(t, err)
+}
+
+func TestUniqueWithNonLatinPredName(t *testing.T) {
+	dg := setUpDgraph(t)
+	require.NoError(t, dg.SetupSchema(`<ईमेल#$%&>: string @unique @lang @index(exact)  .`))
+
+	rdf := `_:a <ईमेल#$%&@hi> "example@email.com" .	`
+	_, err := dg.Mutate(&api.Mutation{
+		SetNquads: []byte(rdf),
+		CommitNow: true,
+	})
+	require.NoError(t, err)
+	query := `{
+		q(func: eq(<ईमेल#$%&>@hi, "example@email.com")) {
+			<ईमेल#$%&>@hi
+		}
+    }`
+	resp, err := dg.Query(query)
+	require.NoError(t, err)
+	var data map[string]interface{}
+	require.NoError(t, json.Unmarshal(resp.Json, &data))
+	require.Equal(t, data["q"].([]interface{})[0].(map[string]interface{})["ईमेल#$%&@hi"].(string), "example@email.com")
+
+	_, err = dg.Mutate(&api.Mutation{
+		SetNquads: []byte(rdf),
+		CommitNow: true,
+	})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "could not insert duplicate value [example@email.com] for predicate [ईमेल#$%&]")
+}
+
+func TestUniqueMultipleMutationsInSingleReqWithDelNqd(t *testing.T) {
+	dg := setUpDgraph(t)
+	require.NoError(t, dg.SetupSchema(`email: string @unique  @index(exact)  .`))
+
+	mu1 := &api.Mutation{
+		SetNquads: []byte(`<0x1> <email> "unique@email.com" .`),
+		CommitNow: true,
+	}
+	_, err := dg.Mutate(mu1)
+	require.NoError(t, err)
+
+	mu1 = &api.Mutation{
+		SetNquads: []byte(`_:a <email> "example@email.com" .`),
+		CommitNow: true,
+	}
+	mu2 := &api.Mutation{
+		DelNquads: []byte(`<0x1> * * .`),
+		CommitNow: true,
+	}
+	mu3 := &api.Mutation{
+		SetNquads: []byte(`_:b <email> "example@email.com" .`),
+		CommitNow: true,
+	}
+	req := &api.Request{
+		Mutations: []*api.Mutation{mu1, mu2, mu3},
+		CommitNow: true,
+	}
+	_, err = dg.NewTxn().Do(context.Background(), req)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "could not insert duplicate value [example@email.com] for predicate [email]")
+}
+
+func TestUniqueMultipleMutationsInSingleReq(t *testing.T) {
+	dg := setUpDgraph(t)
+	require.NoError(t, dg.SetupSchema(`email: string @unique  @index(exact)  .`))
+
+	mu1 := &api.Mutation{
+		SetNquads: []byte(`_:a <email> "example@email.com" .`),
+		CommitNow: true,
+	}
+	mu2 := &api.Mutation{
+		SetNquads: []byte(`_:b <email> "example@email.com" .`),
+		CommitNow: true,
+	}
+	req := &api.Request{
+		Mutations: []*api.Mutation{mu1, mu2},
+		CommitNow: true,
+	}
+	_, err := dg.NewTxn().Do(context.Background(), req)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "could not insert duplicate value [example@email.com] for predicate [email]")
+}

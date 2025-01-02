@@ -54,7 +54,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/types"
 	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/dgraph/v24/xidmap"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 type options struct {
@@ -654,7 +654,7 @@ func setup(opts batchMutationOptions, dc *dgo.Dgraph, conf *viper.Viper) *loader
 	}
 
 	l.requestsWg.Add(opts.Pending)
-	for i := 0; i < opts.Pending; i++ {
+	for range opts.Pending {
 		go l.makeRequests()
 	}
 
@@ -850,7 +850,7 @@ func run() error {
 		go l.printCounters()
 	}
 
-	for i := 0; i < totalFiles; i++ {
+	for range totalFiles {
 		if err := <-errCh; err != nil {
 			fmt.Printf("Error while processing data file %s\n", err)
 			return err

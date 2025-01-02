@@ -17,7 +17,6 @@
 package edgraph
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -32,7 +31,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/gogo/protobuf/jsonpb"
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
 	ostats "go.opencensus.io/stats"
@@ -42,6 +40,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/dgraph-io/dgo/v240"
 	"github.com/dgraph-io/dgo/v240/protos/api"
@@ -102,7 +101,10 @@ var (
 )
 
 // Server implements protos.DgraphServer
-type Server struct{}
+type Server struct {
+	// embedding the api.UnimplementedZeroServer struct to ensure forward compatibility of the server.
+	api.UnimplementedDgraphServer
+}
 
 // graphQLSchemaNode represents the node which contains GraphQL schema
 type graphQLSchemaNode struct {
@@ -1179,13 +1181,13 @@ func (s *Server) State(ctx context.Context) (*api.Response, error) {
 		return nil, err
 	}
 
-	m := jsonpb.Marshaler{EmitDefaults: true}
-	var jsonState bytes.Buffer
-	if err := m.Marshal(&jsonState, ms); err != nil {
+	m := protojson.MarshalOptions{EmitUnpopulated: true}
+	jsonState, err := m.Marshal(ms)
+	if err != nil {
 		return nil, errors.Errorf("Error marshalling state information to JSON")
 	}
 
-	return &api.Response{Json: jsonState.Bytes()}, nil
+	return &api.Response{Json: jsonState}, nil
 }
 
 func getAuthMode(ctx context.Context) AuthMode {
@@ -1248,6 +1250,10 @@ func (s *Server) QueryNoGrpc(ctx context.Context, req *api.Request) (*api.Respon
 		}
 	}
 	return s.doQuery(ctx, &Request{req: req, doAuth: getAuthMode(ctx)})
+}
+
+func (s *Server) QueryNoAuth(ctx context.Context, req *api.Request) (*api.Response, error) {
+	return s.doQuery(ctx, &Request{req: req, doAuth: NoAuthorize})
 }
 
 var pendingQueries int64
@@ -1717,8 +1723,8 @@ func addQueryIfUnique(qctx context.Context, qc *queryContext) error {
 	isGalaxyQuery := x.IsGalaxyOperation(ctx)
 
 	qc.uniqueVars = map[uint64]uniquePredMeta{}
-	var buildQuery strings.Builder
 	for gmuIndex, gmu := range qc.gmuList {
+		var buildQuery strings.Builder
 		for rdfIndex, pred := range gmu.Set {
 			if isGalaxyQuery {
 				// The caller should make sure that the directed edges contain the namespace we want
@@ -1734,12 +1740,16 @@ func addQueryIfUnique(qctx context.Context, qc *queryContext) error {
 					continue
 				}
 			}
-			var predicateName string
+
+			// Wrapping predicateName with angle brackets ensures that if the predicate contains any non-Latin letters,
+			// the unique query will not fail. Additionally,
+			// it helps ensure that non-Latin predicate names are properly formatted
+			// during the automatic serialization of a structure into JSON.
+			predicateName := fmt.Sprintf("<%v>", pred.Predicate)
 			if pred.Lang != "" {
-				predicateName = fmt.Sprintf(pred.Predicate+"@%v", pred.Lang)
-			} else {
-				predicateName = pred.Predicate
+				predicateName = fmt.Sprintf("%v@%v", predicateName, pred.Lang)
 			}
+
 			uniqueVarMapKey := encodeIndex(gmuIndex, rdfIndex)
 			queryVar := fmt.Sprintf("__dgraph_uniquecheck_%v__", uniqueVarMapKey)
 			// Now, we add a query for a predicate to check if the value of the
@@ -1790,7 +1800,7 @@ func addQueryIfUnique(qctx context.Context, qc *queryContext) error {
 			if qc.req.Query == "" {
 				qc.req.Query = "{" + buildQuery.String()
 			} else {
-				qc.req.Query = strings.TrimRight(qc.req.Query, "}")
+				qc.req.Query = strings.TrimSuffix(qc.req.Query, "}")
 				qc.req.Query = qc.req.Query + buildQuery.String()
 			}
 		}

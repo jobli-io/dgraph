@@ -44,7 +44,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/types"
 	"github.com/dgraph-io/dgraph/v24/types/facets"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 // ToJson converts the list of subgraph into a JSON response by calling toFastJSON.
@@ -1129,7 +1129,7 @@ func processNodeUids(fj fastJsonNode, enc *encoder, sg *SubGraph) error {
 	}
 
 	lenList := len(sg.uidMatrix[0].Uids)
-	for i := 0; i < lenList; i++ {
+	for i := range lenList {
 		uid := sg.uidMatrix[0].Uids[i]
 		if algo.IndexOf(sg.DestUIDs, uid) < 0 {
 			// This UID was filtered. So Ignore it.

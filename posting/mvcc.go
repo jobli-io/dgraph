@@ -26,15 +26,15 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/golang/protobuf/proto"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	bpb "github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/dgo/v240/protos/api"
 	"github.com/dgraph-io/dgraph/v24/protos/pb"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 type pooledKeys struct {
@@ -132,6 +132,8 @@ func (ir *incrRollupi) rollUpKey(writer *TxnWriter, key []byte) error {
 	if err != nil {
 		return err
 	}
+
+	RemoveCacheFor(key)
 
 	globalCache.Lock()
 	val, ok := globalCache.items[string(key)]
@@ -344,9 +346,20 @@ func (txn *Txn) CommitToDisk(writer *TxnWriter, commitTs uint64) error {
 }
 
 func ResetCache() {
+	if lCache != nil {
+		lCache.Clear()
+	}
 	globalCache.Lock()
 	globalCache.items = make(map[string]*CachePL)
 	globalCache.Unlock()
+}
+
+// RemoveCacheFor will delete the list corresponding to the given key.
+func RemoveCacheFor(key []byte) {
+	// TODO: investigate if this can be done by calling Set with a nil value.
+	if lCache != nil {
+		lCache.Del(key)
+	}
 }
 
 func NewCachePL() *CachePL {
@@ -364,6 +377,7 @@ func (txn *Txn) UpdateCachedKeys(commitTs uint64) {
 	}
 
 	for key, delta := range txn.cache.deltas {
+		RemoveCacheFor([]byte(key))
 		pk, _ := x.Parse([]byte(key))
 		if !ShouldGoInCache(pk) {
 			continue
@@ -388,8 +402,8 @@ func (txn *Txn) UpdateCachedKeys(commitTs uint64) {
 
 		if commitTs != 0 && val.list != nil {
 			p := new(pb.PostingList)
-			x.Check(p.Unmarshal(delta))
-			val.list.setMutationAfterCommit(txn.StartTs, commitTs, delta)
+			x.Check(proto.Unmarshal(delta, p))
+			val.list.setMutationAfterCommit(txn.StartTs, commitTs, p, true)
 		}
 		globalCache.Unlock()
 	}
@@ -406,7 +420,7 @@ func unmarshalOrCopy(plist *pb.PostingList, item *badger.Item) error {
 			// empty pl
 			return nil
 		}
-		return plist.Unmarshal(val)
+		return proto.Unmarshal(val, plist)
 	})
 }
 
@@ -477,19 +491,14 @@ func ReadPostingList(key []byte, it *badger.Iterator) (*List, error) {
 		case BitDeltaPosting:
 			err := item.Value(func(val []byte) error {
 				pl := &pb.PostingList{}
-				if err := pl.Unmarshal(val); err != nil {
+				if err := proto.Unmarshal(val, pl); err != nil {
 					return err
 				}
 				pl.CommitTs = item.Version()
-				for _, mpost := range pl.Postings {
-					// commitTs, startTs are meant to be only in memory, not
-					// stored on disk.
-					mpost.CommitTs = item.Version()
-				}
 				if l.mutationMap == nil {
-					l.mutationMap = make(map[uint64]*pb.PostingList)
+					l.mutationMap = newMutableLayer()
 				}
-				l.mutationMap[pl.CommitTs] = pl
+				l.mutationMap.insertCommittedPostings(pl)
 				return nil
 			})
 			if err != nil {
@@ -520,10 +529,7 @@ func copyList(l *List) *List {
 		key:   l.key,
 		plist: l.plist,
 	}
-	lCopy.mutationMap = make(map[uint64]*pb.PostingList, len(l.mutationMap))
-	for k, v := range l.mutationMap {
-		lCopy.mutationMap[k] = proto.Clone(v).(*pb.PostingList)
-	}
+	lCopy.mutationMap = l.mutationMap.clone()
 	return lCopy
 }
 
@@ -537,7 +543,32 @@ func ShouldGoInCache(pk x.ParsedKey) bool {
 	return (!pk.IsData() && strings.HasSuffix(pk.Attr, "dgraph.type"))
 }
 
+func PostingListCacheEnabled() bool {
+	return lCache != nil
+}
+
+func GetNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
+	return getNew(key, pstore, readTs)
+}
+
 func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
+	if PostingListCacheEnabled() {
+		l, ok := lCache.Get(key)
+		if ok && l != nil {
+			// No need to clone the immutable layer or the key since mutations will not modify it.
+			lCopy := &List{
+				minTs: l.minTs,
+				maxTs: l.maxTs,
+				key:   key,
+				plist: l.plist,
+			}
+			l.RLock()
+			lCopy.mutationMap = l.mutationMap.clone()
+			l.RUnlock()
+			return lCopy, nil
+		}
+	}
+
 	if pstore.IsClosed() {
 		return nil, badger.ErrDBClosed
 	}
@@ -602,6 +633,10 @@ func getNew(key []byte, pstore *badger.DB, readTs uint64) (*List, error) {
 		}
 		l.RUnlock()
 		globalCache.Unlock()
+	}
+
+	if PostingListCacheEnabled() {
+		lCache.Set(key, l, 0)
 	}
 
 	return l, nil

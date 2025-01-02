@@ -29,6 +29,7 @@ import (
 	ostats "go.opencensus.io/stats"
 	otrace "go.opencensus.io/trace"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/y"
@@ -40,7 +41,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/schema"
 	"github.com/dgraph-io/dgraph/v24/types"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 var (
@@ -68,7 +69,7 @@ func runMutation(ctx context.Context, edge *pb.DirectedEdge, txn *posting.Txn) e
 	// We shouldn't check whether this Alpha serves this predicate or not. Membership information
 	// isn't consistent across the entire cluster. We should just apply whatever is given to us.
 	su, ok := schema.State().Get(ctx, edge.Attr)
-	if edge.Op == pb.DirectedEdge_SET {
+	if edge.Op != pb.DirectedEdge_DEL {
 		if !ok {
 			return errors.Errorf("runMutation: Unable to find schema for %s", edge.Attr)
 		}
@@ -293,7 +294,7 @@ func updateSchema(s *pb.SchemaUpdate, ts uint64) error {
 	schema.State().DeleteMutSchema(s.Predicate)
 	txn := pstore.NewTransactionAt(ts, true)
 	defer txn.Discard()
-	data, err := s.Marshal()
+	data, err := proto.Marshal(s)
 	x.Check(err)
 	e := &badger.Entry{
 		Key:      x.SchemaKey(s.Predicate),
@@ -337,18 +338,18 @@ func createSchema(attr string, typ types.TypeID, hint pb.Metadata_HintType, ts u
 }
 
 func runTypeMutation(ctx context.Context, update *pb.TypeUpdate, ts uint64) error {
-	current := *update
-	schema.State().SetType(update.TypeName, &current)
-	return updateType(update.TypeName, *update, ts)
+	current := proto.Clone(update).(*pb.TypeUpdate)
+	schema.State().SetType(update.TypeName, current)
+	return updateType(update.TypeName, update, ts)
 }
 
 // We commit schema to disk in blocking way, should be ok because this happens
 // only during schema mutations or we see a new predicate.
-func updateType(typeName string, t pb.TypeUpdate, ts uint64) error {
-	schema.State().SetType(typeName, &t)
+func updateType(typeName string, t *pb.TypeUpdate, ts uint64) error {
+	schema.State().SetType(typeName, t)
 	txn := pstore.NewTransactionAt(ts, true)
 	defer txn.Discard()
-	data, err := t.Marshal()
+	data, err := proto.Marshal(t)
 	x.Check(err)
 	e := &badger.Entry{
 		Key:      x.TypeKey(typeName),
@@ -783,7 +784,7 @@ func MutateOverNetwork(ctx context.Context, m *pb.Mutations) (*api.TxnContext, e
 	// Wait for all the goroutines to reply back.
 	// We return if an error was returned or the parent called ctx.Done()
 	var e error
-	for i := 0; i < len(mutationMap); i++ {
+	for range mutationMap {
 		res := <-resCh
 		if res.err != nil {
 			e = res.err

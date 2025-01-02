@@ -43,8 +43,6 @@ const (
 	Euclidean            = "euclidean"
 	Cosine               = "cosine"
 	DotProd              = "dotproduct"
-	plError              = "\nerror fetching posting list for data key: "
-	dataError            = "\nerror fetching data for data key: "
 	EmptyHNSWTreeError   = "HNSW tree has no elements"
 	VecKeyword           = "__vector_"
 	visitedVectorsLevel  = "visited_vectors_level_"
@@ -62,6 +60,11 @@ const (
 	DefaultPrefix = byte(0x00)
 	// NsSeparator is the separator between the namespace and attribute.
 	NsSeparator = "-"
+)
+
+var (
+	errNilVector           = errors.New("nil vector returned")
+	errFetchingPostingList = errors.New("error fetching posting list")
 )
 
 type SearchResult struct {
@@ -179,7 +182,7 @@ func ParseEdges(s string) ([]uint64, error) {
 		// Splitting based on comma-separation.
 		values := strings.Split(trimmed, ",")
 		result := make([]uint64, len(values))
-		for i := 0; i < len(values); i++ {
+		for i := range values {
 			trimmedVal := strings.TrimSpace(values[i])
 			val, err := strconv.ParseUint(trimmedVal, 10, 64)
 			if err != nil {
@@ -191,7 +194,7 @@ func ParseEdges(s string) ([]uint64, error) {
 	}
 	values := strings.Split(trimmed, " ")
 	result := make([]uint64, 0, len(values))
-	for i := 0; i < len(values); i++ {
+	for i := range values {
 		if len(values[i]) == 0 {
 			// skip if we have an empty string. This can naturally
 			// occur if input s was "[1.0     2.0]"
@@ -240,7 +243,7 @@ func GetSimType[T c.Float](indexType string, floatBits int) SimilarityType[T] {
 	}
 }
 
-// implements CacheType interface
+// TxnCache implements CacheType interface
 type TxnCache struct {
 	txn     index.Txn
 	startTs uint64
@@ -265,7 +268,7 @@ func NewTxnCache(txn index.Txn, startTs uint64) *TxnCache {
 	}
 }
 
-// implements index.CacheType interface
+// QueryCache implements index.CacheType interface
 type QueryCache struct {
 	cache  index.LocalCache
 	readTs uint64
@@ -296,7 +299,7 @@ func getDataFromKeyWithCacheType(keyString string, uid uint64, c index.CacheType
 	key := DataKey(keyString, uid)
 	data, err := c.Get(key)
 	if err != nil {
-		return nil, errors.New(err.Error() + plError + keyString + " with uid" + strconv.FormatUint(uid, 10))
+		return nil, fmt.Errorf("%w: %w; %s", err, errFetchingPostingList, keyString+" with uid "+strconv.FormatUint(uid, 10))
 	}
 	return data, nil
 }
@@ -314,10 +317,10 @@ func populateEdgeDataFromKeyWithCacheType(
 	c index.CacheType,
 	edgeData *[][]uint64) (bool, error) {
 	data, err := getDataFromKeyWithCacheType(keyString, uid, c)
-	// Note that "dataError" errors are treated as just not having
+	// Note that posting list fetching errors are treated as just not having
 	// found the data -- no harm, no foul, as it is probably a
 	// dead reference that we can ignore.
-	if err != nil && !strings.Contains(err.Error(), dataError) {
+	if err != nil && !errors.Is(err, errFetchingPostingList) {
 		return false, err
 	}
 	if data == nil {
@@ -355,7 +358,7 @@ func getInsertLayer(maxLevels int) int {
 	// multFactor is a multiplicative factor used to normalize the distribution
 	var level int
 	randFloat := rand.Float64()
-	for i := 0; i < maxLevels; i++ {
+	for i := range maxLevels {
 		// calculate level based on section 3.1 here
 		if randFloat < math.Pow(1.0/float64(5), float64(maxLevels-1-i)) {
 			level = i
@@ -370,20 +373,19 @@ func getInsertLayer(maxLevels int) int {
 func (ph *persistentHNSW[T]) getVecFromUid(uid uint64, c index.CacheType, vec *[]T) error {
 	data, err := getDataFromKeyWithCacheType(ph.pred, uid, c)
 	if err != nil {
-		if strings.Contains(err.Error(), plError) {
+		if errors.Is(err, errFetchingPostingList) {
 			// no vector. Return empty array of floats
 			index.BytesAsFloatArray([]byte{}, vec, ph.floatBits)
-			return errors.New("Nil vector returned")
+			return fmt.Errorf("%w; %w", errNilVector, err)
 		}
 		return err
 	}
 	if data != nil {
 		index.BytesAsFloatArray(data.([]byte), vec, ph.floatBits)
 		return nil
-
 	} else {
 		index.BytesAsFloatArray([]byte{}, vec, ph.floatBits)
-		return errors.New("Nil vector returned")
+		return errNilVector
 	}
 }
 
@@ -614,7 +616,7 @@ func (ph *persistentHNSW[T]) addNeighbors(ctx context.Context, tc *TxnCache,
 		}
 	}
 	var inVec, outVec []T
-	for level := 0; level < ph.maxLevels; level++ {
+	for level := range ph.maxLevels {
 		allLayerEdges[level], nnEdgesErr = ph.removeDeadNodes(allLayerEdges[level], tc)
 		if nnEdgesErr != nil {
 			return nil, nnEdgesErr
@@ -663,7 +665,7 @@ func (ph *persistentHNSW[T]) removeDeadNodes(nnEdges []uint64, tc *TxnCache) ([]
 	// TODO add a path to delete deadNodes
 	if ph.deadNodes == nil {
 		data, err := getDataFromKeyWithCacheType(ph.vecDead, 1, tc)
-		if err != nil && err.Error() == plError {
+		if err != nil && !errors.Is(err, errFetchingPostingList) {
 			return []uint64{}, err
 		}
 

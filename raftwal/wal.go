@@ -27,7 +27,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 var errNotFound = errors.New("Unable to find raft entry")
@@ -114,7 +114,7 @@ func (l *wal) truncateEntriesUntil(lastIdx uint64) {
 			continue
 		}
 
-		for idx := 0; idx < maxNumEntries; idx++ {
+		for idx := range maxNumEntries {
 			entry := file.getEntry(idx)
 			if entry.Index() >= lastIdx {
 				return

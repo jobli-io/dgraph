@@ -35,6 +35,7 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	bpb "github.com/dgraph-io/badger/v4/pb"
@@ -45,7 +46,7 @@ import (
 	"github.com/dgraph-io/dgraph/v24/raftwal"
 	"github.com/dgraph-io/dgraph/v24/types"
 	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/z"
+	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 var (
@@ -301,7 +302,7 @@ func showAllPostingsAt(db *badger.DB, readTs uint64) {
 		val, err := item.ValueCopy(nil)
 		x.Check(err)
 		var plist pb.PostingList
-		x.Check(plist.Unmarshal(val))
+		x.Check(proto.Unmarshal(val, &plist))
 
 		x.AssertTrue(len(plist.Postings) <= 1)
 		var num int
@@ -365,7 +366,7 @@ func jepsen(db *badger.DB) {
 	showAllPostingsAt(db, ts)
 	seekTotal(db, ts-1)
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		// Get a few previous commits.
 		_, ts = getMinMax(db, ts-1)
 		showAllPostingsAt(db, ts)
@@ -408,21 +409,21 @@ func history(lookup []byte, itr *badger.Iterator) {
 		fmt.Fprintln(&buf)
 		if meta&posting.BitDeltaPosting > 0 {
 			plist := &pb.PostingList{}
-			x.Check(plist.Unmarshal(val))
+			x.Check(proto.Unmarshal(val, plist))
 			for _, p := range plist.Postings {
 				appendPosting(&buf, p)
 			}
 		}
 		if meta&posting.BitCompletePosting > 0 {
 			var plist pb.PostingList
-			x.Check(plist.Unmarshal(val))
+			x.Check(proto.Unmarshal(val, &plist))
 
 			for _, p := range plist.Postings {
 				appendPosting(&buf, p)
 			}
 
 			fmt.Fprintf(&buf, " Num uids = %d. Size = %d\n",
-				codec.ExactLen(plist.Pack), plist.Pack.Size())
+				codec.ExactLen(plist.Pack), proto.Size(plist.Pack))
 			dec := codec.Decoder{Pack: plist.Pack}
 			for uids := dec.Seek(0, codec.SeekStart); len(uids) > 0; uids = dec.Next() {
 				for _, uid := range uids {
@@ -525,7 +526,7 @@ func lookup(db *badger.DB) {
 		x.Check(err)
 
 		var s pb.SchemaUpdate
-		x.Check(s.Unmarshal(schemaBytes))
+		x.Check(proto.Unmarshal(schemaBytes, &s))
 		fmt.Fprintf(&buf, "Value: %+v\n", s)
 	} else {
 		fmt.Fprintf(&buf, "Key: %x", item.Key())
@@ -533,7 +534,10 @@ func lookup(db *badger.DB) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		fmt.Fprintf(&buf, " Length: %d", pl.Length(math.MaxUint64, 0))
+		pl.RLock()
+		c := pl.GetLength(math.MaxUint64)
+		pl.RUnlock()
+		fmt.Fprintf(&buf, " Length: %d", c)
 
 		splits := pl.PartSplits()
 		isMultiPart := len(splits) > 0
@@ -611,6 +615,13 @@ func printKeys(db *badger.DB) {
 		}
 
 		var sz, deltaCount int64
+		pl, err := posting.GetNew(key, db, opt.readTs)
+		if err == nil {
+			pl.RLock()
+			c := pl.GetLength(math.MaxUint64)
+			fmt.Fprintf(&buf, " countValue: [%d]", c)
+			pl.RUnlock()
+		}
 	LOOP:
 		for ; itr.ValidForPrefix(prefix); itr.Next() {
 			item := itr.Item()
@@ -671,7 +682,7 @@ func printKeys(db *badger.DB) {
 		var count int
 		err := buf.SliceIterate(func(s []byte) error {
 			var kv bpb.KV
-			if err := kv.Unmarshal(s); err != nil {
+			if err := proto.Unmarshal(s, &kv); err != nil {
 				return err
 			}
 			x.Check2(w.Write(kv.Value))
