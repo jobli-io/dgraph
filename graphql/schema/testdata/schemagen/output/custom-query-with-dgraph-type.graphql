@@ -101,6 +101,7 @@ input CustomHTTP {
 
 input DgraphDefault {
 	value: String
+	expr: String
 }
 
 type Point {

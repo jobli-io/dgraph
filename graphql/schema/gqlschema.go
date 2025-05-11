@@ -200,6 +200,7 @@ input CustomHTTP {
 
 input DgraphDefault {
 	value: String
+	expr: String
 }
 
 type Point {
@@ -2532,7 +2533,7 @@ func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
 
 		// if the field has a @default(add) value it is optional in add input
 		var field = createField(schema, fld)
-		if getDefaultValue(fld, "add") != nil {
+		if getDefaultValue(fld, "add", nil) != nil {
 			field.Type.NonNull = false
 		}
 

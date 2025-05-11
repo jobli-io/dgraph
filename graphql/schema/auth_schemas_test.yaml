@@ -391,3 +391,23 @@ valid_schemas:
         username: String! @id
         userRole: String @search(by: [hash])
       }
+
+  - name: "Rule using nested filter"
+    input: |
+      type X @auth(
+        query: { not: { rule: """
+          query {
+            queryX(filter: { userRole: { permission: { eq: "ADMIN" } } }) {
+              __typename
+            }
+          }"""
+        } }
+      ) {
+        username: String! @id
+        userRole: Y @hasInverse(field: hasX) @search
+      }
+
+      type Y {
+        permission: String! @search(by: [hash])
+        hasX: X 
+      }

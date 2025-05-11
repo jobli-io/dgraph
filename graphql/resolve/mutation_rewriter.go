@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/golang/glog"
 	"github.com/pkg/errors"
 
 	dgoapi "github.com/dgraph-io/dgo/v240/protos/api"
@@ -1646,10 +1647,11 @@ func rewriteObject(
 	// Now we know whether this is a new node or not, we can set @default(add/update) fields
 	for _, field := range typ.Fields() {
 		var pred = field.DgraphPredicate()
+		glog.Infof("---> all  %s: %v", pred, obj)
 		if newObj[pred] != nil {
 			continue
 		}
-		var value = field.GetDefaultValue(action)
+		var value = field.GetDefaultValue(action, obj)
 		if value != nil {
 			newObj[pred] = value
 		}

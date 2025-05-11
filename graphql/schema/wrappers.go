@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/expr-lang/expr"
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
 
 	"github.com/dgraph-io/dgraph/v24/graphql/authorization"
@@ -289,7 +291,7 @@ type FieldDefinition interface {
 	HasEmbeddingDirective() bool
 	EmbeddingSearchMetric() string
 	HasInterfaceArg() bool
-	GetDefaultValue(action string) interface{}
+	GetDefaultValue(action string, parent map[string]interface{}) interface{}
 	Inverse() FieldDefinition
 	WithMemberType(string) FieldDefinition
 	// TODO - It might be possible to get rid of ForwardEdge and just use Inverse() always.
@@ -2340,14 +2342,14 @@ func (fd *fieldDefinition) IsID() bool {
 	return isID(fd.fieldDef)
 }
 
-func (fd *fieldDefinition) GetDefaultValue(action string) interface{} {
+func (fd *fieldDefinition) GetDefaultValue(action string, parent map[string]interface{}) interface{} {
 	if fd.fieldDef == nil {
 		return nil
 	}
-	return getDefaultValue(fd.fieldDef, action)
+	return getDefaultValue(fd.fieldDef, action, parent)
 }
 
-func getDefaultValue(fd *ast.FieldDefinition, action string) interface{} {
+func getDefaultValue(fd *ast.FieldDefinition, action string, parent map[string]interface{}) interface{} {
 	dir := fd.Directives.ForName(defaultDirective)
 	if dir == nil {
 		return nil
@@ -2356,18 +2358,35 @@ func getDefaultValue(fd *ast.FieldDefinition, action string) interface{} {
 	if arg == nil {
 		return nil
 	}
-	value := arg.Value.Children.ForName("value")
-	if value == nil {
-		return nil
-	}
-	if value.Raw == "$now" {
-		if flag.Lookup("test.v") == nil {
-			return time.Now().Format(time.RFC3339)
-		} else {
-			return "2000-01-01T00:00:00.00Z"
+
+	if value := arg.Value.Children.ForName("value"); value != nil {
+		if value.Raw == "$now" {
+			if flag.Lookup("test.v") == nil {
+				return time.Now().Format(time.RFC3339)
+			} else {
+				return "2000-01-01T00:00:00.00Z"
+			}
 		}
+		return value.Raw
 	}
-	return value.Raw
+
+	if exp := arg.Value.Children.ForName("expr"); exp != nil {
+		env := map[string]interface{}{
+			"uuid":   uuid.NewString,
+			"parent": parent,
+		}
+		program, err := expr.Compile(exp.Raw, expr.Env(env))
+		if err != nil {
+			return nil
+		}
+		expResult, err := expr.Run(program, env)
+		if err != nil {
+			return nil
+		}
+		return expResult
+	}
+
+	return nil
 }
 
 func (fd *fieldDefinition) HasIDDirective() bool {

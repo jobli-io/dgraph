@@ -29,6 +29,8 @@ import (
 	"github.com/dgraph-io/gqlparser/v2/gqlerror"
 	"github.com/dgraph-io/gqlparser/v2/parser"
 	"github.com/dgraph-io/gqlparser/v2/validator"
+	"github.com/expr-lang/expr"
+	"github.com/google/uuid"
 	"gopkg.in/yaml.v2"
 )
 
@@ -1473,7 +1475,7 @@ func lambdaDirectiveValidation(sch *ast.Schema,
 // Fields of type ID
 // Fields that are not scalar types (Int, Float, String, Boolean, DateTime) or an enum
 // Fields that are list types (ie `[String])
-// Fields with @id, @custom, @lambda
+// Fields with @custom, @lambda
 func defaultDirectiveValidation(sch *ast.Schema,
 	typ *ast.Definition,
 	field *ast.FieldDefinition,
@@ -1497,12 +1499,12 @@ func defaultDirectiveValidation(sch *ast.Schema,
 			"Type %s; Field %s: cannot use @default directive on field with list type [%s]",
 			typ.Name, field.Name, field.Type.Name())}
 	}
-	if field.Directives.ForName(idDirective) != nil {
-		return []*gqlerror.Error{gqlerror.ErrorPosf(
-			dir.Position,
-			"Type %s; Field %s: cannot use @default directive on field with @id directive",
-			typ.Name, field.Name)}
-	}
+	// if field.Directives.ForName(idDirective) != nil {
+	// 	return []*gqlerror.Error{gqlerror.ErrorPosf(
+	// 		dir.Position,
+	// 		"Type %s; Field %s: cannot use @default directive on field with @id directive",
+	// 		typ.Name, field.Name)}
+	// }
 	if isID(field) {
 		return []*gqlerror.Error{gqlerror.ErrorPosf(
 			dir.Position,
@@ -1523,34 +1525,49 @@ func defaultDirectiveValidation(sch *ast.Schema,
 	}
 	for _, arg := range dir.Arguments {
 		fieldType := field.Type.Name()
-		value := arg.Value.Children.ForName("value").Raw
-		if value == "$now" && fieldType != "DateTime" {
-			return []*gqlerror.Error{gqlerror.ErrorPosf(
-				dir.Position,
-				"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
-				typ.Name, field.Name, value, fieldType)}
-		}
-		if fieldType == "Int" {
-			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+		if v := arg.Value.Children.ForName("value"); v != nil {
+			value := v.Raw
+			if value == "$now" && fieldType != "DateTime" {
 				return []*gqlerror.Error{gqlerror.ErrorPosf(
 					dir.Position,
 					"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
 					typ.Name, field.Name, value, fieldType)}
 			}
-		}
-		if fieldType == "Float" {
-			if _, err := strconv.ParseFloat(value, 64); err != nil {
+			if fieldType == "Int" {
+				if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+					return []*gqlerror.Error{gqlerror.ErrorPosf(
+						dir.Position,
+						"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
+						typ.Name, field.Name, value, fieldType)}
+				}
+			}
+			if fieldType == "Float" {
+				if _, err := strconv.ParseFloat(value, 64); err != nil {
+					return []*gqlerror.Error{gqlerror.ErrorPosf(
+						dir.Position,
+						"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
+						typ.Name, field.Name, value, fieldType)}
+				}
+			}
+			if fieldType == "Boolean" && value != "true" && value != "false" {
 				return []*gqlerror.Error{gqlerror.ErrorPosf(
 					dir.Position,
 					"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
 					typ.Name, field.Name, value, fieldType)}
 			}
-		}
-		if fieldType == "Boolean" && value != "true" && value != "false" {
-			return []*gqlerror.Error{gqlerror.ErrorPosf(
-				dir.Position,
-				"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
-				typ.Name, field.Name, value, fieldType)}
+		} else if v := arg.Value.Children.ForName("expr"); v != nil {
+			exp := v.Raw
+			env := map[string]interface{}{
+				"uuid":   uuid.NewString,
+				"parent": map[string]interface{}{},
+			}
+			_, err := expr.Compile(exp, expr.Env(env))
+			if err != nil {
+				return []*gqlerror.Error{gqlerror.ErrorPosf(
+					dir.Position,
+					"Type %s; Field %s: @default directive provides extr \"%s\" which cannot be compiled",
+					typ.Name, field.Name, exp)}
+			}
 		}
 	}
 	return nil
