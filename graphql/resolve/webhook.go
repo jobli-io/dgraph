@@ -51,8 +51,9 @@ type eventPayload struct {
 }
 
 type addEvent struct {
-	RootUIDs []string      `json:"rootUIDs"`
-	Input    []interface{} `json:"input"`
+	RootUIDs []string            `json:"rootUIDs"`
+	NewUIDs  map[string][]string `json:"newUIDs"`
+	Input    []interface{}       `json:"input"`
 }
 
 type updateEvent struct {
@@ -68,7 +69,8 @@ type deleteEvent struct {
 // sendWebhookEvent forms an HTTP payload required for the webhooks configured with @lambdaOnMutate
 // directive, and then sends that payload to the lambda URL configured with Alpha. There is no
 // guarantee that the payload will be delivered successfully to the lambda server.
-func sendWebhookEvent(ctx context.Context, m schema.Mutation, commitTs uint64, rootUIDs []string) {
+func sendWebhookEvent(ctx context.Context, m schema.Mutation, commitTs uint64,
+	rootUIDs []string, newUIDs map[string][]string) {
 	accessJWT, _ := x.ExtractJwt(ctx)
 	var authHeader *authHeaderPayload
 	if m.GetAuthMeta() != nil {
@@ -94,6 +96,7 @@ func sendWebhookEvent(ctx context.Context, m schema.Mutation, commitTs uint64, r
 		input, _ := m.ArgValue(schema.InputArgName).([]interface{})
 		payload.Event.Add = &addEvent{
 			RootUIDs: rootUIDs,
+			NewUIDs:  newUIDs,
 			Input:    input,
 		}
 	case schema.UpdateMutation:
