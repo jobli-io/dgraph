@@ -1647,72 +1647,77 @@ func rewriteObject(
 		}
 		var value = field.GetDefaultValue(action, obj, authVars) // TODO: handle errors from expression
 
-		// update idExistence for default node
-		if v, ok := value.(map[string]interface{}); ok {
-			fieldQueries, fieldTypes, err := existenceQueries(ctx, typ.Field(field.Name()).Type(), field, varGen, v, xidMetadata)
-			retErrors = append(retErrors, err...)
-			// Execute queries and parse its result into a map
-			qry := dgraph.AsString(fieldQueries)
-			req := &dgoapi.Request{Query: qry}
-
-			if req.Query != "" {
-				// Executing and processing existence queries
-				mutResp, err := NewDgraphExecutor().Execute(ctx, req, nil)
-				if err != nil {
-					retErrors = append(retErrors, err)
-					continue
-				}
-
-				type res struct {
-					Uid   string   `json:"uid"`
-					Types []string `json:"dgraph.type"`
-				}
-				queryResultMap := make(map[string][]res)
-				if mutResp != nil {
-					err = json.Unmarshal(mutResp.Json, &queryResultMap)
-				}
-				if err != nil {
-					retErrors = append(retErrors, err)
-					continue
-				}
-
-				x.AssertTrue(len(fieldTypes) == len(fieldQueries))
-				// qNameToType map contains the mapping from the query name to type/interface the query response
-				// has to be filtered upon.
-				qNameToType := make(map[string]string)
-				for i, typ := range fieldTypes {
-					qNameToType[fieldQueries[i].Attr] = typ
-				}
-				// The above response is parsed into map[string]string as follows:
-				// {
-				// 		"Project_1" : "0x123",
-				// 		"Column_2" : "0x234"
-				// }
-				// As only Add and Update mutations generate queries using RewriteQueries,
-				// qNameToUID map will be non-empty only in case of Add or Update Mutation.
-				for key, result := range queryResultMap {
-					count := 0
-					typ := qNameToType[key]
-					for _, res := range result {
-						if x.HasString(res.Types, typ) {
-							idExistence[key] = res.Uid
-							count++
-						}
-					}
-					if count > 1 {
-						// Found multiple UIDs for query. This should ideally not happen.
-						// This indicates that there are multiple nodes with same XIDs / UIDs. Throw an error.
-						err = errors.New(fmt.Sprintf("Found multiple nodes with ID: %s", idExistence[key]))
+		if value != nil{
+			// update idExistence for nodes with default xid
+			// ...
+			
+			// update idExistence for default node
+			if v, ok := value.(map[string]interface{}); ok {
+				fieldQueries, fieldTypes, err := existenceQueries(ctx, typ.Field(field.Name()).Type(), field, varGen, v, xidMetadata)
+				retErrors = append(retErrors, err...)
+				// Execute queries and parse its result into a map
+				qry := dgraph.AsString(fieldQueries)
+				req := &dgoapi.Request{Query: qry}
+	
+				if req.Query != "" {
+					// Executing and processing existence queries
+					mutResp, err := NewDgraphExecutor().Execute(ctx, req, nil)
+					if err != nil {
 						retErrors = append(retErrors, err)
 						continue
 					}
+	
+					type res struct {
+						Uid   string   `json:"uid"`
+						Types []string `json:"dgraph.type"`
+					}
+					queryResultMap := make(map[string][]res)
+					if mutResp != nil {
+						err = json.Unmarshal(mutResp.Json, &queryResultMap)
+					}
+					if err != nil {
+						retErrors = append(retErrors, err)
+						continue
+					}
+	
+					x.AssertTrue(len(fieldTypes) == len(fieldQueries))
+					// qNameToType map contains the mapping from the query name to type/interface the query response
+					// has to be filtered upon.
+					qNameToType := make(map[string]string)
+					for i, typ := range fieldTypes {
+						qNameToType[fieldQueries[i].Attr] = typ
+					}
+					// The above response is parsed into map[string]string as follows:
+					// {
+					// 		"Project_1" : "0x123",
+					// 		"Column_2" : "0x234"
+					// }
+					// As only Add and Update mutations generate queries using RewriteQueries,
+					// qNameToUID map will be non-empty only in case of Add or Update Mutation.
+					for key, result := range queryResultMap {
+						count := 0
+						typ := qNameToType[key]
+						for _, res := range result {
+							if x.HasString(res.Types, typ) {
+								idExistence[key] = res.Uid
+								count++
+							}
+						}
+						if count > 1 {
+							// Found multiple UIDs for query. This should ideally not happen.
+							// This indicates that there are multiple nodes with same XIDs / UIDs. Throw an error.
+							err = errors.New(fmt.Sprintf("Found multiple nodes with ID: %s", idExistence[key]))
+							retErrors = append(retErrors, err)
+							continue
+						}
+					}
 				}
+	
+				obj[field.Name()] = v
+	
+			} else {
+				newObj[pred] = value
 			}
-
-			obj[field.Name()] = v
-
-		} else if value != nil {
-			newObj[pred] = value
 		}
 	}
 

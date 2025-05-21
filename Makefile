@@ -59,8 +59,8 @@ image-local local-image:
 	@GOOS=linux GOARCH=amd64 $(MAKE) dgraph
 	@mkdir -p linux
 	@mv ./dgraph/dgraph ./linux/dgraph
-	@docker build -f contrib/Dockerfile -t dgraph/dgraph:local .
-	# @docker build -f contrib/Dockerfile -t dgraph/dgraph:local . --platform linux/amd64
+	# @docker build -f contrib/Dockerfile -t dgraph/dgraph:local .
+	@docker build -f contrib/Dockerfile -t dgraph/dgraph:local . --platform linux/amd64
 	@rm -r linux
 
 .PHONY: docker-image
