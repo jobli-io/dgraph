@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -22,7 +11,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -63,6 +52,11 @@ type Options struct {
 	CachePercentage string
 	// CacheMb is the total memory allocated between all the caches.
 	CacheMb int64
+	// RemoveOnUpdate is the parameter that allows the user to set if the cache should keep the items that were
+	// just mutated. Keeping these items are good when there is a mixed workload where you are updating the
+	// same element multiple times. However, for a heavy mutation workload, not keeping these items would be better
+	// , as keeping these elements bloats the cache making it slow.
+	RemoveOnUpdate bool
 
 	Audit *x.LoggerConf
 
@@ -73,7 +67,7 @@ type Options struct {
 	// vs searched via type index. If the number of elements are too low, then querying the
 	// index might be slower. This would allow people to set their limit according to
 	// their use case.
-	TypeFilterUidLimit int64
+	TypeFilterUidLimit uint64
 }
 
 // Config holds an instance of the server options..

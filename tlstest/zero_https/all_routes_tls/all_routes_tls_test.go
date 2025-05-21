@@ -1,5 +1,10 @@
 //go:build integration
 
+/*
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package all_routes_tls
 
 import (
@@ -15,7 +20,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgraph/v24/testutil"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
 )
 
 type testCase struct {

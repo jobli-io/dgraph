@@ -1,17 +1,6 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package posting
@@ -26,10 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func uids(l *List, readTs uint64) []uint64 {
@@ -41,9 +30,9 @@ func uids(l *List, readTs uint64) []uint64 {
 // indexTokensForTest is just a wrapper around indexTokens used for convenience.
 func indexTokensForTest(attr, lang string, val types.Val) ([]string, error) {
 	return indexTokens(context.Background(), &indexMutationInfo{
-		tokenizers: schema.State().Tokenizer(context.Background(), x.GalaxyAttr(attr)),
+		tokenizers: schema.State().Tokenizer(context.Background(), x.AttrInRootNamespace(attr)),
 		edge: &pb.DirectedEdge{
-			Attr: x.GalaxyAttr(attr),
+			Attr: x.AttrInRootNamespace(attr),
 			Lang: lang,
 		},
 		val: val,
@@ -157,6 +146,7 @@ func addMutation(t *testing.T, l *List, edge *pb.DirectedEdge, op uint32,
 	}
 
 	txn.Update()
+	txn.UpdateCachedKeys(commitTs)
 	writer := NewTxnWriter(pstore)
 	require.NoError(t, txn.CommitToDisk(writer, commitTs))
 	require.NoError(t, writer.Flush())
@@ -180,7 +170,7 @@ friend:[uid] @reverse .
 func TestTokensTable(t *testing.T) {
 	require.NoError(t, schema.ParseBytes([]byte(schemaVal), 1))
 
-	attr := x.GalaxyAttr("name")
+	attr := x.AttrInRootNamespace("name")
 	key := x.DataKey(attr, 1)
 	l, err := getNew(key, ps, math.MaxUint64)
 	require.NoError(t, err)
@@ -271,9 +261,10 @@ func addEdgeToUID(t *testing.T, attr string, src uint64,
 
 func TestCountReverseIndexWithData(t *testing.T) {
 	require.NoError(t, pstore.DropAll())
+	memoryLayer.clear()
 	indexNameCountVal := "testcount: [uid] @count @reverse ."
 
-	attr := x.GalaxyAttr("testcount")
+	attr := x.AttrInRootNamespace("testcount")
 	addEdgeToUID(t, attr, 1, 23, uint64(8), uint64(9))
 	addEdgeToUID(t, attr, 1, 23, uint64(10), uint64(11))
 	l, err := GetNoStore(x.DataKey(attr, 1), 12)
@@ -305,9 +296,10 @@ func TestCountReverseIndexWithData(t *testing.T) {
 
 func TestCountReverseIndexEmptyPosting(t *testing.T) {
 	require.NoError(t, pstore.DropAll())
+	memoryLayer.clear()
 	indexNameCountVal := "testcount: [uid] @count @reverse ."
 
-	attr := x.GalaxyAttr("testcount")
+	attr := x.AttrInRootNamespace("testcount")
 	addDelEdgeToUID(t, attr, 1, 23, uint64(10), uint64(11))
 	l, err := GetNoStore(x.DataKey(attr, 1), 12)
 	require.NoError(t, err)
@@ -337,13 +329,13 @@ func TestCountReverseIndexEmptyPosting(t *testing.T) {
 }
 
 func TestRebuildTokIndex(t *testing.T) {
-	addEdgeToValue(t, x.GalaxyAttr("name2"), 91, "Michonne", uint64(1), uint64(2))
-	addEdgeToValue(t, x.GalaxyAttr("name2"), 92, "David", uint64(3), uint64(4))
+	addEdgeToValue(t, x.AttrInRootNamespace("name2"), 91, "Michonne", uint64(1), uint64(2))
+	addEdgeToValue(t, x.AttrInRootNamespace("name2"), 92, "David", uint64(3), uint64(4))
 
 	require.NoError(t, schema.ParseBytes([]byte(schemaVal), 1))
-	currentSchema, _ := schema.State().Get(context.Background(), x.GalaxyAttr("name2"))
+	currentSchema, _ := schema.State().Get(context.Background(), x.AttrInRootNamespace("name2"))
 	rb := IndexRebuild{
-		Attr:          x.GalaxyAttr("name2"),
+		Attr:          x.AttrInRootNamespace("name2"),
 		StartTs:       5,
 		OldSchema:     nil,
 		CurrentSchema: &currentSchema,
@@ -359,7 +351,7 @@ func TestRebuildTokIndex(t *testing.T) {
 	defer txn.Discard()
 	it := txn.NewIterator(badger.DefaultIteratorOptions)
 	defer it.Close()
-	pk := x.ParsedKey{Attr: x.GalaxyAttr("name2")}
+	pk := x.ParsedKey{Attr: x.AttrInRootNamespace("name2")}
 	prefix := pk.IndexPrefix()
 	var idxKeys []string
 	var idxVals []*List
@@ -379,8 +371,8 @@ func TestRebuildTokIndex(t *testing.T) {
 	}
 	require.Len(t, idxKeys, 2)
 	require.Len(t, idxVals, 2)
-	require.EqualValues(t, idxKeys[0], x.IndexKey(x.GalaxyAttr("name2"), "\x01david"))
-	require.EqualValues(t, idxKeys[1], x.IndexKey(x.GalaxyAttr("name2"), "\x01michonne"))
+	require.EqualValues(t, idxKeys[0], x.IndexKey(x.AttrInRootNamespace("name2"), "\x01david"))
+	require.EqualValues(t, idxKeys[1], x.IndexKey(x.AttrInRootNamespace("name2"), "\x01michonne"))
 
 	uids1 := uids(idxVals[0], 6)
 	uids2 := uids(idxVals[1], 6)
@@ -391,13 +383,13 @@ func TestRebuildTokIndex(t *testing.T) {
 }
 
 func TestRebuildTokIndexWithDeletion(t *testing.T) {
-	addEdgeToValue(t, x.GalaxyAttr("name2"), 91, "Michonne", uint64(1), uint64(2))
-	addEdgeToValue(t, x.GalaxyAttr("name2"), 92, "David", uint64(3), uint64(4))
+	addEdgeToValue(t, x.AttrInRootNamespace("name2"), 91, "Michonne", uint64(1), uint64(2))
+	addEdgeToValue(t, x.AttrInRootNamespace("name2"), 92, "David", uint64(3), uint64(4))
 
 	require.NoError(t, schema.ParseBytes([]byte(schemaVal), 1))
-	currentSchema, _ := schema.State().Get(context.Background(), x.GalaxyAttr("name2"))
+	currentSchema, _ := schema.State().Get(context.Background(), x.AttrInRootNamespace("name2"))
 	rb := IndexRebuild{
-		Attr:          x.GalaxyAttr("name2"),
+		Attr:          x.AttrInRootNamespace("name2"),
 		StartTs:       5,
 		OldSchema:     nil,
 		CurrentSchema: &currentSchema,
@@ -410,9 +402,9 @@ func TestRebuildTokIndexWithDeletion(t *testing.T) {
 
 	// Mutate the schema (the index in name2 is deleted) and rebuild the index.
 	require.NoError(t, schema.ParseBytes([]byte(mutatedSchemaVal), 1))
-	newSchema, _ := schema.State().Get(context.Background(), x.GalaxyAttr("name2"))
+	newSchema, _ := schema.State().Get(context.Background(), x.AttrInRootNamespace("name2"))
 	rb = IndexRebuild{
-		Attr:          x.GalaxyAttr("name2"),
+		Attr:          x.AttrInRootNamespace("name2"),
 		StartTs:       6,
 		OldSchema:     &currentSchema,
 		CurrentSchema: &newSchema,
@@ -428,7 +420,7 @@ func TestRebuildTokIndexWithDeletion(t *testing.T) {
 	defer txn.Discard()
 	it := txn.NewIterator(badger.DefaultIteratorOptions)
 	defer it.Close()
-	pk := x.ParsedKey{Attr: x.GalaxyAttr("name2")}
+	pk := x.ParsedKey{Attr: x.AttrInRootNamespace("name2")}
 	prefix := pk.IndexPrefix()
 	var idxKeys []string
 	var idxVals []*List
@@ -453,7 +445,7 @@ func TestRebuildTokIndexWithDeletion(t *testing.T) {
 }
 
 func TestRebuildReverseEdges(t *testing.T) {
-	friendAttr := x.GalaxyAttr("friend")
+	friendAttr := x.AttrInRootNamespace("friend")
 	addEdgeToUID(t, friendAttr, 1, 23, uint64(10), uint64(11))
 	addEdgeToUID(t, friendAttr, 1, 24, uint64(12), uint64(13))
 	addEdgeToUID(t, friendAttr, 2, 23, uint64(14), uint64(15))
@@ -616,7 +608,7 @@ func TestNeedsListTypeRebuild(t *testing.T) {
 
 	rb.OldSchema = &pb.SchemaUpdate{ValueType: pb.Posting_UID, List: true}
 	rb.CurrentSchema = &pb.SchemaUpdate{ValueType: pb.Posting_UID, List: false,
-		Predicate: x.GalaxyAttr("")} // This is added to prevent a crash in rebuilder.
+		Predicate: x.AttrInRootNamespace("")} // This is added to prevent a crash in rebuilder.
 	// We don't expect rebuilder to have predicates without namespace.
 	rebuild, err = rb.needsListTypeRebuild()
 	require.False(t, rebuild)

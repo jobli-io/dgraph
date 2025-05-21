@@ -1,17 +1,6 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package conn
@@ -25,15 +14,15 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
-	"go.opencensus.io/plugin/ocgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -170,7 +159,7 @@ func (p *Pools) Connect(addr string, tlsClientConf *tls.Config) *Pool {
 // newPool creates a new "pool" with one gRPC connection, refcount 0.
 func newPool(addr string, tlsClientConf *tls.Config) (*Pool, error) {
 	conOpts := []grpc.DialOption{
-		grpc.WithStatsHandler(&ocgrpc.ClientHandler{}),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(x.GrpcMaxSize),
 			grpc.MaxCallSendMsgSize(x.GrpcMaxSize),
@@ -184,7 +173,7 @@ func newPool(addr string, tlsClientConf *tls.Config) (*Pool, error) {
 		conOpts = append(conOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	conn, err := grpc.Dial(addr, conOpts...)
+	conn, err := grpc.NewClient(addr, conOpts...)
 	if err != nil {
 		glog.Errorf("unable to connect with %s : %s", addr, err)
 		return nil, err
@@ -295,7 +284,7 @@ func (p *Pool) MonitorHealth() {
 				return
 			}
 			ctx, cancel := context.WithTimeout(p.closer.Ctx(), 10*time.Second)
-			conn, err := grpc.DialContext(ctx, p.Addr, p.dialOpts...)
+			conn, err := grpc.NewClient(p.Addr, p.dialOpts...)
 			if err == nil {
 				// Make a dummy request to test out the connection.
 				client := pb.NewRaftClient(conn)

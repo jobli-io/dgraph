@@ -1,19 +1,8 @@
 //go:build integration || upgrade
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -26,30 +15,13 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dgraphapi"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
-func (ssuite *SystestTestSuite) TestQuery() {
-	ssuite.Run("schema response", ssuite.SchemaQueryTest)
-	ssuite.Run("schema response http", ssuite.SchemaQueryTestHTTP)
-	ssuite.Run("schema predicate names", ssuite.SchemaQueryTestPredicate1)
-	ssuite.Run("schema specific predicate fields", ssuite.SchemaQueryTestPredicate2)
-	ssuite.Run("schema specific predicate field", ssuite.SchemaQueryTestPredicate3)
-	ssuite.Run("multiple block eval", ssuite.MultipleBlockEval)
-	ssuite.Run("unmatched var assignment eval", ssuite.UnmatchedVarEval)
-	ssuite.Run("hash index queries", ssuite.QueryHashIndex)
-	ssuite.Run("fuzzy matching", ssuite.FuzzyMatch)
-	ssuite.Run("regexp with toggled trigram index", ssuite.RegexpToggleTrigramIndex)
-	ssuite.Run("eq with altering order of trigram and term index", ssuite.EqWithAlteredIndexOrder)
-	ssuite.Run("groupby uid that works", ssuite.GroupByUidWorks)
-	ssuite.Run("parameterized cascade", ssuite.CascadeParams)
-	ssuite.Run("cleanup", ssuite.SchemaQueryCleanup)
-}
-
-func (ssuite *SystestTestSuite) SchemaQueryCleanup() {
+func (ssuite *SystestTestSuite) TestSchemaQueryCleanup() {
 	t := ssuite.T()
 	gcli, cleanup, err := doGrpcLogin(ssuite)
 	defer cleanup()
@@ -57,7 +29,7 @@ func (ssuite *SystestTestSuite) SchemaQueryCleanup() {
 	require.NoError(t, gcli.Alter(context.Background(), &api.Operation{DropAll: true}))
 }
 
-func (ssuite *SystestTestSuite) MultipleBlockEval() {
+func (ssuite *SystestTestSuite) TestMultipleBlockEval() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -230,7 +202,7 @@ func (ssuite *SystestTestSuite) MultipleBlockEval() {
 	}
 }
 
-func (ssuite *SystestTestSuite) UnmatchedVarEval() {
+func (ssuite *SystestTestSuite) TestUnmatchedVarEval() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -332,7 +304,7 @@ func (ssuite *SystestTestSuite) UnmatchedVarEval() {
 	}
 }
 
-func (ssuite *SystestTestSuite) SchemaQueryTest() {
+func (ssuite *SystestTestSuite) TestSchemaQuery() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -366,7 +338,7 @@ func (ssuite *SystestTestSuite) SchemaQueryTest() {
       }`})
 }
 
-func (ssuite *SystestTestSuite) SchemaQueryTestPredicate1() {
+func (ssuite *SystestTestSuite) TestSchemaQueryPredicate1() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -456,7 +428,7 @@ func (ssuite *SystestTestSuite) SchemaQueryTestPredicate1() {
 	dgraphapi.CompareJSON(js, string(resp.Json))
 }
 
-func (ssuite *SystestTestSuite) SchemaQueryTestPredicate2() {
+func (ssuite *SystestTestSuite) TestSchemaQueryPredicate2() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -499,7 +471,7 @@ func (ssuite *SystestTestSuite) SchemaQueryTestPredicate2() {
 	dgraphapi.CompareJSON(js, string(resp.Json))
 }
 
-func (ssuite *SystestTestSuite) SchemaQueryTestPredicate3() {
+func (ssuite *SystestTestSuite) TestSchemaQueryPredicate3() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -551,7 +523,7 @@ func (ssuite *SystestTestSuite) SchemaQueryTestPredicate3() {
 	dgraphapi.CompareJSON(js, string(resp.Json))
 }
 
-func (ssuite *SystestTestSuite) SchemaQueryTestHTTP() {
+func (ssuite *SystestTestSuite) TestSchemaQueryHTTP() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -573,7 +545,7 @@ func (ssuite *SystestTestSuite) SchemaQueryTestHTTP() {
 
 	hcli, err := ssuite.dc.HTTPClient()
 	require.NoError(t, err)
-	err = hcli.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace)
+	err = hcli.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace)
 	require.NotNil(t, hcli.AccessJwt, "token is nil")
 	require.NoError(t, err)
 
@@ -595,7 +567,7 @@ func (ssuite *SystestTestSuite) SchemaQueryTestHTTP() {
       }`}), string(m["data"]))
 }
 
-func (ssuite *SystestTestSuite) FuzzyMatch() {
+func (ssuite *SystestTestSuite) TestFuzzyMatch() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -751,7 +723,7 @@ func (ssuite *SystestTestSuite) FuzzyMatch() {
 	}
 }
 
-func (ssuite *SystestTestSuite) CascadeParams() {
+func (ssuite *SystestTestSuite) TestCascadeParams() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -1222,7 +1194,7 @@ func (ssuite *SystestTestSuite) CascadeParams() {
 	}
 }
 
-func (ssuite *SystestTestSuite) QueryHashIndex() {
+func (ssuite *SystestTestSuite) TestQueryHashIndex() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -1343,7 +1315,7 @@ func (ssuite *SystestTestSuite) QueryHashIndex() {
 	}
 }
 
-func (ssuite *SystestTestSuite) RegexpToggleTrigramIndex() {
+func (ssuite *SystestTestSuite) TestRegexpToggleTrigramIndex() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -1421,7 +1393,7 @@ func (ssuite *SystestTestSuite) RegexpToggleTrigramIndex() {
 	require.Contains(t, err.Error(), "Attribute name does not have trigram index for regex matching.")
 }
 
-func (ssuite *SystestTestSuite) EqWithAlteredIndexOrder() {
+func (ssuite *SystestTestSuite) TestEqWithAlteredIndexOrder() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -1467,7 +1439,7 @@ func (ssuite *SystestTestSuite) EqWithAlteredIndexOrder() {
 	dgraphapi.CompareJSON(expectedResult, string(resp.Json))
 }
 
-func (ssuite *SystestTestSuite) GroupByUidWorks() {
+func (ssuite *SystestTestSuite) TestGroupByUidWorks() {
 	t := ssuite.T()
 
 	gcli, cleanup, err := doGrpcLogin(ssuite)
@@ -1529,7 +1501,7 @@ func doGrpcLogin(ssuite *SystestTestSuite) (*dgraphapi.GrpcClient, func(), error
 		return nil, nil, errors.Wrap(err, "error creating grpc client")
 	}
 	err = gcli.LoginIntoNamespace(context.Background(),
-		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace)
+		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "groot login into galaxy namespace failed")
 	}

@@ -1,14 +1,6 @@
-//go:build !oss
-// +build !oss
-
 /*
- * Copyright 2019 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Dgraph Community License (the "License"); you
- * may not use this file except in compliance with the License. You
- * may obtain a copy of the License at
- *
- *     https://github.com/dgraph-io/dgraph/blob/main/licenses/DCL.txt
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -28,13 +20,13 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/golang/glog"
-	"github.com/golang/snappy"
+	"github.com/klauspost/compress/s2"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4/y"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -98,7 +90,7 @@ func (mi *mapIterator) Close() error {
 func newMapIterator(filename string) (*pb.MapHeader, *mapIterator) {
 	fd, err := os.Open(filename)
 	x.Check(err)
-	r := snappy.NewReader(fd)
+	r := s2.NewReader(fd)
 
 	// Read the header size.
 	reader := bufio.NewReaderSize(r, 16<<10)

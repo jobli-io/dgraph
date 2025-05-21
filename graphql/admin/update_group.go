@@ -1,14 +1,19 @@
+/*
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package admin
 
 import (
 	"context"
 	"fmt"
 
-	dgoapi "github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dql"
-	"github.com/dgraph-io/dgraph/v24/graphql/resolve"
-	"github.com/dgraph-io/dgraph/v24/graphql/schema"
-	"github.com/dgraph-io/dgraph/v24/x"
+	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/graphql/resolve"
+	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type updateGroupRewriter resolve.UpdateRewriter

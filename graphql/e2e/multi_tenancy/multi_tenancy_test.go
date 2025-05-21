@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 //nolint:lll
@@ -30,9 +19,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgraph/v24/graphql/e2e/common"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/graphql/e2e/common"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -462,7 +451,7 @@ func TestNamespacesQueryField(t *testing.T) {
 	header1.Set(accessJwtHeader, testutil.GrootHttpLoginNamespace(groupOneAdminServer,
 		ns1).AccessJwt)
 
-	// Test namespaces query shows no namespace in case user is not guardian of galaxy.
+	// Test namespaces query shows no namespace in case user is not superadmin.
 	queryHelper(t, groupOneAdminServer, namespaceQuery, header1,
 		`{
 			"state": {
@@ -470,7 +459,7 @@ func TestNamespacesQueryField(t *testing.T) {
 			}
 		}`)
 
-	// Test namespaces query shows all 3 namespaces, 0,ns1,ns2 in case user is guardian of galaxy.
+	// Test namespaces query shows all 3 namespaces, 0,ns1,ns2 in case user is superadmin.
 	queryHelper(t, groupOneAdminServer, namespaceQuery, header,
 		`{
 			"state": {

@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package upgrade
@@ -27,12 +16,12 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/graphql/schema"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -273,7 +262,7 @@ func upgradeCORS() error {
 
 func getData(db *badger.DB, attr string, fn func(item *badger.Item) error) error {
 	return db.View(func(txn *badger.Txn) error {
-		attr = x.GalaxyAttr(attr)
+		attr = x.AttrInRootNamespace(attr)
 		initKey := x.ParsedKey{
 			Attr: attr,
 		}
@@ -370,11 +359,11 @@ func getCors(db *badger.DB) ([][]byte, error) {
 func dropDepreciated(db *badger.DB) error {
 	var prefixes [][]byte
 	for pred := range deprecatedPreds {
-		pred = x.GalaxyAttr(pred)
+		pred = x.AttrInRootNamespace(pred)
 		prefixes = append(prefixes, x.SchemaKey(pred), x.PredicatePrefix(pred))
 	}
 	for typ := range deprecatedTypes {
-		prefixes = append(prefixes, x.TypeKey(x.GalaxyAttr(typ)))
+		prefixes = append(prefixes, x.TypeKey(x.AttrInRootNamespace(typ)))
 	}
 	return db.DropPrefix(prefixes...)
 }
@@ -409,7 +398,7 @@ func fixPersistedQuery(db *badger.DB) error {
 
 	// Update the tokenizer in the schema.
 	su := pb.SchemaUpdate{
-		Predicate: x.GalaxyAttr("dgraph.graphql.p_query"),
+		Predicate: x.AttrInRootNamespace("dgraph.graphql.p_query"),
 		ValueType: pb.Posting_STRING,
 		Directive: pb.SchemaUpdate_INDEX,
 		Tokenizer: []string{"sha256"},
@@ -419,7 +408,7 @@ func fixPersistedQuery(db *badger.DB) error {
 		return err
 	}
 	entry := &badger.Entry{}
-	entry.Key = x.SchemaKey(x.GalaxyAttr("dgraph.graphql.p_query"))
+	entry.Key = x.SchemaKey(x.AttrInRootNamespace("dgraph.graphql.p_query"))
 	entry.Value = data
 	entry.UserMeta = posting.BitSchemaPosting
 	if err := update(entry); err != nil {
@@ -428,7 +417,7 @@ func fixPersistedQuery(db *badger.DB) error {
 
 	// Update the type.
 	tu := pb.TypeUpdate{
-		TypeName: x.GalaxyAttr("dgraph.graphql.persisted_query"),
+		TypeName: x.AttrInRootNamespace("dgraph.graphql.persisted_query"),
 		Fields:   []*pb.SchemaUpdate{&su},
 	}
 	data, err = proto.Marshal(&tu)
@@ -436,7 +425,7 @@ func fixPersistedQuery(db *badger.DB) error {
 		return err
 	}
 	entry = &badger.Entry{}
-	entry.Key = x.TypeKey(x.GalaxyAttr("dgraph.graphql.persisted_query"))
+	entry.Key = x.TypeKey(x.AttrInRootNamespace("dgraph.graphql.persisted_query"))
 	entry.Value = data
 	entry.UserMeta = posting.BitSchemaPosting
 	if err := update(entry); err != nil {

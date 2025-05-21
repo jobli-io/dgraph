@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Incc. and Contributors
- *
- * Licensed under the Apache License, Version cc.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package dgraphtest
@@ -74,8 +63,8 @@ func AllUpgradeCombos(v20 bool) []UpgradeCombo {
 	// In mainCombos list, we keep latest version to current HEAD as well as
 	// older versions of dgraph to ensure that a change does not cause failures.
 	mainCombos := []UpgradeCombo{
-		{"v23.1.0", localVersion, BackupRestore},
-		{"v23.1.0", localVersion, InPlace},
+		{"v24.0.0", localVersion, BackupRestore},
+		{"v24.0.0", localVersion, InPlace},
 	}
 
 	if v20 {
@@ -90,10 +79,10 @@ func AllUpgradeCombos(v20 bool) []UpgradeCombo {
 		}...)
 	}
 
-	if os.Getenv("DGRAPH_UPGRADE_MAIN_ONLY") == "true" {
-		return mainCombos
-	} else {
+	if os.Getenv("DGRAPH_UPGRADE_MAIN_ONLY") == "false" {
 		return fixedVersionCombos
+	} else {
+		return mainCombos
 	}
 }
 
@@ -113,7 +102,7 @@ type ClusterConfig struct {
 	refillInterval        time.Duration
 	uidLease              int
 	portOffset            int // exposed port offset for grpc/http port for both alpha/zero
-	bulkOutDir            string
+	bulkOutDirForMount    string
 	lambdaURL             string
 	featureFlags          []string
 	customPlugins         bool
@@ -235,7 +224,7 @@ func (cc ClusterConfig) WithExposedPortOffset(offset uint64) ClusterConfig {
 // WithBulkLoadOutDir sets the out dir for the bulk loader. This ensures
 // that the same p directory is used while setting up alphas.
 func (cc ClusterConfig) WithBulkLoadOutDir(dir string) ClusterConfig {
-	cc.bulkOutDir = dir
+	cc.bulkOutDirForMount = dir
 	return cc
 }
 

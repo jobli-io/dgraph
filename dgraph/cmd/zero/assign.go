@@ -1,33 +1,24 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package zero
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"time"
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	attribute "go.opentelemetry.io/otel/attribute"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var emptyAssignedIds pb.AssignedIds
@@ -186,7 +177,7 @@ func (s *Server) AssignIds(ctx context.Context, num *pb.Num) (*pb.AssignedIds, e
 	if ctx.Err() != nil {
 		return &emptyAssignedIds, ctx.Err()
 	}
-	ctx, span := otrace.StartSpan(ctx, "Zero.AssignIds")
+	ctx, span := otel.Tracer("").Start(ctx, "Zero.AssignIds")
 	defer span.End()
 
 	rateLimit := func() error {
@@ -198,8 +189,8 @@ func (s *Server) AssignIds(ctx context.Context, num *pb.Num) (*pb.AssignedIds, e
 			return nil
 		}
 		ns, err := x.ExtractNamespace(ctx)
-		if err != nil || ns == x.GalaxyNamespace {
-			// There is no rate limiting for GalaxyNamespace. Also, we allow the requests which do
+		if err != nil || ns == x.RootNamespace {
+			// There is no rate limiting for RootNamespace. Also, we allow the requests which do
 			// not contain namespace into context.
 			return nil
 		}
@@ -226,11 +217,13 @@ func (s *Server) AssignIds(ctx context.Context, num *pb.Num) (*pb.AssignedIds, e
 			if err := rateLimit(); err != nil {
 				return err
 			}
-			span.Annotatef(nil, "Zero leader leasing %d ids", num.GetVal())
+			span.SetAttributes(attribute.String("tablet", "predicate"))
+			span.AddEvent(fmt.Sprintf("Zero leader leasing %d ids", num.GetVal()))
 			reply, err = s.lease(ctx, num)
 			return err
 		}
-		span.Annotate(nil, "Not Zero leader")
+		span.SetAttributes(attribute.String("Not Zero leader", "true"))
+		span.AddEvent("Not Zero leader")
 		// I'm not the leader and this request was forwarded to me by a peer, who thought I'm the
 		// leader.
 		if num.Forwarded {
@@ -241,7 +234,7 @@ func (s *Server) AssignIds(ctx context.Context, num *pb.Num) (*pb.AssignedIds, e
 		if pl == nil {
 			return errors.Errorf("No healthy connection found to Leader of group zero")
 		}
-		span.Annotatef(nil, "Sending request to %v", pl.Addr)
+		span.AddEvent(fmt.Sprintf("Sending request to %v", pl.Addr))
 		zc := pb.NewZeroClient(pl.Get())
 		num.Forwarded = true
 		// pass on the incoming metadata to the zero leader.
@@ -280,7 +273,7 @@ func (s *Server) AssignIds(ctx context.Context, num *pb.Num) (*pb.AssignedIds, e
 	case <-ctx.Done():
 		return &emptyAssignedIds, ctx.Err()
 	case err := <-c:
-		span.Annotatef(nil, "Error while leasing %+v: %v", num, err)
+		span.AddEvent(fmt.Sprintf("Error while leasing %+v: %v", num, err))
 		return reply, err
 	}
 }

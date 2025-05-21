@@ -1,18 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -35,11 +25,11 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/chunker"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/chunker"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type restoreReq struct {
@@ -215,7 +205,7 @@ func runMutations(t *testing.T, dg *dgo.Dgraph) {
 func TestBasicRestore(t *testing.T) {
 	disableDraining(t)
 
-	conn, err := grpc.Dial(testutil.SockAddr,
+	conn, err := grpc.NewClient(testutil.SockAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))))
 	require.NoError(t, err)
 	dg := dgo.NewDgraphClient(api.NewDgraphClient(conn))
@@ -254,7 +244,7 @@ func TestBasicRestore(t *testing.T) {
 // drop all
 // Take backup b6
 func TestIncrementalRestore(t *testing.T) {
-	conn, err := grpc.Dial(testutil.SockAddr,
+	conn, err := grpc.NewClient(testutil.SockAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))))
 	require.NoError(t, err)
 	dg := dgo.NewDgraphClient(api.NewDgraphClient(conn))
@@ -343,7 +333,7 @@ func TestIncrementalRestore(t *testing.T) {
 func TestRestoreBackupNum(t *testing.T) {
 	disableDraining(t)
 
-	conn, err := grpc.Dial(
+	conn, err := grpc.NewClient(
 		testutil.SockAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))),
 	)
@@ -365,7 +355,7 @@ func TestRestoreBackupNum(t *testing.T) {
 func TestRestoreBackupNumInvalid(t *testing.T) {
 	disableDraining(t)
 
-	conn, err := grpc.Dial(
+	conn, err := grpc.NewClient(
 		testutil.SockAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))),
 	)
@@ -425,7 +415,7 @@ func TestRestoreBackupNumInvalid(t *testing.T) {
 func TestMoveTablets(t *testing.T) {
 	disableDraining(t)
 
-	conn, err := grpc.Dial(
+	conn, err := grpc.NewClient(
 		testutil.SockAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))),
 	)
@@ -524,8 +514,7 @@ func TestListBackups(t *testing.T) {
 }
 
 func TestRestoreWithDropOperations(t *testing.T) {
-	conn, err := grpc.Dial(
-		testutil.SockAddr,
+	conn, err := grpc.NewClient(testutil.SockAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))))
 	require.NoError(t, err)
 	dg := dgo.NewDgraphClient(api.NewDgraphClient(conn))

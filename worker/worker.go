@@ -1,17 +1,6 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 // Package worker contains code for pb.worker communication to perform
@@ -28,16 +17,16 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
-	"go.opencensus.io/plugin/ocgrpc"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	"github.com/dgraph-io/badger/v4"
 	badgerpb "github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -66,7 +55,7 @@ func Init(ps *badger.DB) {
 		grpc.MaxRecvMsgSize(x.GrpcMaxSize),
 		grpc.MaxSendMsgSize(x.GrpcMaxSize),
 		grpc.MaxConcurrentStreams(math.MaxInt32),
-		grpc.StatsHandler(&ocgrpc.ServerHandler{}),
+		grpc.StatsHandler(otelgrpc.NewClientHandler()),
 	}
 
 	if x.WorkerConfig.TLSServerConfig != nil {

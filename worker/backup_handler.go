@@ -1,14 +1,6 @@
-//go:build !oss
-// +build !oss
-
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Dgraph Community License (the "License"); you
- * may not use this file except in compliance with the License. You
- * may obtain a copy of the License at
- *
- *     https://github.com/dgraph-io/dgraph/blob/main/licenses/DCL.txt
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -27,8 +19,8 @@ import (
 	"github.com/minio/minio-go/v6/pkg/credentials"
 	"github.com/pkg/errors"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (

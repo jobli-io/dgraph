@@ -1,18 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -20,10 +10,10 @@ package main
 import (
 	"testing"
 
-	e2eCommon "github.com/dgraph-io/dgraph/v24/graphql/e2e/common"
-	utilsCommon "github.com/dgraph-io/dgraph/v24/systest/backup/common"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	e2eCommon "github.com/hypermodeinc/dgraph/v25/graphql/e2e/common"
+	utilsCommon "github.com/hypermodeinc/dgraph/v25/systest/backup/common"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -45,7 +35,7 @@ func Test127PlusNamespaces(t *testing.T) {
 	utilsCommon.CheckItemExists(t, 30, jwtTokenAlpha1Np0, "alpha1")
 	utilsCommon.TakeBackup(t, jwtTokenAlpha1Np0, backupDst, "alpha1")
 	utilsCommon.RunRestore(t, jwtTokenAlpha2Np0, restoreLocation, "alpha2")
-	dg1 := testutil.DgClientWithLogin(t, "groot", "password", x.GalaxyNamespace)
+	dg1 := testutil.DgClientWithLogin(t, "groot", "password", x.RootNamespace)
 	testutil.WaitForRestore(t, dg1, alpha2Addr)
 	e2eCommon.AssertGetGQLSchema(t, alpha2Addr, headerAlpha2Np0)
 	utilsCommon.CheckItemExists(t, 30, jwtTokenAlpha2Np0, "alpha2")
@@ -57,7 +47,7 @@ func Test127PlusNamespaces(t *testing.T) {
 	utilsCommon.CheckItemExists(t, 70, jwtTokenAlpha1Np51, "alpha1")
 	utilsCommon.TakeBackup(t, jwtTokenAlpha1Np0, backupDst, "alpha1")
 	utilsCommon.RunRestore(t, jwtTokenAlpha2Np0, restoreLocation, "alpha2")
-	dg2 := testutil.DgClientWithLogin(t, "groot", "password", x.GalaxyNamespace)
+	dg2 := testutil.DgClientWithLogin(t, "groot", "password", x.RootNamespace)
 	testutil.WaitForRestore(t, dg2, alpha2Addr)
 	e2eCommon.AssertGetGQLSchema(t, alpha2Addr, headerAlpha2Np0)
 	utilsCommon.CheckItemExists(t, 30, jwtTokenAlpha2Np0, "alpha2")
@@ -72,7 +62,7 @@ func Test127PlusNamespaces(t *testing.T) {
 	utilsCommon.CheckItemExists(t, 110, jwtTokenAlpha1Np130, "alpha1")
 	utilsCommon.TakeBackup(t, jwtTokenAlpha1Np0, backupDst, "alpha1")
 	utilsCommon.RunRestore(t, jwtTokenAlpha2Np0, restoreLocation, "alpha2")
-	dg3 := testutil.DgClientWithLogin(t, "groot", "password", x.GalaxyNamespace)
+	dg3 := testutil.DgClientWithLogin(t, "groot", "password", x.RootNamespace)
 	testutil.WaitForRestore(t, dg3, alpha2Addr)
 	e2eCommon.AssertGetGQLSchema(t, alpha2Addr, headerAlpha2Np0)
 	utilsCommon.CheckItemExists(t, 30, jwtTokenAlpha2Np0, "alpha2")

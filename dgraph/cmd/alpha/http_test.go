@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package alpha
@@ -35,10 +24,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/query"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/query"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type res struct {
@@ -846,13 +835,13 @@ func setDrainingMode(t *testing.T, enable bool, accessJwt string) {
 			}
 		}
 	}`
-	params := &testutil.GraphQLParams{
+	params := dgraphapi.GraphQLParams{
 		Query:     drainingRequest,
 		Variables: map[string]interface{}{"enable": enable},
 	}
-	resp := testutil.MakeGQLRequestWithAccessJwt(t, params, accessJwt)
-	resp.RequireNoGraphQLErrors(t)
-	require.JSONEq(t, `{"draining":{"response":{"code":"Success"}}}`, string(resp.Data))
+	resp, err := hc.RunGraphqlQuery(params, true)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"draining":{"response":{"code":"Success"}}}`, string(resp))
 }
 
 func TestDrainingMode(t *testing.T) {
@@ -894,12 +883,12 @@ func TestDrainingMode(t *testing.T) {
 
 	}
 
-	token := testutil.GrootHttpLogin(addr + "/admin")
+	require.NoError(t, hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, 0))
 
-	setDrainingMode(t, true, token.AccessJwt)
+	setDrainingMode(t, true, hc.AccessJwt)
 	runRequests(true)
 
-	setDrainingMode(t, false, token.AccessJwt)
+	setDrainingMode(t, false, hc.AccessJwt)
 	runRequests(false)
 }
 
@@ -945,7 +934,7 @@ func TestContentTypeCharset(t *testing.T) {
 	require.True(t, err != nil && strings.Contains(err.Error(), "Unsupported charset"))
 
 	_, err = mutationWithTs(
-		mutationInp{body: `{}`, typ: "application/rdf; charset=utf-8", commitNow: true})
+		mutationInp{body: `{ set {_:a <name> "alice" .}}`, typ: "application/rdf; charset=utf-8", commitNow: true})
 	require.NoError(t, err)
 
 	_, err = mutationWithTs(

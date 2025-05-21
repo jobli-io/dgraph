@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package query
@@ -27,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dgraphapi"
-	"github.com/dgraph-io/dgraph/v24/dgraphtest"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
+	"github.com/hypermodeinc/dgraph/v25/dgraphtest"
+	"github.com/hypermodeinc/dgraph/v25/x"
 	"github.com/stretchr/testify/require"
 )
 
@@ -482,7 +471,7 @@ func TestVectorDeadlockwithTimeout(t *testing.T) {
 		ctx, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel2()
 		err = client.LoginIntoNamespace(ctx, dgraphapi.DefaultUser,
-			dgraphapi.DefaultPassword, x.GalaxyNamespace)
+			dgraphapi.DefaultPassword, x.RootNamespace)
 		require.NoError(t, err)
 
 		err = client.Alter(context.Background(), &api.Operation{
@@ -825,4 +814,34 @@ func TestGetVector(t *testing.T) {
 		}
 	  }`
 	require.JSONEq(t, k, js)
+}
+
+func TestDotProductWithConstantVector(t *testing.T) {
+	setSchema("vec452 : float32vector .")
+
+	rdfs := `
+		<1> <vec452> "[1.0, 1.0, 2.0, 2.0]" .
+		<2> <vec452> "[2.0, 1.0, 2.0, 2.0]" .`
+	require.NoError(t, addTriplesToCluster(rdfs))
+
+	query := `query q($vec: float32vector) {
+		q(func: has(vec452)) {
+			v1 as vec452
+			distance: Math(v1 dot $vec)
+		}
+	}`
+	js, err := processQueryWithVars(t, query, map[string]string{"$vec": "[1.0, 1.0, 2.0, 2.0]"})
+	require.NoError(t, err)
+	k := `{"data":{"q":[{"vec452":[1,1,2,2],"distance":10},{"vec452":[2,1,2,2],"distance":11}]}}`
+	require.JSONEq(t, k, js)
+
+	query = `{
+		q(func: has(vec452)) {
+			v1 as vec452
+			distance: Math(v1 dot v1)
+		}
+	}`
+	require.JSONEq(t,
+		`{"data":{"q":[{"vec452":[1,1,2,2],"distance":10},{"vec452":[2,1,2,2],"distance":13}]} }`,
+		processQueryNoErr(t, query))
 }

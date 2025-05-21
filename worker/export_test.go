@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -37,17 +26,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/chunker"
-	"github.com/dgraph-io/dgraph/v24/dql"
-	"github.com/dgraph-io/dgraph/v24/lex"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/types/facets"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/chunker"
+	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/lex"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/types/facets"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -55,19 +44,19 @@ const (
 )
 
 var personType = &pb.TypeUpdate{
-	TypeName: x.GalaxyAttr("Person"),
+	TypeName: x.AttrInRootNamespace("Person"),
 	Fields: []*pb.SchemaUpdate{
 		{
-			Predicate: x.GalaxyAttr("name"),
+			Predicate: x.AttrInRootNamespace("name"),
 		},
 		{
-			Predicate: x.GalaxyAttr("friend"),
+			Predicate: x.AttrInRootNamespace("friend"),
 		},
 		{
-			Predicate: x.GalaxyAttr("~friend"),
+			Predicate: x.AttrInRootNamespace("~friend"),
 		},
 		{
-			Predicate: x.GalaxyAttr("friend_not_served"),
+			Predicate: x.AttrInRootNamespace("friend_not_served"),
 		},
 	},
 }
@@ -139,7 +128,7 @@ func initTestExport(t *testing.T, schemaStr string) {
 	require.NoError(t, err)
 
 	txn := pstore.NewTransactionAt(math.MaxUint64, true)
-	require.NoError(t, txn.Set(testutil.GalaxySchemaKey("friend"), val))
+	require.NoError(t, txn.Set(testutil.RootNsSchemaKey("friend"), val))
 	// Schema is always written at timestamp 1
 	require.NoError(t, txn.CommitAt(1, nil))
 
@@ -148,16 +137,16 @@ func initTestExport(t *testing.T, schemaStr string) {
 	require.NoError(t, err)
 
 	txn = pstore.NewTransactionAt(math.MaxUint64, true)
-	require.NoError(t, txn.Set(testutil.GalaxySchemaKey("http://www.w3.org/2000/01/rdf-schema#range"), val))
-	require.NoError(t, txn.Set(testutil.GalaxySchemaKey("friend_not_served"), val))
-	require.NoError(t, txn.Set(testutil.GalaxySchemaKey("age"), val))
+	require.NoError(t, txn.Set(testutil.RootNsSchemaKey("http://www.w3.org/2000/01/rdf-schema#range"), val))
+	require.NoError(t, txn.Set(testutil.RootNsSchemaKey("friend_not_served"), val))
+	require.NoError(t, txn.Set(testutil.RootNsSchemaKey("age"), val))
 	require.NoError(t, txn.CommitAt(1, nil))
 
 	val, err = proto.Marshal(personType)
 	require.NoError(t, err)
 
 	txn = pstore.NewTransactionAt(math.MaxUint64, true)
-	require.NoError(t, txn.Set(testutil.GalaxyTypeKey("Person"), val))
+	require.NoError(t, txn.Set(testutil.RootNsTypeKey("Person"), val))
 	require.NoError(t, txn.CommitAt(1, nil))
 
 	populateGraphExport(t)
@@ -165,7 +154,7 @@ func initTestExport(t *testing.T, schemaStr string) {
 	// Drop age predicate after populating DB.
 	// age should not exist in the exported schema.
 	txn = pstore.NewTransactionAt(math.MaxUint64, true)
-	require.NoError(t, txn.Delete(testutil.GalaxySchemaKey("age")))
+	require.NoError(t, txn.Delete(testutil.RootNsSchemaKey("age")))
 	require.NoError(t, txn.CommitAt(1, nil))
 }
 
@@ -210,7 +199,7 @@ func checkExportSchema(t *testing.T, schemaFileList []string) {
 
 	require.Equal(t, 2, len(result.Preds))
 	require.Equal(t, "uid", types.TypeID(result.Preds[0].ValueType).Name())
-	require.Equal(t, x.GalaxyAttr("http://www.w3.org/2000/01/rdf-schema#range"),
+	require.Equal(t, x.AttrInRootNamespace("http://www.w3.org/2000/01/rdf-schema#range"),
 		result.Preds[1].Predicate)
 	require.Equal(t, "uid", types.TypeID(result.Preds[1].ValueType).Name())
 
@@ -229,7 +218,7 @@ func checkExportGqlSchema(t *testing.T, gqlSchemaFiles []string) {
 	var buf bytes.Buffer
 	_, err = buf.ReadFrom(r)
 	require.NoError(t, err)
-	expected := []x.ExportedGQLSchema{{Namespace: x.GalaxyNamespace, Schema: gqlSchema}}
+	expected := []x.ExportedGQLSchema{{Namespace: x.RootNamespace, Schema: gqlSchema}}
 	b, err := json.Marshal(expected)
 	require.NoError(t, err)
 	require.JSONEq(t, string(b), buf.String())
@@ -455,9 +444,9 @@ func TestToSchema(t *testing.T) {
 	}{
 		{
 			skv: &skv{
-				attr: x.GalaxyAttr("Alice"),
+				attr: x.AttrInRootNamespace("Alice"),
 				schema: pb.SchemaUpdate{
-					Predicate: x.GalaxyAttr("mother"),
+					Predicate: x.AttrInRootNamespace("mother"),
 					ValueType: pb.Posting_STRING,
 					Directive: pb.SchemaUpdate_REVERSE,
 					List:      false,
@@ -485,9 +474,9 @@ func TestToSchema(t *testing.T) {
 		},
 		{
 			skv: &skv{
-				attr: x.GalaxyAttr("username/password"),
+				attr: x.AttrInRootNamespace("username/password"),
 				schema: pb.SchemaUpdate{
-					Predicate: x.GalaxyAttr(""),
+					Predicate: x.AttrInRootNamespace(""),
 					ValueType: pb.Posting_STRING,
 					Directive: pb.SchemaUpdate_NONE,
 					List:      false,
@@ -500,9 +489,9 @@ func TestToSchema(t *testing.T) {
 		},
 		{
 			skv: &skv{
-				attr: x.GalaxyAttr("B*-tree"),
+				attr: x.AttrInRootNamespace("B*-tree"),
 				schema: pb.SchemaUpdate{
-					Predicate: x.GalaxyAttr(""),
+					Predicate: x.AttrInRootNamespace(""),
 					ValueType: pb.Posting_UID,
 					Directive: pb.SchemaUpdate_REVERSE,
 					List:      true,
@@ -515,9 +504,9 @@ func TestToSchema(t *testing.T) {
 		},
 		{
 			skv: &skv{
-				attr: x.GalaxyAttr("base_de_données"),
+				attr: x.AttrInRootNamespace("base_de_données"),
 				schema: pb.SchemaUpdate{
-					Predicate: x.GalaxyAttr(""),
+					Predicate: x.AttrInRootNamespace(""),
 					ValueType: pb.Posting_STRING,
 					Directive: pb.SchemaUpdate_NONE,
 					List:      false,
@@ -530,9 +519,9 @@ func TestToSchema(t *testing.T) {
 		},
 		{
 			skv: &skv{
-				attr: x.GalaxyAttr("data_base"),
+				attr: x.AttrInRootNamespace("data_base"),
 				schema: pb.SchemaUpdate{
-					Predicate: x.GalaxyAttr(""),
+					Predicate: x.AttrInRootNamespace(""),
 					ValueType: pb.Posting_STRING,
 					Directive: pb.SchemaUpdate_NONE,
 					List:      false,
@@ -545,9 +534,9 @@ func TestToSchema(t *testing.T) {
 		},
 		{
 			skv: &skv{
-				attr: x.GalaxyAttr("data.base"),
+				attr: x.AttrInRootNamespace("data.base"),
 				schema: pb.SchemaUpdate{
-					Predicate: x.GalaxyAttr(""),
+					Predicate: x.AttrInRootNamespace(""),
 					ValueType: pb.Posting_STRING,
 					Directive: pb.SchemaUpdate_NONE,
 					List:      false,

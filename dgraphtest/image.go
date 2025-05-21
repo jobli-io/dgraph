@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package dgraphtest
@@ -24,9 +13,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/pkg/errors"
 	"golang.org/x/mod/modfile"
+)
+
+var (
+	cloneOnce sync.Once
 )
 
 func (c *LocalCluster) dgraphImage() string {
@@ -34,6 +28,10 @@ func (c *LocalCluster) dgraphImage() string {
 }
 
 func (c *LocalCluster) setupBinary() error {
+	if err := ensureDgraphClone(); err != nil {
+		panic(err)
+	}
+
 	if c.conf.customPlugins {
 		race := false // Explicit var declaration to avoid confusion on the next line
 		if err := c.GeneratePlugins(race); err != nil {
@@ -63,28 +61,25 @@ func (c *LocalCluster) setupBinary() error {
 }
 
 func ensureDgraphClone() error {
-	if _, err := os.Stat(repoDir); err != nil {
-		return runGitClone()
-	}
-
-	if err := runGitStatus(); err != nil {
-		if ierr := cleanupRepo(); ierr != nil {
-			return ierr
+	f := func() error {
+		if _, err := os.Stat(repoDir); err != nil {
+			return runGitClone()
 		}
-		return runGitClone()
+
+		if err := runGitStatus(); err != nil {
+			if err := os.RemoveAll(repoDir); err != nil {
+				return err
+			}
+			return runGitClone()
+		}
+		return nil
 	}
 
-	// we do not return error if git fetch fails because maybe there are no changes
-	// to pull and it doesn't make sense to fail right now. We can fail later when we
-	// do not find the reference that we are looking for.
-	if err := runGitFetch(); err != nil {
-		log.Printf("[WARNING] error in fetching latest git changes: %v", err)
-	}
-	return nil
-}
-
-func cleanupRepo() error {
-	return os.RemoveAll(repoDir)
+	var err error
+	cloneOnce.Do(func() {
+		err = f()
+	})
+	return err
 }
 
 func runGitClone() error {
@@ -92,6 +87,7 @@ func runGitClone() error {
 	// a copy of this folder by running git clone using this already cloned dgraph
 	// repo. After the quick clone, we update the original URL to point to the
 	// GitHub dgraph repo and perform a "git fetch".
+	log.Printf("[INFO] cloning dgraph repo from [%v]", baseRepoDir)
 	cmd := exec.Command("git", "clone", baseRepoDir, repoDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return errors.Wrapf(err, "error cloning dgraph repo\noutput:%v", string(out))
@@ -182,32 +178,64 @@ func copyBinary(fromDir, toDir, version string) error {
 }
 
 func copy(src, dst string) error {
-	sourceFileStat, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	if !sourceFileStat.Mode().IsRegular() {
-		return errors.Wrap(err, fmt.Sprintf("%s is not a regular file", src))
+	// Validate inputs
+	if src == "" || dst == "" {
+		return errors.New("source or destination paths cannot be empty")
 	}
 
-	source, err := os.Open(src)
-	srcStat, _ := source.Stat()
+	// Check source file
+	sourceFileStat, err := os.Stat(src)
 	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("error while opening file [%s]", src))
+		return errors.Wrapf(err, "failed to stat source file: %s", src)
+	}
+	if !sourceFileStat.Mode().IsRegular() {
+		return errors.Errorf("%s is not a regular file", src)
+	}
+
+	// Open source file
+	source, err := os.Open(src)
+	if err != nil {
+		return errors.Wrapf(err, "failed to open source file: %s", src)
 	}
 	defer source.Close()
 
-	destination, err := os.Create(dst)
-	if err != nil {
-		return err
+	// Create destination directory if it doesn't exist
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return errors.Wrapf(err, "failed to create destination directory: %s", filepath.Dir(dst))
 	}
-	defer destination.Close()
 
-	if err := os.Chmod(dst, srcStat.Mode()); err != nil {
-		return err
+	// Create destination file
+	destination, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, sourceFileStat.Mode())
+	if err != nil {
+		return errors.Wrapf(err, "failed to create destination file: %s", dst)
 	}
-	_, err = io.Copy(destination, source)
-	return err
+
+	// Copy the file
+	if _, err := io.Copy(destination, source); err != nil {
+		return errors.Wrap(err, "failed to copy file contents")
+	}
+
+	// Ensure data is flushed to disk
+	if err := destination.Sync(); err != nil {
+		return errors.Wrap(err, "failed to sync destination file")
+	}
+
+	// Close the destination file
+	if err := destination.Close(); err != nil {
+		return errors.Wrap(err, "failed to close destination file")
+	}
+
+	// Stat the new file to check file size match
+	destStat, err := os.Stat(dst)
+	if err != nil {
+		return errors.Wrapf(err, "failed to stat destination file: %s", dst)
+	}
+	if destStat.Size() != sourceFileStat.Size() {
+		log.Printf("[WARNING] size mismatch after copy of %s to %s: source=%d bytes, destination=%d bytes",
+			src, dst, sourceFileStat.Size(), destStat.Size())
+	}
+
+	return nil
 }
 
 // IsHigherVersion checks whether "higher" is the higher version compared to "lower"
@@ -224,8 +252,8 @@ func IsHigherVersion(higher, lower string) (bool, error) {
 	cmd := exec.Command("git", "merge-base", "--is-ancestor", lower, higher)
 	cmd.Dir = repoDir
 	if out, err := cmd.CombinedOutput(); err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
-			return exitError.ExitCode() == 0, nil
+		if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
+			return false, nil
 		}
 
 		return false, errors.Wrapf(err, "error checking if [%v] is ancestor of [%v]\noutput:%v",

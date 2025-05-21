@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -27,13 +16,14 @@ import (
 	"github.com/pkg/errors"
 	ostats "go.opencensus.io/stats"
 	tag "go.opencensus.io/tag"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const baseTimeout time.Duration = 4 * time.Second
@@ -221,7 +211,7 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 	// Trim data to the new size after Marshal.
 	data = data[:8+sz]
 
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "n.proposeAndWait")
 	defer stop()
 
@@ -239,7 +229,9 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 		x.AssertTruef(n.Proposals.Store(key, pctx), "Found existing proposal with key: [%x]", key)
 		defer n.Proposals.Delete(key) // Ensure that it gets deleted on return.
 
-		span.Annotatef(nil, "Proposing with key: %d. Timeout: %v", key, timeout)
+		span.AddEvent("Proposing", trace.WithAttributes(
+			attribute.Int64("key", int64(key)),
+			attribute.String("timeout", timeout.String())))
 
 		if err = n.Raft().Propose(cctx, data); err != nil {
 			return errors.Wrapf(err, "While proposing")
@@ -260,7 +252,8 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 				if atomic.LoadUint32(&pctx.Found) > 0 {
 					// We found the proposal in CommittedEntries. No need to retry.
 				} else {
-					span.Annotatef(nil, "Timeout %s reached. Cancelling...", timeout)
+					span.AddEvent("Timeout reached", trace.WithAttributes(
+						attribute.String("timeout", timeout.String())))
 					cancel()
 				}
 			case <-cctx.Done():
@@ -298,7 +291,8 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 			// below. We should always propose it irrespective of how many pending proposals there
 			// might be.
 		default:
-			span.Annotatef(nil, "incr with %d", i)
+			span.AddEvent("Incrementing limiter", trace.WithAttributes(
+				attribute.Int64("retry", int64(i))))
 			if err := limiter.incr(ctx, i); err != nil {
 				return err
 			}

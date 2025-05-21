@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package posting
@@ -19,19 +8,23 @@ package posting
 import (
 	"context"
 	"math"
+	"math/rand"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func TestIncrRollupGetsCancelledQuickly(t *testing.T) {
-	attr := x.GalaxyAttr("rollup")
+	attr := x.AttrInRootNamespace("rollup")
 	key := x.DataKey(attr, 1)
 	closer = z.NewCloser(1)
 
@@ -63,7 +56,7 @@ func TestIncrRollupGetsCancelledQuickly(t *testing.T) {
 }
 
 func TestCacheAfterDeltaUpdateRecieved(t *testing.T) {
-	attr := x.GalaxyAttr("cache")
+	attr := x.AttrInRootNamespace("cache")
 	key := x.IndexKey(attr, "temp")
 
 	// Create a delta from 5->15. Mimick how a follower recieves a delta.
@@ -90,16 +83,68 @@ func TestCacheAfterDeltaUpdateRecieved(t *testing.T) {
 	// Read key at timestamp 10. Make sure cache is not updated by this, as there is a later read.
 	l, err := GetNoStore(key, 10)
 	require.NoError(t, err)
-	require.Equal(t, l.mutationMap.len(), 0)
+	require.Equal(t, l.mutationMap.listLen(10), 0)
 
 	// Read at 20 should show the value
 	l1, err := GetNoStore(key, 20)
 	require.NoError(t, err)
-	require.Equal(t, l1.mutationMap.len(), 1)
+	require.Equal(t, l1.mutationMap.listLen(20), 1)
+}
+
+func BenchmarkTestCache(b *testing.B) {
+	dir, err := os.MkdirTemp("", "storetest_")
+	x.Panic(err)
+	defer os.RemoveAll(dir)
+
+	ps, err = badger.OpenManaged(badger.DefaultOptions(dir))
+	x.Panic(err)
+	Init(ps, 10000000, true)
+	schema.Init(ps)
+
+	attr := x.AttrInRootNamespace("cache")
+	keys := make([][]byte, 0)
+	N := uint64(10000)
+	NInt := 10000
+	txn := Oracle().RegisterStartTs(1)
+
+	for i := uint64(1); i < N; i++ {
+		key := x.DataKey(attr, i)
+		keys = append(keys, key)
+		edge := &pb.DirectedEdge{
+			ValueId: 2,
+			Attr:    attr,
+			Entity:  1,
+			Op:      pb.DirectedEdge_SET,
+		}
+		l, _ := GetNoStore(key, 1)
+		// No index entries added here as we do not call AddMutationWithIndex.
+		txn.cache.SetIfAbsent(string(l.key), l)
+		err := l.addMutation(context.Background(), txn, edge)
+		if err != nil {
+			panic(err)
+		}
+	}
+	txn.Update()
+	writer := NewTxnWriter(pstore)
+	err = txn.CommitToDisk(writer, 2)
+	if err != nil {
+		panic(err)
+	}
+	writer.Flush()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			key := keys[rand.Intn(NInt-1)]
+			_, err = getNew(key, pstore, math.MaxUint64)
+			if err != nil {
+				panic(err)
+			}
+		}
+	})
 }
 
 func TestRollupTimestamp(t *testing.T) {
-	attr := x.GalaxyAttr("rollup")
+	attr := x.AttrInRootNamespace("rollup")
 	key := x.DataKey(attr, 1)
 	// 3 Delta commits.
 	addEdgeToUID(t, attr, 1, 2, 1, 2)
@@ -120,6 +165,7 @@ func TestRollupTimestamp(t *testing.T) {
 		Value: []byte(x.Star),
 		Op:    pb.DirectedEdge_DEL,
 	}
+	l.mutationMap.setTs(9)
 	addMutation(t, l, edge, Del, 9, 10, false)
 
 	nl, err := getNew(key, pstore, math.MaxUint64)
@@ -137,7 +183,7 @@ func TestRollupTimestamp(t *testing.T) {
 }
 
 func TestPostingListRead(t *testing.T) {
-	attr := x.GalaxyAttr("emptypl")
+	attr := x.AttrInRootNamespace("emptypl")
 	key := x.DataKey(attr, 1)
 
 	assertLength := func(readTs, sz int) {
@@ -154,6 +200,8 @@ func TestPostingListRead(t *testing.T) {
 	writer := NewTxnWriter(pstore)
 	require.NoError(t, writer.SetAt(key, []byte{}, BitEmptyPosting, 6))
 	require.NoError(t, writer.Flush())
+	// Delete the key from cache as we have just updated it
+	memoryLayer.del(key)
 	assertLength(7, 0)
 
 	addEdgeToUID(t, attr, 1, 4, 7, 8)
@@ -166,6 +214,7 @@ func TestPostingListRead(t *testing.T) {
 	writer = NewTxnWriter(pstore)
 	require.NoError(t, writer.SetAt(key, data, BitCompletePosting, 10))
 	require.NoError(t, writer.Flush())
+	memoryLayer.del(key)
 	assertLength(10, 0)
 
 	addEdgeToUID(t, attr, 1, 5, 11, 12)

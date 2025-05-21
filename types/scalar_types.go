@@ -1,29 +1,17 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package types
 
 import (
-	"errors"
 	"math/big"
 	"time"
 
 	"github.com/twpayne/go-geom"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
 )
 
 const (
@@ -232,20 +220,6 @@ func GoodTimeZone(offset int) bool {
 // ParseTime parses the time from string trying various datetime formats.
 // By default, Go parses time in UTC unless specified in the data itself.
 func ParseTime(val string) (time.Time, error) {
-	t, err := parseTimeNonStrict(val)
-	if err != nil {
-		return t, err
-	}
-
-	_, offset := t.Zone()
-	if !GoodTimeZone(offset) {
-		return time.Time{}, errors.New("timezone outside of range [-23:59,23:59]")
-	}
-
-	return t, nil
-}
-
-func parseTimeNonStrict(val string) (time.Time, error) {
 	if len(val) == len(dateFormatY) {
 		return time.Parse(dateFormatY, val)
 	}

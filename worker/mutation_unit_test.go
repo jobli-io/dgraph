@@ -1,17 +1,6 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -25,11 +14,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func TestReverseEdge(t *testing.T) {
@@ -42,14 +31,14 @@ func TestReverseEdge(t *testing.T) {
 	x.Check(err)
 	pstore = ps
 	// Not using posting list cache
-	posting.Init(ps, 0)
+	posting.Init(ps, 0, false)
 	Init(ps)
 	err = schema.ParseBytes([]byte("revc: [uid] @reverse @count ."), 1)
 	require.NoError(t, err)
 
 	ctx := context.Background()
 	txn := posting.Oracle().RegisterStartTs(5)
-	attr := x.GalaxyAttr("revc")
+	attr := x.AttrInRootNamespace("revc")
 
 	edge := &pb.DirectedEdge{
 		ValueId: 2,
@@ -66,7 +55,69 @@ func TestReverseEdge(t *testing.T) {
 	pl.RLock()
 	c := pl.GetLength(5)
 	pl.RUnlock()
-	require.Equal(t, c, 0)
+	require.Equal(t, 0, c)
+}
+
+func TestReverseEdgeSetDel(t *testing.T) {
+	dir, err := os.MkdirTemp("", "storetest_")
+	x.Check(err)
+	defer os.RemoveAll(dir)
+
+	opt := badger.DefaultOptions(dir)
+	ps, err := badger.OpenManaged(opt)
+	x.Check(err)
+	pstore = ps
+	// Not using posting list cache
+	posting.Init(ps, 0, false)
+	Init(ps)
+	err = schema.ParseBytes([]byte("revc: [uid] @reverse @count ."), 1)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	txn := posting.Oracle().RegisterStartTs(5)
+	attr := x.AttrInRootNamespace("revc")
+
+	edgeDel := &pb.DirectedEdge{
+		ValueId: 2,
+		Attr:    attr,
+		Entity:  3,
+		Op:      pb.DirectedEdge_DEL,
+	}
+
+	edgeSet1 := &pb.DirectedEdge{
+		ValueId: 2,
+		Attr:    attr,
+		Entity:  1,
+		Op:      pb.DirectedEdge_SET,
+	}
+	
+	edgeSet2 := &pb.DirectedEdge{
+		ValueId: 2,
+		Attr:    attr,
+		Entity:  3,
+		Op:      pb.DirectedEdge_SET,
+	}
+
+	
+	edgeSet3 := &pb.DirectedEdge{
+		ValueId: 2,
+		Attr:    attr,
+		Entity:  4,
+		Op:      pb.DirectedEdge_SET,
+	}
+
+
+	x.Check(runMutation(ctx, edgeSet1, txn))
+	x.Check(runMutation(ctx, edgeSet2, txn))
+	x.Check(runMutation(ctx, edgeSet3, txn))
+	x.Check(runMutation(ctx, edgeDel, txn))
+
+	pl, err := txn.Get(x.ReverseKey(attr, 2))
+	require.NoError(t, err)
+	pl.RLock()
+	c := pl.GetLength(5)
+	pl.RUnlock()
+	require.Equal(t, 2, c)
 }
 
 func TestConvertEdgeType(t *testing.T) {
@@ -79,13 +130,13 @@ func TestConvertEdgeType(t *testing.T) {
 		{
 			input: &pb.DirectedEdge{
 				Value: []byte("set edge"),
-				Attr:  x.GalaxyAttr("name"),
+				Attr:  x.AttrInRootNamespace("name"),
 			},
 			to:        types.StringID,
 			expectErr: false,
 			output: &pb.DirectedEdge{
 				Value:     []byte("set edge"),
-				Attr:      x.GalaxyAttr("name"),
+				Attr:      x.AttrInRootNamespace("name"),
 				ValueType: 9,
 			},
 		},
@@ -107,7 +158,7 @@ func TestConvertEdgeType(t *testing.T) {
 		{
 			input: &pb.DirectedEdge{
 				ValueId: 123,
-				Attr:    x.GalaxyAttr("name"),
+				Attr:    x.AttrInRootNamespace("name"),
 			},
 			to:        types.StringID,
 			expectErr: true,
@@ -115,7 +166,7 @@ func TestConvertEdgeType(t *testing.T) {
 		{
 			input: &pb.DirectedEdge{
 				Value: []byte("set edge"),
-				Attr:  x.GalaxyAttr("name"),
+				Attr:  x.AttrInRootNamespace("name"),
 			},
 			to:        types.UidID,
 			expectErr: true,
@@ -140,7 +191,7 @@ func TestConvertEdgeType(t *testing.T) {
 func TestValidateEdgeTypeError(t *testing.T) {
 	edge := &pb.DirectedEdge{
 		Value: []byte("set edge"),
-		Attr:  x.GalaxyAttr("name"),
+		Attr:  x.AttrInRootNamespace("name"),
 	}
 
 	err := ValidateAndConvert(edge,
@@ -155,7 +206,7 @@ func TestTypeSanityCheck(t *testing.T) {
 	typeDef := &pb.TypeUpdate{
 		Fields: []*pb.SchemaUpdate{
 			{
-				Predicate: x.GalaxyAttr(""),
+				Predicate: x.AttrInRootNamespace(""),
 			},
 		},
 	}
@@ -167,7 +218,7 @@ func TestTypeSanityCheck(t *testing.T) {
 	typeDef = &pb.TypeUpdate{
 		Fields: []*pb.SchemaUpdate{
 			{
-				Predicate: x.GalaxyAttr("name"),
+				Predicate: x.AttrInRootNamespace("name"),
 				ValueType: pb.Posting_OBJECT,
 			},
 		},
@@ -180,7 +231,7 @@ func TestTypeSanityCheck(t *testing.T) {
 	typeDef = &pb.TypeUpdate{
 		Fields: []*pb.SchemaUpdate{
 			{
-				Predicate: x.GalaxyAttr("name"),
+				Predicate: x.AttrInRootNamespace("name"),
 				Directive: pb.SchemaUpdate_REVERSE,
 			},
 		},
@@ -193,7 +244,7 @@ func TestTypeSanityCheck(t *testing.T) {
 	typeDef = &pb.TypeUpdate{
 		Fields: []*pb.SchemaUpdate{
 			{
-				Predicate: x.GalaxyAttr("name"),
+				Predicate: x.AttrInRootNamespace("name"),
 				Tokenizer: []string{"int"},
 			},
 		},

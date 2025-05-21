@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package resolve
@@ -23,13 +12,13 @@ import (
 	"strconv"
 
 	"github.com/golang/glog"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel/trace"
 
-	dgoapi "github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dql"
-	"github.com/dgraph-io/dgraph/v24/graphql/dgraph"
-	"github.com/dgraph-io/dgraph/v24/graphql/schema"
-	"github.com/dgraph-io/dgraph/v24/x"
+	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
+	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var errNotScalar = errors.New("provided value is not a scalar, can't convert it to string")
@@ -75,7 +64,7 @@ type queryResolver struct {
 }
 
 func (qr *queryResolver) Resolve(ctx context.Context, query schema.Query) *Resolved {
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "resolveQuery")
 	defer stop()
 
@@ -138,6 +127,9 @@ func (qr *queryResolver) rewriteAndExecute(ctx context.Context, query schema.Que
 	}
 
 	ext.TouchedUids = resp.GetMetrics().GetNumUids()[touchedUidsKey]
+	if x.Config.GraphQL.GetBool("debug") {
+		ext.DQLQuery = qry
+	}
 	resolved := &Resolved{
 		Data:       resp.GetJson(),
 		Field:      query,
@@ -157,7 +149,7 @@ type customDQLQueryResolver struct {
 }
 
 func (qr *customDQLQueryResolver) Resolve(ctx context.Context, query schema.Query) *Resolved {
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "resolveCustomDQLQuery")
 	defer stop()
 

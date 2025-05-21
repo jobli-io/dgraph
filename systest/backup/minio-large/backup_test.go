@@ -1,18 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -34,11 +24,11 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/dgraph-io/badger/v4/options"
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/worker"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/worker"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -57,7 +47,7 @@ var (
 // Test to add a large database and verify backup and restore work as expected.
 func TestBackupMinioLarge(t *testing.T) {
 	// backupDestination = "minio://" + testutil.DockerPrefix + "_minio_1:9001/dgraph-backup?secure=false"
-	conn, err := grpc.Dial(testutil.SockAddr,
+	conn, err := grpc.NewClient(testutil.SockAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))))
 	require.NoError(t, err)
 	dg := dgo.NewDgraphClient(api.NewDgraphClient(conn))
@@ -114,9 +104,9 @@ func setupTablets(t *testing.T, dg *dgo.Dgraph) {
 	for retry := 5; retry > 0; retry-- {
 		state, err := testutil.GetStateHttps(testutil.GetAlphaClientConfig(t))
 		require.NoError(t, err)
-		_, ok1 := state.Groups["1"].Tablets[x.GalaxyAttr("name1")]
-		_, ok2 := state.Groups["2"].Tablets[x.GalaxyAttr("name2")]
-		_, ok3 := state.Groups["3"].Tablets[x.GalaxyAttr("name3")]
+		_, ok1 := state.Groups["1"].Tablets[x.AttrInRootNamespace("name1")]
+		_, ok2 := state.Groups["2"].Tablets[x.AttrInRootNamespace("name2")]
+		_, ok3 := state.Groups["3"].Tablets[x.AttrInRootNamespace("name3")]
 		if ok1 && ok2 && ok3 {
 			moveOk = true
 			break
@@ -192,11 +182,11 @@ func runRestore(t *testing.T, backupLocation, lastDir string, commitTs uint64) m
 		lastDir, "", nil, options.Snappy, 0)
 	require.NoError(t, result.Err)
 
-	restored1, err := testutil.GetPredicateValues("./data/restore/p1", x.GalaxyAttr("name1"), commitTs)
+	restored1, err := testutil.GetPredicateValues("./data/restore/p1", x.AttrInRootNamespace("name1"), commitTs)
 	require.NoError(t, err)
-	restored2, err := testutil.GetPredicateValues("./data/restore/p2", x.GalaxyAttr("name2"), commitTs)
+	restored2, err := testutil.GetPredicateValues("./data/restore/p2", x.AttrInRootNamespace("name2"), commitTs)
 	require.NoError(t, err)
-	restored3, err := testutil.GetPredicateValues("./data/restore/p3", x.GalaxyAttr("name3"), commitTs)
+	restored3, err := testutil.GetPredicateValues("./data/restore/p3", x.AttrInRootNamespace("name3"), commitTs)
 	require.NoError(t, err)
 
 	restored := make(map[string]string)

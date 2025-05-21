@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package conn
@@ -19,6 +8,7 @@ package conn
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"math/rand"
 	"strconv"
 	"sync"
@@ -28,11 +18,11 @@ import (
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
 	"go.etcd.io/etcd/raft/v3/raftpb"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel/trace"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type sendmsg struct {
@@ -194,13 +184,13 @@ func (w *RaftServer) RaftMessage(server pb.Raft_RaftMessageServer) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 
 	node := w.GetNode()
 	if node == nil || node.Raft() == nil {
 		return ErrNoNode
 	}
-	span.Annotatef(nil, "Stream server is node %#x", node.Id)
+	span.AddEvent(fmt.Sprintf("Stream server is node %d", node.Id))
 
 	var rc *pb.RaftContext
 	raft := node.Raft()
@@ -258,7 +248,7 @@ func (w *RaftServer) RaftMessage(server pb.Raft_RaftMessageServer) error {
 		}
 		if loop == 1 {
 			rc = batch.GetContext()
-			span.Annotatef(nil, "Stream from %#x", rc.GetId())
+			span.AddEvent(fmt.Sprintf("Stream from %#x", rc.GetId()))
 			if rc != nil {
 				node.Connect(rc.Id, rc.Addr)
 			}

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package worker
 
 import (
@@ -6,9 +11,9 @@ import (
 	"github.com/golang/glog"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
 )
 
 func InitForLite(ps *badger.DB) {

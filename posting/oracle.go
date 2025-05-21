@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package posting
@@ -24,12 +13,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/golang/glog"
 	ostats "go.opencensus.io/stats"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/tok/index"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/tok/index"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var o *oracle
@@ -84,7 +74,7 @@ func (vt *viTxn) StartTs() uint64 {
 	return vt.delegate.StartTs
 }
 
-func (vt *viTxn) Get(key []byte) (rval index.Value, rerr error) {
+func (vt *viTxn) Get(key []byte) ([]byte, error) {
 	pl, err := vt.delegate.cache.Get(key)
 	if err != nil {
 		return nil, err
@@ -94,7 +84,7 @@ func (vt *viTxn) Get(key []byte) (rval index.Value, rerr error) {
 	return vt.GetValueFromPostingList(pl)
 }
 
-func (vt *viTxn) GetWithLockHeld(key []byte) (rval index.Value, rerr error) {
+func (vt *viTxn) GetWithLockHeld(key []byte) ([]byte, error) {
 	pl, err := vt.delegate.cache.Get(key)
 	if err != nil {
 		return nil, err
@@ -102,19 +92,22 @@ func (vt *viTxn) GetWithLockHeld(key []byte) (rval index.Value, rerr error) {
 	return vt.GetValueFromPostingList(pl)
 }
 
-func (vt *viTxn) GetValueFromPostingList(pl *List) (rval index.Value, rerr error) {
+func (vt *viTxn) GetValueFromPostingList(pl *List) ([]byte, error) {
+	if pl.cache != nil {
+		return pl.cache, nil
+	}
 	value := pl.findStaticValue(vt.delegate.StartTs)
 
-	if value == nil {
-		//fmt.Println("DIFF", val, err, nil, badger.ErrKeyNotFound)
+	if value == nil || len(value.Postings) == 0 {
 		return nil, ErrNoValue
 	}
 
-	if hasDeleteAll(value.Postings[0]) || value.Postings[0].Op == Del {
+	if value.Postings[0].Op == Del {
 		return nil, ErrNoValue
 	}
 
-	return value.Postings[0].Value, nil
+	pl.cache = value.Postings[0].Value
+	return pl.cache, nil
 }
 
 func (vt *viTxn) AddMutation(ctx context.Context, key []byte, t *index.KeyValue) error {
@@ -160,6 +153,35 @@ func (txn *Txn) Get(key []byte) (*List, error) {
 // GetFromDelta retrieves the posting list from delta cache, not from Badger.
 func (txn *Txn) GetFromDelta(key []byte) (*List, error) {
 	return txn.cache.GetFromDelta(key)
+}
+
+func (txn *Txn) GetScalarList(key []byte) (*List, error) {
+	l, err := txn.cache.GetFromDelta(key)
+	if err != nil {
+		return nil, err
+	}
+	l.Lock()
+	defer l.Unlock()
+	if l.mutationMap.len() == 0 && len(l.plist.Postings) == 0 {
+		pl, err := txn.cache.readPostingListAt(key)
+		if err == badger.ErrKeyNotFound {
+			return l, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if pl.Pack != nil {
+			l.plist = pl
+		} else {
+			if pl.CommitTs == 0 {
+				l.mutationMap.setCurrentEntries(txn.StartTs, pl)
+			} else {
+				l.mutationMap.insertCommittedPostings(pl)
+			}
+		}
+	}
+	return l, nil
 }
 
 // Update calls UpdateDeltasAndDiscardLists on the local cache.

@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package testutil
@@ -27,7 +16,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo/v240"
+	"github.com/dgraph-io/dgo/v250"
 )
 
 const (
@@ -44,7 +33,9 @@ const (
 {"predicate":"dgraph.drop.op", "type": "string"},
 {"predicate":"dgraph.graphql.p_query","type":"string","index":true,"tokenizer":["sha256"]},
 {"predicate":"dgraph.graphql.schema", "type": "string"},
-{"predicate":"dgraph.graphql.xid","type":"string","index":true,"tokenizer":["exact"],"upsert":true}
+{"predicate":"dgraph.graphql.xid","type":"string","index":true,"tokenizer":["exact"],"upsert":true},
+{"predicate":"dgraph.namespace.name","type":"string","index":true,"tokenizer":["exact"],"unique":true,"upsert":true},
+{"predicate":"dgraph.namespace.id","type":"int","index":true,"tokenizer":["int"],"unique":true,"upsert":true}
 `
 	aclTypes = `
 {
@@ -65,6 +56,9 @@ const (
 },{
 	"fields": [{"name": "dgraph.graphql.p_query"}],
 	"name": "dgraph.graphql.persisted_query"
+},{
+	"fields": [{"name": "dgraph.namespace.name"}, {"name": "dgraph.namespace.id"}],
+	"name": "dgraph.namespace"
 }
 `
 )

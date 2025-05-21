@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package x
@@ -112,7 +101,7 @@ type WorkerOptions struct {
 	WhiteListedIPRanges []IPRange
 	// StrictMutations will cause mutations to unknown predicates to fail if set to true.
 	StrictMutations bool
-	// AclEnabled indicates whether the enterprise ACL feature is turned on.
+	// AclEnabled indicates whether the ACL feature is turned on.
 	AclEnabled bool
 	// AclJwtAlg stores the JWT signing algorithm.
 	AclJwtAlg jwt.SigningMethod
@@ -133,7 +122,7 @@ type WorkerOptions struct {
 	// whitelist string - comma separated IP addresses
 	// token string - if set, all Admin requests to Dgraph will have this token.
 	Security *z.SuperFlag
-	// EncryptionKey is the key used for encryption at rest, backups, exports. Enterprise only feature.
+	// EncryptionKey is the key used for encryption at rest, backups, exports.
 	EncryptionKey Sensitive
 	// LogDQLRequest indicates whether alpha should log all query/mutation requests coming to it.
 	// Ideally LogDQLRequest should be a bool value. But we are reading it using atomics across

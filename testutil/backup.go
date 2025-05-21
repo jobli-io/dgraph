@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package testutil
@@ -31,12 +20,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgraph/v24/ee"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // KeyFile is set to the path of the file containing the key. Used for testing purposes only.
@@ -46,12 +34,12 @@ func openDgraph(pdir string) (*badger.DB, error) {
 	// Get key.
 	config := viper.New()
 	flags := &pflag.FlagSet{}
-	ee.RegisterEncFlag(flags)
+	x.RegisterEncFlag(flags)
 	if err := config.BindPFlags(flags); err != nil {
 		return nil, err
 	}
-	config.Set("encryption", ee.BuildEncFlag(KeyFile))
-	keys, err := ee.GetKeys(config)
+	config.Set("encryption", x.BuildEncFlag(KeyFile))
+	keys, err := x.GetEncAclKeys(config)
 	if err != nil {
 		return nil, err
 	}

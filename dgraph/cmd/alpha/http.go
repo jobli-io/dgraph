@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package alpha
@@ -35,14 +24,15 @@ import (
 	"github.com/pkg/errors"
 	"google.golang.org/grpc/metadata"
 	jsonpb "google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dql"
-	"github.com/dgraph-io/dgraph/v24/edgraph"
-	"github.com/dgraph-io/dgraph/v24/graphql/admin"
-	"github.com/dgraph-io/dgraph/v24/graphql/schema"
-	"github.com/dgraph-io/dgraph/v24/query"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/edgraph"
+	"github.com/hypermodeinc/dgraph/v25/graphql/admin"
+	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/query"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func allowed(method string) bool {
@@ -142,6 +132,51 @@ func parseDuration(r *http.Request, name string) (time.Duration, error) {
 	}
 
 	return durationValue, nil
+}
+
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	if commonHandler(w, r) {
+		return
+	}
+
+	// Pass in PoorMan's auth, IP information if present.
+	ctx := x.AttachRemoteIP(context.Background(), r)
+	ctx = x.AttachAuthToken(ctx, r)
+
+	body := readRequest(w, r)
+	loginReq := api.LoginRequest{}
+	if err := json.Unmarshal(body, &loginReq); err != nil {
+		x.SetStatusWithData(w, x.Error, err.Error())
+		return
+	}
+
+	resp, err := (&edgraph.Server{}).Login(ctx, &loginReq)
+	if err != nil {
+		x.SetStatusWithData(w, x.ErrorInvalidRequest, err.Error())
+		return
+	}
+
+	jwt := &api.Jwt{}
+	if err := proto.Unmarshal(resp.Json, jwt); err != nil {
+		x.SetStatusWithData(w, x.Error, err.Error())
+		return
+	}
+
+	response := map[string]interface{}{}
+	mp := make(map[string]string)
+	mp["accessJWT"] = jwt.AccessJwt
+	mp["refreshJWT"] = jwt.RefreshJwt
+	response["data"] = mp
+
+	js, err := json.Marshal(response)
+	if err != nil {
+		x.SetStatusWithData(w, x.Error, err.Error())
+		return
+	}
+
+	if _, err := x.WriteResponse(w, r, js); err != nil {
+		glog.Errorf("Error while writing response: %v", err)
+	}
 }
 
 // This method should just build the request and proxy it to the Query method of dgraph.Server.
@@ -413,7 +448,7 @@ func mutationHandler(w http.ResponseWriter, r *http.Request) {
 
 	case "application/rdf":
 		// Parse N-Quads.
-		req, err = dql.ParseMutation(string(body))
+		req, err = dql.ParseDQL(string(body))
 		if err != nil {
 			x.SetStatus(w, x.ErrorInvalidRequest, err.Error())
 			return
@@ -702,7 +737,7 @@ func resolveWithAdminServer(gqlReq *schema.Request, r *http.Request,
 	ctx = x.AttachAuthToken(ctx, r)
 	ctx = x.AttachJWTNamespace(ctx)
 
-	return adminServer.ResolveWithNs(ctx, x.GalaxyNamespace, gqlReq)
+	return adminServer.ResolveWithNs(ctx, x.RootNamespace, gqlReq)
 }
 
 func writeSuccessResponse(w http.ResponseWriter, r *http.Request) {

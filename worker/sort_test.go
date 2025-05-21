@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -19,15 +8,16 @@ package worker
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"testing"
 
 	"github.com/dgraph-io/badger/v4"
 	bpb "github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/x"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,6 +42,7 @@ func rollup(t *testing.T, key []byte, pstore *badger.DB, readTs uint64) {
 	kvs, err := ol.Rollup(nil, readTs+1)
 	require.NoError(t, err)
 	require.NoError(t, writePostingListToDisk(kvs))
+	posting.ResetCache()
 }
 
 func writePostingListToDisk(kvs []*bpb.KV) error {
@@ -64,7 +55,7 @@ func writePostingListToDisk(kvs []*bpb.KV) error {
 	return writer.Flush()
 }
 
-func TestSingleUid(t *testing.T) {
+func TestEmptyTypeSchema(t *testing.T) {
 	dir, err := os.MkdirTemp("", "storetest_")
 	x.Check(err)
 	defer os.RemoveAll(dir)
@@ -73,14 +64,413 @@ func TestSingleUid(t *testing.T) {
 	ps, err := badger.OpenManaged(opt)
 	x.Check(err)
 	pstore = ps
-	posting.Init(ps, 0)
+	posting.Init(ps, 0, false)
+	Init(ps)
+
+	typeName := "1-temp"
+	ts := uint64(10)
+	txn := pstore.NewTransactionAt(ts, true)
+	defer txn.Discard()
+	e := &badger.Entry{
+		Key:      x.TypeKey(typeName),
+		Value:    make([]byte, 0),
+		UserMeta: posting.BitSchemaPosting,
+	}
+	require.Nil(t, txn.SetEntry(e.WithDiscard()))
+	require.Nil(t, txn.CommitAt(ts, nil))
+
+	schema.Init(ps)
+	require.Nil(t, schema.LoadFromDb(context.Background()))
+
+	req := &pb.SchemaRequest{}
+	types, err := GetTypes(context.Background(), req)
+	require.Nil(t, err)
+
+	require.Equal(t, 1, len(types))
+	x.ParseNamespaceAttr(types[0].TypeName)
+}
+
+func TestGetScalarList(t *testing.T) {
+	dir, err := os.MkdirTemp("", "storetest_")
+	x.Check(err)
+	defer os.RemoveAll(dir)
+
+	opt := badger.DefaultOptions(dir)
+	ps, err := badger.OpenManaged(opt)
+	x.Check(err)
+	pstore = ps
+	posting.Init(ps, 0, false)
+	Init(ps)
+	err = schema.ParseBytes([]byte("scalarPredicateCount4: uid ."), 1)
+	require.NoError(t, err)
+
+	runM := func(startTs, commitTs uint64, edges []*pb.DirectedEdge) {
+		txn := posting.Oracle().RegisterStartTs(startTs)
+		for _, edge := range edges {
+			x.Check(runMutation(context.Background(), edge, txn))
+		}
+		txn.Update()
+		writer := posting.NewTxnWriter(pstore)
+		require.NoError(t, txn.CommitToDisk(writer, commitTs))
+		require.NoError(t, writer.Flush())
+		txn.UpdateCachedKeys(commitTs)
+	}
+
+	attr := x.AttrInRootNamespace("scalarPredicateCount4")
+
+	runM(5, 7, []*pb.DirectedEdge{{
+		ValueId:   3,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_SET,
+	}})
+
+	key := x.DataKey(attr, 1)
+	rollup(t, key, ps, 8)
+
+	runM(9, 11, []*pb.DirectedEdge{{
+		ValueId:   5,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_SET,
+	}})
+
+	txn := posting.Oracle().RegisterStartTs(13)
+	l, err := txn.Get(key)
+	require.Nil(t, err)
+	uids, err := l.Uids(posting.ListOptions{ReadTs: 13})
+	require.Nil(t, err)
+	require.Equal(t, 1, len(uids.Uids))
+}
+
+func TestMultipleTxnListCount(t *testing.T) {
+	dir, err := os.MkdirTemp("", "storetest_")
+	x.Check(err)
+	defer os.RemoveAll(dir)
+
+	opt := badger.DefaultOptions(dir)
+	ps, err := badger.OpenManaged(opt)
+	x.Check(err)
+	pstore = ps
+	posting.Init(ps, 0, false)
+	Init(ps)
+	err = schema.ParseBytes([]byte("scalarPredicateCount3: [uid] @count ."), 1)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	attr := x.AttrInRootNamespace("scalarPredicateCount3")
+
+	runM := func(startTs, commitTs uint64, edges []*pb.DirectedEdge) {
+		txn := posting.Oracle().RegisterStartTs(startTs)
+		for _, edge := range edges {
+			x.Check(runMutation(ctx, edge, txn))
+		}
+		txn.Update()
+		writer := posting.NewTxnWriter(pstore)
+		require.NoError(t, txn.CommitToDisk(writer, commitTs))
+		require.NoError(t, writer.Flush())
+		txn.UpdateCachedKeys(commitTs)
+	}
+
+	runM(9, 11, []*pb.DirectedEdge{{
+		ValueId:   3,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_SET,
+	}, {
+		ValueId:   2,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_SET,
+	}})
+
+	txn := posting.Oracle().RegisterStartTs(13)
+	key := x.CountKey(attr, 1, false)
+	l, err := txn.Get(key)
+	require.Nil(t, err)
+	uids, err := l.Uids(posting.ListOptions{ReadTs: 13})
+	require.Nil(t, err)
+	require.Equal(t, 0, len(uids.Uids))
+
+	key = x.CountKey(attr, 2, false)
+	l, err = txn.Get(key)
+	require.Nil(t, err)
+	uids, err = l.Uids(posting.ListOptions{ReadTs: 13})
+	require.Nil(t, err)
+	require.Equal(t, 1, len(uids.Uids))
+}
+
+func TestScalarPredicateRevCount(t *testing.T) {
+	dir, err := os.MkdirTemp("", "storetest_")
+	x.Check(err)
+	defer os.RemoveAll(dir)
+
+	opt := badger.DefaultOptions(dir)
+	ps, err := badger.OpenManaged(opt)
+	x.Check(err)
+	pstore = ps
+	posting.Init(ps, 0, false)
+	Init(ps)
+	err = schema.ParseBytes([]byte("scalarPredicateCount2: uid @reverse @count ."), 1)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	attr := x.AttrInRootNamespace("scalarPredicateCount2")
+
+	runM := func(startTs, commitTs uint64, edges []*pb.DirectedEdge) {
+		txn := posting.Oracle().RegisterStartTs(startTs)
+		for _, edge := range edges {
+			x.Check(runMutation(ctx, edge, txn))
+		}
+		txn.Update()
+		writer := posting.NewTxnWriter(pstore)
+		require.NoError(t, txn.CommitToDisk(writer, commitTs))
+		require.NoError(t, writer.Flush())
+		txn.UpdateCachedKeys(commitTs)
+	}
+
+	runM(9, 11, []*pb.DirectedEdge{{
+		ValueId:   3,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_SET,
+	}, {
+		ValueId:   3,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_DEL,
+	}})
+
+	txn := posting.Oracle().RegisterStartTs(13)
+	key := x.DataKey(attr, 1)
+	l, err := txn.Get(key)
+	require.Nil(t, err)
+	l.RLock()
+	require.Equal(t, 0, l.GetLength(13))
+	l.RUnlock()
+
+	runM(15, 17, []*pb.DirectedEdge{{
+		ValueId:   3,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_SET,
+	}})
+
+	txn = posting.Oracle().RegisterStartTs(18)
+	l, err = txn.Get(key)
+	require.Nil(t, err)
+	l.RLock()
+	require.Equal(t, 1, l.GetLength(18))
+	l.RUnlock()
+
+	runM(18, 19, []*pb.DirectedEdge{{
+		ValueId:   3,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_DEL,
+	}})
+
+	txn = posting.Oracle().RegisterStartTs(20)
+	l, err = txn.Get(key)
+	require.Nil(t, err)
+	l.RLock()
+	require.Equal(t, 0, l.GetLength(20))
+	l.RUnlock()
+}
+
+func TestScalarPredicateIntCount(t *testing.T) {
+	dir, err := os.MkdirTemp("", "storetest_")
+	x.Check(err)
+	defer os.RemoveAll(dir)
+
+	opt := badger.DefaultOptions(dir)
+	ps, err := badger.OpenManaged(opt)
+	x.Check(err)
+	pstore = ps
+	posting.Init(ps, 0, false)
+	Init(ps)
+	err = schema.ParseBytes([]byte("scalarPredicateCount1: string @count ."), 1)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	attr := x.AttrInRootNamespace("scalarPredicateCount1")
+
+	runM := func(startTs, commitTs uint64, edge *pb.DirectedEdge) {
+		txn := posting.Oracle().RegisterStartTs(startTs)
+		x.Check(runMutation(ctx, edge, txn))
+		txn.Update()
+		writer := posting.NewTxnWriter(pstore)
+		require.NoError(t, txn.CommitToDisk(writer, commitTs))
+		require.NoError(t, writer.Flush())
+		txn.UpdateCachedKeys(commitTs)
+	}
+
+	runM(5, 7, &pb.DirectedEdge{
+		Value:     []byte("a"),
+		ValueType: pb.Posting_STRING,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_SET,
+	})
+
+	key := x.CountKey(attr, 1, false)
+	rollup(t, key, ps, 8)
+
+	runM(9, 11, &pb.DirectedEdge{
+		Value:     []byte("a"),
+		ValueType: pb.Posting_STRING,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_DEL,
+	})
+
+	txn := posting.Oracle().RegisterStartTs(20)
+	l, err := txn.Get(key)
+	require.Nil(t, err)
+	l.RLock()
+	require.Equal(t, 0, l.GetLength(20))
+	l.RUnlock()
+}
+
+func TestScalarPredicateCount(t *testing.T) {
+	dir, err := os.MkdirTemp("", "storetest_")
+	x.Check(err)
+	defer os.RemoveAll(dir)
+
+	opt := badger.DefaultOptions(dir)
+	ps, err := badger.OpenManaged(opt)
+	x.Check(err)
+	pstore = ps
+	posting.Init(ps, 0, false)
+	Init(ps)
+	err = schema.ParseBytes([]byte("scalarPredicateCount: uid @count ."), 1)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	attr := x.AttrInRootNamespace("scalarPredicateCount")
+
+	runM := func(startTs, commitTs uint64, edge *pb.DirectedEdge) {
+		txn := posting.Oracle().RegisterStartTs(startTs)
+		x.Check(runMutation(ctx, edge, txn))
+		txn.Update()
+		writer := posting.NewTxnWriter(pstore)
+		require.NoError(t, txn.CommitToDisk(writer, commitTs))
+		require.NoError(t, writer.Flush())
+		txn.UpdateCachedKeys(commitTs)
+	}
+
+	runM(5, 7, &pb.DirectedEdge{
+		ValueId:   2,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_SET,
+	})
+
+	key := x.CountKey(attr, 1, false)
+	rollup(t, key, ps, 8)
+
+	runM(9, 11, &pb.DirectedEdge{
+		ValueId:   3,
+		ValueType: pb.Posting_UID,
+		Attr:      attr,
+		Entity:    1,
+		Op:        pb.DirectedEdge_SET,
+	})
+
+	txn := posting.Oracle().RegisterStartTs(15)
+	l, err := txn.Get(key)
+	require.Nil(t, err)
+	l.RLock()
+	require.Equal(t, 1, l.GetLength(15))
+	l.RUnlock()
+}
+
+func TestSingleUidReplacement(t *testing.T) {
+	dir, err := os.MkdirTemp("", "storetest_")
+	x.Check(err)
+	defer os.RemoveAll(dir)
+
+	opt := badger.DefaultOptions(dir)
+	ps, err := badger.OpenManaged(opt)
+	x.Check(err)
+	pstore = ps
+	posting.Init(ps, 0, false)
+	Init(ps)
+	err = schema.ParseBytes([]byte("singleUidReplaceTest: uid ."), 1)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	txn := posting.Oracle().RegisterStartTs(5)
+	attr := x.AttrInRootNamespace("singleUidReplaceTest")
+
+	// Txn 1. Set 1 -> 2
+	x.Check(runMutation(ctx, &pb.DirectedEdge{
+		ValueId: 2,
+		Attr:    attr,
+		Entity:  1,
+		Op:      pb.DirectedEdge_SET,
+	}, txn))
+
+	txn.Update()
+	writer := posting.NewTxnWriter(pstore)
+	require.NoError(t, txn.CommitToDisk(writer, 7))
+	require.NoError(t, writer.Flush())
+	txn.UpdateCachedKeys(7)
+
+	// Txn 2. Set 1 -> 3
+	txn = posting.Oracle().RegisterStartTs(9)
+
+	x.Check(runMutation(ctx, &pb.DirectedEdge{
+		ValueId: 3,
+		Attr:    attr,
+		Entity:  1,
+		Op:      pb.DirectedEdge_SET,
+	}, txn))
+
+	txn.Update()
+	writer = posting.NewTxnWriter(pstore)
+	require.NoError(t, txn.CommitToDisk(writer, 11))
+	require.NoError(t, writer.Flush())
+	txn.UpdateCachedKeys(11)
+
+	key := x.DataKey(attr, 1)
+
+	// Reading the david index, we should see 2 inserted, 1 deleted
+	txn = posting.Oracle().RegisterStartTs(15)
+	l, err := txn.Get(key)
+	require.NoError(t, err)
+
+	uids, err := l.Uids(posting.ListOptions{ReadTs: 15})
+	require.NoError(t, err)
+	require.Equal(t, uids.Uids, []uint64{3})
+}
+
+func TestSingleString(t *testing.T) {
+	dir, err := os.MkdirTemp("", "storetest_")
+	x.Check(err)
+	defer os.RemoveAll(dir)
+
+	opt := badger.DefaultOptions(dir)
+	ps, err := badger.OpenManaged(opt)
+	x.Check(err)
+	pstore = ps
+	posting.Init(ps, 0, false)
 	Init(ps)
 	err = schema.ParseBytes([]byte("singleUidTest: string @index(exact) @unique ."), 1)
 	require.NoError(t, err)
 
 	ctx := context.Background()
 	txn := posting.Oracle().RegisterStartTs(5)
-	attr := x.GalaxyAttr("singleUidTest")
+	attr := x.AttrInRootNamespace("singleUidTest")
 
 	// Txn 1. Set 1 -> david 2 -> blush
 	x.Check(runMutation(ctx, &pb.DirectedEdge{
@@ -168,14 +558,14 @@ func TestLangExact(t *testing.T) {
 	x.Check(err)
 	pstore = ps
 	// Not using posting list cache
-	posting.Init(ps, 0)
+	posting.Init(ps, 0, false)
 	Init(ps)
 	err = schema.ParseBytes([]byte("testLang: string @index(term) @lang ."), 1)
 	require.NoError(t, err)
 
 	ctx := context.Background()
 	txn := posting.Oracle().RegisterStartTs(5)
-	attr := x.GalaxyAttr("testLang")
+	attr := x.AttrInRootNamespace("testLang")
 
 	edge := &pb.DirectedEdge{
 		Value:  []byte("english"),
@@ -214,6 +604,16 @@ func TestLangExact(t *testing.T) {
 	require.Equal(t, val.Value, []byte("hindi"))
 }
 
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+func randStringBytes(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = letterBytes[rand.Intn(len(letterBytes))]
+	}
+	return string(b)
+}
+
 func BenchmarkAddMutationWithIndex(b *testing.B) {
 	dir, err := os.MkdirTemp("", "storetest_")
 	x.Check(err)
@@ -224,7 +624,7 @@ func BenchmarkAddMutationWithIndex(b *testing.B) {
 	x.Check(err)
 	pstore = ps
 	// Not using posting list cache
-	posting.Init(ps, 0)
+	posting.Init(ps, 0, false)
 	Init(ps)
 	err = schema.ParseBytes([]byte("benchmarkadd: string @index(term) ."), 1)
 	fmt.Println(err)
@@ -233,13 +633,19 @@ func BenchmarkAddMutationWithIndex(b *testing.B) {
 	}
 	ctx := context.Background()
 	txn := posting.Oracle().RegisterStartTs(5)
-	attr := x.GalaxyAttr("benchmarkadd")
+	attr := x.AttrInRootNamespace("benchmarkadd")
+
+	n := uint64(1000)
+	values := make([]string, 0)
+	for range n {
+		values = append(values, randStringBytes(5))
+	}
 
 	for i := 0; i < b.N; i++ {
 		edge := &pb.DirectedEdge{
-			Value:  []byte("david"),
+			Value:  []byte(values[rand.Intn(int(n))]),
 			Attr:   attr,
-			Entity: 1,
+			Entity: rand.Uint64()%n + 1,
 			Op:     pb.DirectedEdge_SET,
 		}
 

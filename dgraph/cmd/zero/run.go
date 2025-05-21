@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package zero
@@ -31,21 +20,18 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/spf13/cobra"
-	"go.opencensus.io/plugin/ocgrpc"
-	otrace "go.opencensus.io/trace"
-	"go.opencensus.io/zpages"
-	"golang.org/x/net/trace"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/contrib/zpages"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/ee/audit"
-	"github.com/dgraph-io/dgraph/v24/ee/enc"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/raftwal"
-	"github.com/dgraph-io/dgraph/v24/worker"
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/audit"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/raftwal"
+	"github.com/hypermodeinc/dgraph/v25/worker"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type options struct {
@@ -98,7 +84,7 @@ instances to achieve high-availability.
 	flag.String("peer", "", "Address of another dgraphzero server.")
 	flag.StringP("wal", "w", "zw", "Directory storing WAL.")
 	flag.Duration("rebalance_interval", 8*time.Minute, "Interval for trying a predicate move.")
-	flag.String("enterprise_license", "", "Path to the enterprise license file.")
+	flag.String("enterprise_license", "", "(deprecated) Path to the enterprise license file.")
 	flag.String("cid", "", "Cluster ID")
 
 	flag.String("limit", worker.ZeroLimitsDefaults, z.NewSuperFlagHelp(worker.ZeroLimitsDefaults).
@@ -156,7 +142,7 @@ func (st *state) serveGRPC(l net.Listener, store *raftwal.DiskStorage) {
 		grpc.MaxRecvMsgSize(x.GrpcMaxSize),
 		grpc.MaxSendMsgSize(x.GrpcMaxSize),
 		grpc.MaxConcurrentStreams(1000),
-		grpc.StatsHandler(&ocgrpc.ServerHandler{}),
+		grpc.StatsHandler(otelgrpc.NewClientHandler()),
 		grpc.UnaryInterceptor(audit.AuditRequestGRPC),
 	}
 
@@ -213,15 +199,8 @@ func (st *state) serveGRPC(l net.Listener, store *raftwal.DiskStorage) {
 }
 
 func run() {
-	telemetry := z.NewSuperFlag(Zero.Conf.GetString("telemetry")).MergeAndCheckDefault(
-		x.TelemetryDefaults)
-	if telemetry.GetBool("sentry") {
-		x.InitSentry(enc.EeBuild)
-		defer x.FlushSentry()
-		x.ConfigureSentryScope("zero")
-		x.WrapPanics()
-		x.SentryOptOutNote()
-	}
+	telemetry := z.NewSuperFlag(Zero.Conf.GetString("telemetry")).
+		MergeAndCheckDefault(x.TelemetryDefaults)
 
 	x.PrintVersion()
 	tlsConf, err := x.LoadClientTLSConfigForInternalPort(Zero.Conf)
@@ -253,20 +232,9 @@ func run() {
 	glog.Infof("Setting Config to: %+v", opts)
 	x.WorkerConfig.Parse(Zero.Conf)
 
-	if !enc.EeBuild && Zero.Conf.GetString("enterprise_license") != "" {
-		log.Fatalf("ERROR: enterprise_license option cannot be applied to OSS builds. ")
-	}
-
 	if opts.numReplicas < 0 || opts.numReplicas%2 == 0 {
 		log.Fatalf("ERROR: Number of replicas must be odd for consensus. Found: %d",
 			opts.numReplicas)
-	}
-
-	if Zero.Conf.GetBool("expose_trace") {
-		// TODO: Remove this once we get rid of event logs.
-		trace.AuthRequest = func(req *http.Request) (any, sensitive bool) {
-			return true, true
-		}
 	}
 
 	if opts.audit != nil {
@@ -283,10 +251,6 @@ func run() {
 			opts.rebalanceInterval)
 	}
 
-	grpc.EnableTracing = false
-	otrace.ApplyConfig(otrace.Config{
-		DefaultSampler: otrace.ProbabilitySampler(Zero.Conf.GetFloat64("trace"))})
-
 	addr := "localhost"
 	if opts.bindall {
 		addr = "0.0.0.0"
@@ -299,6 +263,13 @@ func run() {
 	if nodeId == 0 {
 		log.Fatalf("ERROR: raft.idx flag cannot be 0. Please set idx to a unique positive integer.")
 	}
+
+	if opts.audit != nil {
+		if err := audit.InitAuditor(opts.audit, 0, nodeId); err != nil {
+			glog.Errorf("error while initializing audit logs %+v", err)
+		}
+	}
+
 	grpcListener, err := setupListener(addr, x.PortZeroGrpc+opts.portOffset, "grpc")
 	x.Check(err)
 	httpListener, err := setupListener(addr, x.PortZeroHTTP+opts.portOffset, "http")
@@ -328,10 +299,9 @@ func run() {
 		baseMux.HandleFunc("/removeNode", st.removeNode)
 		baseMux.HandleFunc("/moveTablet", st.moveTablet)
 		baseMux.HandleFunc("/assign", st.assign)
-		baseMux.HandleFunc("/enterpriseLicense", st.applyEnterpriseLicense)
 	}
 	baseMux.HandleFunc("/debug/jemalloc", x.JemallocHandler)
-	zpages.Handle(baseMux, "/debug/z")
+	http.DefaultServeMux.Handle("/debug/z", zpages.NewTracezHandler(zpages.NewSpanProcessor()))
 
 	// This must be here. It does not work if placed before Grpc init.
 	x.Check(st.node.initAndStartNode())
@@ -376,8 +346,6 @@ func run() {
 		st.node.closer.SignalAndWait()
 		// Stop all internal requests.
 		_ = grpcListener.Close()
-
-		x.RemoveCidFile()
 	}()
 
 	st.zero.closer.AddRunning(2)

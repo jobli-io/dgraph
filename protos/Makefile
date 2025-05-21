@@ -1,22 +1,11 @@
 #
-# Copyright 2023 Dgraph Labs, Inc. and Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+# SPDX-License-Identifier: Apache-2.0
 #
 
 # Update BADGER_PB_VERSION when upgrading Badger major versions
 BADGER_PB_VERSION = 4
-DGO_PB_VERSION = 240
+DGO_PB_VERSION = 250
 
 DGO_PATH    := github.com/dgraph-io/dgo/v${DGO_PB_VERSION}
 BADGER_PATH := github.com/dgraph-io/badger/v${BADGER_PB_VERSION}
@@ -52,6 +41,8 @@ copy-protos:
 	 ${TMPDIR}/src/${BADGER_PATH}/pb/pb.proto
 	@cp $(shell go list -m -f "{{.Dir}}" ${DGO_PATH})/protos/api.proto \
 	 ${TMPDIR}/src/${DGO_PATH}/protos/api.proto
+	@cp $(shell go list -m -f "{{.Dir}}" ${DGO_PATH})/protos/api.v25.proto \
+	 ${TMPDIR}/src/${DGO_PATH}/protos/api.v25.proto
 
 .PHONY: patch-pb
 patch-pb:
@@ -67,7 +58,8 @@ regenerate: tidy-deps copy-protos check clean
 		--go_opt=paths=source_relative \
 		--go-grpc_opt=paths=source_relative \
 		--go_opt=M{DGO_PATH}/protos/api.proto={DGO_PATH}/protos/api \
+		--go_opt=M{DGO_PATH}/protos/api.v25.proto={DGO_PATH}/protos/api.v25 \
 		pb.proto
-	@$(MAKE) patch-pb  
+	@$(MAKE) patch-pb
 	@rm -rf ${TMPDIR}
 	@echo Done.

@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -33,11 +22,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/ee"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -47,7 +35,6 @@ var (
 
 var (
 	alphaService    string
-	zeroService     string
 	alphaName       string
 	alphaExportPath string
 	localExportPath = "./export_copy"
@@ -99,8 +86,7 @@ func TestLiveLoadUpsertAtOnce(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/xid.schema", "--files", file, "--alpha",
-			alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;", "-U", "xid"},
+			alphaService, "--creds", "user=groot;password=password;", "-U", "xid"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
@@ -114,8 +100,7 @@ func TestLiveLoadUpsert(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/xid.schema", "--files", testDataDir + "/xid_a.rdf",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;", "-U", "xid"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;", "-U", "xid"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
@@ -123,8 +108,7 @@ func TestLiveLoadUpsert(t *testing.T) {
 	pipeline = [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/xid.schema", "--files", testDataDir + "/xid_b.rdf",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;", "-U", "xid"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;", "-U", "xid"},
 	}
 	_, err = testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
@@ -202,8 +186,7 @@ func TestLiveLoadJsonUidKeep(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.json",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
@@ -217,8 +200,7 @@ func TestLiveLoadJsonUidDiscard(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live", "--new_uids",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.json",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
@@ -232,8 +214,7 @@ func TestLiveLoadRdfUidKeep(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.rdf",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
@@ -247,8 +228,7 @@ func TestLiveLoadRdfUidDiscard(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live", "--new_uids",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.rdf",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
@@ -287,9 +267,8 @@ func TestLiveLoadExportedSchema(t *testing.T) {
 			"--schema", localExportPath + "/" + exportId + "/" + groupId + ".schema.gz",
 			"--files", localExportPath + "/" + exportId + "/" + groupId + ".rdf.gz",
 			"--encryption",
-			ee.BuildEncFlag(testDataDir + "/../../../../ee/enc/test-fixtures/enc-key"),
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			x.BuildEncFlag(testDataDir + "/../../../../enc/test-fixtures/enc-key"),
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading exported schema exited with error")
@@ -328,8 +307,7 @@ func TestLiveLoadFileName(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--files", testDataDir + "/correct1.rdf," + testDataDir + "/errored1.rdf",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 
 	out, err := testutil.Pipeline(pipeline)
@@ -345,8 +323,7 @@ func TestLiveLoadFileNameMultipleErrored(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--files", testDataDir + "/correct1.rdf," + testDataDir + "/errored1.rdf," +
-				testDataDir + "/errored2.rdf", "--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+				testDataDir + "/errored2.rdf", "--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 
 	out, err := testutil.Pipeline(pipeline)
@@ -363,8 +340,7 @@ func TestLiveLoadFileNameMultipleCorrect(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--files", testDataDir + "/correct1.rdf," + testDataDir + "/correct2.rdf," +
-				testDataDir + "/errored1.rdf", "--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+				testDataDir + "/errored1.rdf", "--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 
 	out, err := testutil.Pipeline(pipeline)
@@ -377,7 +353,6 @@ func TestLiveLoadFileNameMultipleCorrect(t *testing.T) {
 func TestMain(m *testing.M) {
 	alphaName = testutil.Instance
 	alphaService = testutil.SockAddr
-	zeroService = testutil.SockAddrZero
 
 	x.AssertTrue(strings.Count(alphaName, "_") == 2)
 	left := strings.Index(alphaName, "_")

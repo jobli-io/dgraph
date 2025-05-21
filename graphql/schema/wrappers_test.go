@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 //nolint:lll
@@ -26,10 +15,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/gqlparser/v2/ast"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func TestDgraphMapping_WithoutDirectives(t *testing.T) {
@@ -88,7 +77,7 @@ type Starship {
 
 	schHandler, errs := NewHandler(schemaStr, false)
 	require.NoError(t, errs)
-	sch, err := FromString(schHandler.GQLSchema(), x.GalaxyNamespace)
+	sch, err := FromString(schHandler.GQLSchema(), x.RootNamespace)
 	require.NoError(t, err)
 
 	s, ok := sch.(*schema)
@@ -273,7 +262,7 @@ func TestDgraphMapping_WithDirectives(t *testing.T) {
 
 	schHandler, errs := NewHandler(schemaStr, false)
 	require.NoError(t, errs)
-	sch, err := FromString(schHandler.GQLSchema(), x.GalaxyNamespace)
+	sch, err := FromString(schHandler.GQLSchema(), x.RootNamespace)
 	require.NoError(t, err)
 
 	s, ok := sch.(*schema)
@@ -409,7 +398,7 @@ func TestCheckNonNulls(t *testing.T) {
 		req: String!
 		notReq: String
 		alsoReq: String!
-	}`, x.GalaxyNamespace)
+	}`, x.RootNamespace)
 	require.NoError(t, err)
 
 	tcases := map[string]struct {
@@ -919,7 +908,7 @@ func TestGraphQLQueryInCustomHTTPConfig(t *testing.T) {
 		t.Run(tcase.Name, func(t *testing.T) {
 			schHandler, errs := NewHandler(tcase.GQLSchema, false)
 			require.NoError(t, errs)
-			sch, err := FromString(schHandler.GQLSchema(), x.GalaxyNamespace)
+			sch, err := FromString(schHandler.GQLSchema(), x.RootNamespace)
 			require.NoError(t, err)
 
 			var vars map[string]interface{}
@@ -958,7 +947,7 @@ func TestGraphQLQueryInCustomHTTPConfig(t *testing.T) {
 
 			remoteSchemaHandler, errs := NewHandler(tcase.RemoteSchema, false)
 			require.NoError(t, errs)
-			remoteSchema, err := FromString(remoteSchemaHandler.GQLSchema(), x.GalaxyNamespace)
+			remoteSchema, err := FromString(remoteSchemaHandler.GQLSchema(), x.RootNamespace)
 			require.NoError(t, err)
 
 			// Validate the generated query against the remote schema.
@@ -1018,7 +1007,7 @@ func TestAllowedHeadersList(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			schHandler, errs := NewHandler(test.schemaStr, false)
 			require.NoError(t, errs)
-			_, err := FromString(schHandler.GQLSchema(), x.GalaxyNamespace)
+			_, err := FromString(schHandler.GQLSchema(), x.RootNamespace)
 			require.NoError(t, err)
 			require.Equal(t, strings.Join([]string{x.AccessControlAllowedHeaders, test.expected},
 				","), schHandler.MetaInfo().AllowedCorsHeaders())

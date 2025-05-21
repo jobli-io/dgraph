@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package audit_encrypted
@@ -26,8 +15,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/testutil/testaudit"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/testutil/testaudit"
 )
 
 func TestZeroAuditEncrypted(t *testing.T) {
@@ -37,11 +26,11 @@ func TestZeroAuditEncrypted(t *testing.T) {
 	defer os.RemoveAll(fmt.Sprintf("audit_dir/za/zero_audit_0_%s.log", nId))
 	defer os.RemoveAll(fmt.Sprintf("audit_dir/za/zero_audit_0_%s.log.enc", nId))
 	zeroCmd := map[string][]string{
-		"/removeNode": {`--location`, "--request", "GET",
+		"/removeNode": {`--location`, "--request", "GET", "--ipv4",
 			fmt.Sprintf("%s/removeNode?id=3&group=1", testutil.SockAddrZeroHttp)},
-		"/assign": {"--location", "--request", "GET",
+		"/assign": {"--location", "--request", "GET", "--ipv4",
 			fmt.Sprintf("%s/assign?what=uids&num=100", testutil.SockAddrZeroHttp)},
-		"/moveTablet": {"--location", "--request", "GET",
+		"/moveTablet": {"--location", "--request", "GET", "--ipv4",
 			fmt.Sprintf("%s/moveTablet?tablet=name&group=2", testutil.SockAddrZeroHttp)}}
 
 	msgs := make([]string, 0)
@@ -59,7 +48,7 @@ func TestZeroAuditEncrypted(t *testing.T) {
 
 	var args []string
 	args = append(args, "audit", "decrypt",
-		"--encryption_key_file=../../ee/enc/test-fixtures/enc-key",
+		"--encryption_key_file=../../enc/test-fixtures/enc-key",
 		"--in", fmt.Sprintf("audit_dir/za/zero_audit_0_%s.log.enc", nId),
 		"--out", fmt.Sprintf("audit_dir/za/zero_audit_0_%s.log", nId))
 
@@ -87,22 +76,22 @@ func TestAlphaAuditEncrypted(t *testing.T) {
 	defer os.Remove(fmt.Sprintf("audit_dir/aa/alpha_audit_1_%s.log", nId))
 	defer os.Remove(fmt.Sprintf("audit_dir/aa/alpha_audit_1_%s.log.enc", nId))
 	testCommand := map[string][]string{
-		"/admin": {"--location", "--request", "POST",
+		"/admin": {"--location", "--request", "POST", "--ipv4",
 			fmt.Sprintf("%s/admin", testutil.SockAddrHttp),
 			"--header", "Content-Type: application/json",
 			"--data-raw", `'{"query":"mutation {\n  backup(
 input: {destination: \"/Users/sankalanparajuli/work/backup\"}) {\n    response {\n      message\n      code\n    }\n  }\n}\n","variables":{}}'`}, //nolint:lll
 
-		"/graphql": {"--location", "--request", "POST", fmt.Sprintf("%s/graphql", testutil.SockAddrHttp),
+		"/graphql": {"--location", "--request", "POST", "--ipv4", fmt.Sprintf("%s/graphql", testutil.SockAddrHttp),
 			"--header", "Content-Type: application/json",
 			"--data-raw", `'{"query":"query {\n  __schema {\n    __typename\n  }\n}","variables":{}}'`},
 
-		"/alter": {"-X", "POST", fmt.Sprintf("%s/alter", testutil.SockAddrHttp), "-d",
+		"/alter": {"-X", "POST", "--ipv4", fmt.Sprintf("%s/alter", testutil.SockAddrHttp), "-d",
 			`name: string @index(term) .
 			type Person {
 			  name
 			}`},
-		"/query": {"-H", "'Content-Type: application/dql'", "-X", "POST", fmt.Sprintf("%s/query", testutil.SockAddrHttp),
+		"/query": {"-H", "'Content-Type: application/dql'", "--ipv4", "-X", "POST", fmt.Sprintf("%s/query", testutil.SockAddrHttp),
 			"-d", `$'
 			{
 			 balances(func: anyofterms(name, "Alice Bob")) {
@@ -111,7 +100,7 @@ input: {destination: \"/Users/sankalanparajuli/work/backup\"}) {\n    response {
 			   balance
 			 }
 			}'`},
-		"/mutate": {"-H", "'Content-Type: application/rdf'", "-X",
+		"/mutate": {"-H", "'Content-Type: application/rdf'", "--ipv4", "-X",
 			"POST", fmt.Sprintf("%s/mutate?startTs=4", testutil.SockAddrHttp), "-d", `$'
 			{
 			 set {
@@ -139,7 +128,7 @@ input: {destination: \"/Users/sankalanparajuli/work/backup\"}) {\n    response {
 
 	var args []string
 	args = append(args, "audit", "decrypt",
-		"--encryption_key_file=../../ee/enc/test-fixtures/enc-key",
+		"--encryption_key_file=../../enc/test-fixtures/enc-key",
 		"--in", fmt.Sprintf("audit_dir/aa/alpha_audit_1_%s.log.enc", nId),
 		"--out", fmt.Sprintf("audit_dir/aa/alpha_audit_1_%s.log", nId))
 
@@ -175,7 +164,7 @@ func TestZeroAuditDecryptDeprecated(t *testing.T) {
 
 	var args []string
 	args = append(args, "audit", "decrypt",
-		"--encryption_key_file=../../ee/enc/test-fixtures/enc-key",
+		"--encryption_key_file=../../enc/test-fixtures/enc-key",
 		"--in", "audit_dir_deprecated/za/zero_audit_0_1.log.enc",
 		"--out", "audit_dir_deprecated/za/zero_audit_0_1.log")
 
@@ -214,7 +203,7 @@ func TestAlphaAuditDecryptDeprecated(t *testing.T) {
 
 	var args []string
 	args = append(args, "audit", "decrypt",
-		"--encryption_key_file=../../ee/enc/test-fixtures/enc-key",
+		"--encryption_key_file=../../enc/test-fixtures/enc-key",
 		"--in", "audit_dir_deprecated/aa/alpha_audit_1_1.log.enc",
 		"--out", "audit_dir_deprecated/aa/alpha_audit_1_1.log")
 

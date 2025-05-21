@@ -1,17 +1,6 @@
 /*
- * Copyright 2015-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package posting
@@ -32,15 +21,15 @@ import (
 
 	bpb "github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/y"
-	"github.com/dgraph-io/dgraph/v24/algo"
-	"github.com/dgraph-io/dgraph/v24/codec"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/tok/index"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/types/facets"
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/algo"
+	"github.com/hypermodeinc/dgraph/v25/codec"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/tok/index"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/types/facets"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -81,6 +70,8 @@ type List struct {
 	mutationMap *MutableLayer
 	minTs       uint64 // commit timestamp of immutable layer, reject reads before this ts.
 	maxTs       uint64 // max commit timestamp seen for this list.
+
+	cache []byte
 }
 
 // MutableLayer is the structure that will store mutable layer of the posting list. Every posting list has an immutable
@@ -105,6 +96,7 @@ type MutableLayer struct {
 	committedUids     map[uint64]*pb.Posting // Stores the uid to posting mapping in committedEntries.
 	committedUidsTime uint64                 // Stores the latest commitTs in the committedEntries.
 	length            int                    // Stores the length of the posting list until committedEntries.
+	lastEntry         *pb.PostingList        // Stores the last entry stored in committedUids
 
 	// We also cache some things required for us to update currentEntries faster
 	currentUids map[uint64]int // Stores the uid to index mapping in the currentEntries posting list
@@ -121,6 +113,13 @@ func newMutableLayer() *MutableLayer {
 	}
 }
 
+func (mm *MutableLayer) setTs(readTs uint64) {
+	if mm == nil {
+		return
+	}
+	mm.readTs = readTs
+}
+
 // This function clones an existing mutable layer for the new transactions. This function makes sure we copy the right
 // things from the existing mutable layer for the new list. It basically copies committedEntries using reference and
 // ignores currentEntires and readTs. Similarly, all the cache items related to currentEntries are ignored and
@@ -135,6 +134,7 @@ func (mm *MutableLayer) clone() *MutableLayer {
 		deleteAllMarker:   mm.deleteAllMarker,
 		committedUids:     mm.committedUids,
 		length:            mm.length,
+		lastEntry:         mm.lastEntry,
 		committedUidsTime: mm.committedUidsTime,
 	}
 }
@@ -303,6 +303,9 @@ func (mm *MutableLayer) insertCommittedPostings(pl *pb.PostingList) {
 		mm.deleteAllMarker = 0
 	}
 
+	if pl.CommitTs > mm.committedUidsTime {
+		mm.lastEntry = pl
+	}
 	mm.committedUidsTime = x.Max(pl.CommitTs, mm.committedUidsTime)
 	mm.committedEntries[pl.CommitTs] = pl
 
@@ -338,7 +341,7 @@ func (mm *MutableLayer) populateUidMap(pl *pb.PostingList) {
 }
 
 // insertPosting inserts a new posting in the mutable layers. It updates the currentUids map.
-func (mm *MutableLayer) insertPosting(mpost *pb.Posting) {
+func (mm *MutableLayer) insertPosting(mpost *pb.Posting, hasCountIndex bool) {
 	if mm.readTs != 0 {
 		x.AssertTrue(mpost.StartTs == mm.readTs)
 	}
@@ -352,8 +355,30 @@ func (mm *MutableLayer) insertPosting(mpost *pb.Posting) {
 	}
 
 	if mpost.Uid != 0 {
+		// If hasCountIndex, in that case while inserting uids, if there's a delete, we only delete from the
+		// current entries, we dont' insert the delete posting. If we insert the delete posting, there won't be
+		// any set posting in the list. This would mess up the count. We can do this for all types, however,
+		// there might be a performance hit becasue of it.
 		mm.populateUidMap(mm.currentEntries)
 		if postIndex, ok := mm.currentUids[mpost.Uid]; ok {
+			if hasCountIndex && mpost.Op == Del {
+				// If the posting was there before, just remove it from the map, and then remove it
+				// from the array.
+				post := mm.currentEntries.Postings[postIndex]
+				if post.Op == Del {
+					// No need to do anything
+					mm.currentEntries.Postings[postIndex] = mpost
+					return
+				}
+				res := mm.currentEntries.Postings[:postIndex]
+				if postIndex+1 <= len(mm.currentEntries.Postings) {
+					res = append(res,
+						mm.currentEntries.Postings[(postIndex+1):]...)
+				}
+				mm.currentUids = nil
+				mm.currentEntries.Postings = res
+				return
+			}
 			mm.currentEntries.Postings[postIndex] = mpost
 		} else {
 			mm.currentEntries.Postings = append(mm.currentEntries.Postings, mpost)
@@ -373,6 +398,10 @@ func (mm *MutableLayer) print() string {
 		mm.committedEntries,
 		mm.currentEntries,
 		mm.deleteAllMarker)
+}
+
+func (l *List) print() string {
+	return fmt.Sprintf("minTs: %d, plist: %+v, mutationMap: %s", l.minTs, l.plist, l.mutationMap.print())
 }
 
 // Return if piterator needs to be searched or not after mutable map and the posting if found.
@@ -496,7 +525,10 @@ type pIterator struct {
 }
 
 func (it *pIterator) seek(l *List, afterUid, deleteBelowTs uint64) error {
-	if deleteBelowTs > 0 && deleteBelowTs <= l.minTs {
+	// Because we store rollup at commitTs + 1, it could happen that a transaction has a startTs = prev commitTs
+	// + 1. Within that transcation if there's a delete all, deleteBelowTs (=startT) would be equal to l.minTs
+	// (rollup timestamp, prev commitTs + 1). So it's allowed deleteBelowTs == l.minTs
+	if deleteBelowTs > 0 && deleteBelowTs < l.minTs {
 		return errors.Errorf("deleteBelowTs (%d) must be greater than the minTs in the list (%d)",
 			deleteBelowTs, l.minTs)
 	}
@@ -705,12 +737,20 @@ func NewPosting(t *pb.DirectedEdge) *pb.Posting {
 	return p
 }
 
+func createDeleteAllPosting() *pb.Posting {
+	return &pb.Posting{
+		Op:    Del,
+		Value: []byte(x.Star),
+		Uid:   math.MaxUint64,
+	}
+}
+
 func hasDeleteAll(mpost *pb.Posting) bool {
 	return mpost.Op == Del && bytes.Equal(mpost.Value, []byte(x.Star)) && len(mpost.LangTag) == 0
 }
 
 // Ensure that you either abort the uncommitted postings or commit them before calling me.
-func (l *List) updateMutationLayer(mpost *pb.Posting, singleUidUpdate bool) error {
+func (l *List) updateMutationLayer(mpost *pb.Posting, singleUidUpdate, hasCountIndex bool) error {
 	l.AssertLock()
 	x.AssertTrue(mpost.Op == Set || mpost.Op == Del || mpost.Op == Ovr)
 
@@ -736,43 +776,16 @@ func (l *List) updateMutationLayer(mpost *pb.Posting, singleUidUpdate bool) erro
 		// be done because the fingerprint for the value is not math.MaxUint64 as is
 		// the case with the rest of the scalar predicates.
 		newPlist := &pb.PostingList{}
+		if mpost.Op != Del {
+			// If we are setting a new value then we can just delete all the older values.
+			newPlist.Postings = append(newPlist.Postings, createDeleteAllPosting())
+		}
 		newPlist.Postings = append(newPlist.Postings, mpost)
-
-		// Add the deletions in the existing plist because those postings are not picked
-		// up by iterating. Not doing so would result in delete operations that are not
-		// applied when the transaction is committed.
-		for _, post := range l.mutationMap.currentEntries.Postings {
-			if post.Op == Del && post.Uid != mpost.Uid {
-				newPlist.Postings = append(newPlist.Postings, post)
-			}
-		}
-
-		err := l.iterate(mpost.StartTs, 0, func(obj *pb.Posting) error {
-			// Ignore values which have the same uid as they will get replaced
-			// by the current value.
-			if obj.Uid == mpost.Uid {
-				return nil
-			}
-
-			// Mark all other values as deleted. By the end of the iteration, the
-			// list of postings will contain deleted operations and only one set
-			// for the mutation stored in mpost.
-			objCopy := proto.Clone(obj).(*pb.Posting)
-			objCopy.Op = Del
-			newPlist.Postings = append(newPlist.Postings, objCopy)
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-
-		// Update the mutation map with the new plist. Return here since the code below
-		// does not apply for predicates of type uid.
 		l.mutationMap.setCurrentEntries(mpost.StartTs, newPlist)
 		return nil
 	}
 
-	l.mutationMap.insertPosting(mpost)
+	l.mutationMap.insertPosting(mpost, hasCountIndex)
 	return nil
 }
 
@@ -866,7 +879,14 @@ func GetConflictKey(pk x.ParsedKey, key []byte, t *pb.DirectedEdge) uint64 {
 	return conflictKey
 }
 
+// SetTs allows us to set the transaction timestamp in mutation map. Should be used before the posting list is passed
+// on to the functions that would read the data.
+func (l *List) SetTs(readTs uint64) {
+	l.mutationMap.setTs(readTs)
+}
+
 func (l *List) addMutationInternal(ctx context.Context, txn *Txn, t *pb.DirectedEdge) error {
+	l.cache = nil
 	l.AssertLock()
 
 	if txn.ShouldAbort() {
@@ -890,7 +910,7 @@ func (l *List) addMutationInternal(ctx context.Context, txn *Txn, t *pb.Directed
 	isSingleUidUpdate := ok && !pred.GetList() && pred.GetValueType() == pb.Posting_UID &&
 		pk.IsData() && mpost.Op != Del && mpost.PostingType == pb.Posting_REF
 
-	if err != l.updateMutationLayer(mpost, isSingleUidUpdate) {
+	if err != l.updateMutationLayer(mpost, isSingleUidUpdate, pred.GetCount() && (pk.IsData() || pk.IsReverse())) {
 		return errors.Wrapf(err, "cannot update mutation layer of key %s with value %+v",
 			hex.EncodeToString(l.key), mpost)
 	}
@@ -968,6 +988,9 @@ func (l *List) setMutationAfterCommit(startTs, commitTs uint64, pl *pb.PostingLi
 	if l.mutationMap.committedUidsTime == math.MaxUint64 {
 		l.mutationMap.committedUidsTime = 0
 	}
+	if pl.CommitTs > l.mutationMap.committedUidsTime {
+		l.mutationMap.lastEntry = pl
+	}
 	l.mutationMap.committedUidsTime = x.Max(l.mutationMap.committedUidsTime, commitTs)
 
 	for _, mpost := range pl.Postings {
@@ -978,6 +1001,9 @@ func (l *List) setMutationAfterCommit(startTs, commitTs uint64, pl *pb.PostingLi
 		}
 
 		l.mutationMap.committedUids[mpost.Uid] = mpost
+		if l.mutationMap.length == math.MaxInt64 {
+			l.mutationMap.length = 0
+		}
 		l.mutationMap.length += getLengthDelta(mpost.Op)
 	}
 
@@ -999,7 +1025,6 @@ func (l *List) setMutation(startTs uint64, data []byte) {
 		l.mutationMap = newMutableLayer()
 	}
 	l.mutationMap.setCurrentEntries(startTs, pl)
-
 	if pl.CommitTs != 0 {
 		l.maxTs = x.Max(l.maxTs, pl.CommitTs)
 	}
@@ -1104,7 +1129,7 @@ func (l *List) iterate(readTs uint64, afterUid uint64, f func(obj *pb.Posting) e
 	// pitr iterates through immutable postings
 	err = pitr.seek(l, afterUid, deleteBelowTs)
 	if err != nil {
-		return errors.Wrapf(err, "cannot initialize iterator when calling List.iterate")
+		return errors.Wrapf(err, "cannot initialize iterator when calling List.iterate %v", l.print())
 	}
 
 loop:
@@ -1258,6 +1283,7 @@ func (l *List) getPostingAndLength(readTs, afterUid, uid uint64) (int, bool, *pb
 	var count int
 	var found bool
 	var post *pb.Posting
+
 	err := l.iterate(readTs, afterUid, func(p *pb.Posting) error {
 		if p.Uid == uid {
 			post = p
@@ -1672,45 +1698,87 @@ func (l *List) Uids(opt ListOptions) (*pb.List, error) {
 	if opt.First == 0 {
 		opt.First = math.MaxInt32
 	}
-	// Pre-assign length to make it faster.
-	l.RLock()
-	// Use approximate length for initial capacity.
-	res := make([]uint64, 0, l.mutationMap.len()+codec.ApproxLen(l.plist.Pack))
-	out := &pb.List{}
-	if l.mutationMap.len() == 0 && opt.Intersect != nil && len(l.plist.Splits) == 0 {
-		if opt.ReadTs < l.minTs {
-			l.RUnlock()
-			return out, errors.Wrapf(ErrTsTooOld, "While reading UIDs")
-		}
-		algo.IntersectCompressedWith(l.plist.Pack, opt.AfterUid, opt.Intersect, out)
-		l.RUnlock()
-		return out, nil
-	}
 
-	err := l.iterate(opt.ReadTs, opt.AfterUid, func(p *pb.Posting) error {
-		if p.PostingType == pb.Posting_REF {
-			res = append(res, p.Uid)
-			if opt.First < 0 {
-				// We need the last N.
-				// TODO: This could be optimized by only considering some of the last UidBlocks.
-				if len(res) > -opt.First {
-					res = res[1:]
-				}
-			} else if len(res) > opt.First {
-				return ErrStopIteration
+	getUidList := func() (*pb.List, error, bool) {
+		// Pre-assign length to make it faster.
+		l.RLock()
+		defer l.RUnlock()
+		// Use approximate length for initial capacity.
+		res := make([]uint64, 0, l.ApproxLen())
+		out := &pb.List{}
+
+		if l.mutationMap.len() == 0 && opt.Intersect != nil && len(l.plist.Splits) == 0 {
+			if opt.ReadTs < l.minTs {
+				return out, errors.Wrapf(ErrTsTooOld, "While reading UIDs"), false
 			}
+			algo.IntersectCompressedWith(l.plist.Pack, opt.AfterUid, opt.Intersect, out)
+			return out, nil, false
 		}
-		return nil
-	})
-	l.RUnlock()
-	if err != nil {
-		return out, errors.Wrapf(err, "cannot retrieve UIDs from list with key %s",
-			hex.EncodeToString(l.key))
+
+		// If we need to intersect and the number of elements are small, in that case it's better to
+		// just check each item is present or not.
+		if opt.Intersect != nil && len(opt.Intersect.Uids) < l.ApproxLen() {
+			// Cache the iterator as it makes the search space smaller each time.
+			var pitr pIterator
+			for _, uid := range opt.Intersect.Uids {
+				ok, _, err := l.findPostingWithItr(opt.ReadTs, uid, pitr)
+				if err != nil {
+					return nil, err, false
+				}
+				if ok {
+					res = append(res, uid)
+				}
+			}
+
+			out.Uids = res
+			return out, nil, false
+		}
+
+		// If we are going to iterate over the list, in that case we only need to read between min and max
+		// of opt.Intersect.
+		var uidMin, uidMax uint64 = 0, 0
+		if opt.Intersect != nil && len(opt.Intersect.Uids) > 0 {
+			uidMin = opt.Intersect.Uids[0]
+			uidMax = opt.Intersect.Uids[len(opt.Intersect.Uids)-1]
+		}
+
+		err := l.iterate(opt.ReadTs, opt.AfterUid, func(p *pb.Posting) error {
+			if p.PostingType == pb.Posting_REF {
+				if p.Uid < uidMin {
+					return nil
+				}
+				if p.Uid > uidMax && uidMax > 0 {
+					return ErrStopIteration
+				}
+				res = append(res, p.Uid)
+
+				if opt.First < 0 {
+					// We need the last N.
+					// TODO: This could be optimized by only considering some of the last UidBlocks.
+					if len(res) > -opt.First {
+						res = res[1:]
+					}
+				} else if len(res) > opt.First {
+					return ErrStopIteration
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return out, errors.Wrapf(err, "cannot retrieve UIDs from list with key %s",
+				hex.EncodeToString(l.key)), false
+		}
+		out.Uids = res
+		return out, nil, true
 	}
 
 	// Do The intersection here as it's optimized.
-	out.Uids = res
-	lenBefore := len(res)
+	out, err, applyIntersectWith := getUidList()
+	if err != nil || !applyIntersectWith {
+		return out, err
+	}
+
+	lenBefore := len(out.Uids)
 	if opt.Intersect != nil {
 		algo.IntersectWith(out, opt.Intersect, out)
 	}
@@ -1830,6 +1898,9 @@ func (l *List) findStaticValue(readTs uint64) *pb.PostingList {
 
 	// If maxTs < readTs then we need to read maxTs
 	if l.maxTs <= readTs {
+		if l.mutationMap.lastEntry != nil {
+			return l.mutationMap.lastEntry
+		}
 		if mutation := l.mutationMap.get(l.maxTs); mutation != nil {
 			return mutation
 		}
@@ -2008,7 +2079,7 @@ func (l *List) FindPosting(readTs uint64, uid uint64) (found bool, pos *pb.Posti
 	return l.findPosting(readTs, uid)
 }
 
-func (l *List) findPosting(readTs uint64, uid uint64) (found bool, pos *pb.Posting, err error) {
+func (l *List) findPostingWithItr(readTs uint64, uid uint64, pitr pIterator) (found bool, pos *pb.Posting, err error) {
 	// Iterate starts iterating after the given argument, so we pass UID - 1
 	// TODO Find what happens when uid = math.MaxUint64
 	searchFurther, pos := l.mutationMap.findPosting(readTs, uid)
@@ -2019,7 +2090,6 @@ func (l *List) findPosting(readTs uint64, uid uint64) (found bool, pos *pb.Posti
 		return false, nil, nil
 	}
 
-	var pitr pIterator
 	err = pitr.seek(l, uid-1, 0)
 	if err != nil {
 		return false, nil, errors.Wrapf(err,
@@ -2041,6 +2111,11 @@ func (l *List) findPosting(readTs uint64, uid uint64) (found bool, pos *pb.Posti
 		return false, nil, nil
 	}
 	return false, nil, nil
+}
+
+func (l *List) findPosting(readTs uint64, uid uint64) (found bool, pos *pb.Posting, err error) {
+	var pitr pIterator
+	return l.findPostingWithItr(readTs, uid, pitr)
 }
 
 // Facets gives facets for the posting representing value.

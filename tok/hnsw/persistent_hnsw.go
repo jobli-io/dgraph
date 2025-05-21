@@ -1,19 +1,6 @@
 /*
- * Copyright 2016-2024 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * Co-authored by: jairad26@gmail.com, sunil@hypermode.com, bill@hypdermode.com
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package hnsw
@@ -24,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	c "github.com/dgraph-io/dgraph/v24/tok/constraints"
-	"github.com/dgraph-io/dgraph/v24/tok/index"
-	opt "github.com/dgraph-io/dgraph/v24/tok/options"
 	"github.com/golang/glog"
+	c "github.com/hypermodeinc/dgraph/v25/tok/constraints"
+	"github.com/hypermodeinc/dgraph/v25/tok/index"
+	opt "github.com/hypermodeinc/dgraph/v25/tok/options"
 	"github.com/pkg/errors"
 )
 
@@ -337,7 +324,7 @@ func (ph *persistentHNSW[T]) PickStartNode(
 		return 0, err
 	}
 
-	entry := BytesToUint64(data.([]byte))
+	entry := BytesToUint64(data)
 	if err = ph.getVecFromUid(entry, c, startVec); err != nil && !errors.Is(err, errNilVector) {
 		return 0, err
 	}

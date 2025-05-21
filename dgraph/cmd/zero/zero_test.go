@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package zero
@@ -32,10 +21,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/testutil"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
 )
 
 func TestRemoveNode(t *testing.T) {
@@ -51,23 +40,26 @@ func TestRemoveNode(t *testing.T) {
 }
 
 func TestIdLeaseOverflow(t *testing.T) {
-	require.NoError(t, testutil.AssignUids(100))
-	err := testutil.AssignUids(math.MaxUint64 - 10)
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	con, err := grpc.NewClient(testutil.SockAddrZero, dialOpts...)
+	require.NoError(t, err)
+	zc := pb.NewZeroClient(con)
+
+	_, err = zc.AssignIds(context.Background(), &pb.Num{Val: 100, Type: pb.Num_UID})
+	require.NoError(t, err)
+
+	_, err = zc.AssignIds(context.Background(), &pb.Num{Val: math.MaxUint64 - 10, Type: pb.Num_UID})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "limit has reached")
 }
 
 func TestIdBump(t *testing.T) {
-	dialOpts := []grpc.DialOption{
-		grpc.WithBlock(),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	}
-	ctx := context.Background()
-	con, err := grpc.DialContext(ctx, testutil.SockAddrZero, dialOpts...)
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	con, err := grpc.NewClient(testutil.SockAddrZero, dialOpts...)
 	require.NoError(t, err)
-
 	zc := pb.NewZeroClient(con)
 
+	ctx := context.Background()
 	res, err := zc.AssignIds(ctx, &pb.Num{Val: 10, Type: pb.Num_UID})
 	require.NoError(t, err)
 	require.Equal(t, uint64(10), res.GetEndId()-res.GetStartId()+1)

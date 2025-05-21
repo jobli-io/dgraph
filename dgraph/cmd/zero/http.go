@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package zero
@@ -29,9 +18,9 @@ import (
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // intFromQueryParam checks for name as a query param, converts it to uint64 and returns it.
@@ -169,7 +158,7 @@ func (st *state) moveTablet(w http.ResponseWriter, r *http.Request) {
 
 	namespace := r.URL.Query().Get("namespace")
 	namespace = strings.TrimSpace(namespace)
-	ns := x.GalaxyNamespace
+	ns := x.RootNamespace
 	if namespace != "" {
 		var err error
 		if ns, err = strconv.ParseUint(namespace, 0, 64); err != nil {
@@ -249,7 +238,7 @@ func (s *Server) zeroHealth(ctx context.Context) (*api.Response, error) {
 	if ctx.Err() != nil {
 		return nil, errors.Wrap(ctx.Err(), "http request context error")
 	}
-	health := pb.HealthInfo{
+	health := &pb.HealthInfo{
 		Instance: "zero",
 		Address:  x.WorkerConfig.MyAddr,
 		Status:   "healthy",

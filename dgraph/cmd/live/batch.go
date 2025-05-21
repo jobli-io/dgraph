@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package live
@@ -28,20 +17,20 @@ import (
 	"time"
 
 	"github.com/dgryski/go-farm"
+	"github.com/dustin/go-humanize"
 	"github.com/dustin/go-humanize/english"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dql"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/tok"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/dgraph/v24/xidmap"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/tok"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/hypermodeinc/dgraph/v25/xidmap"
 )
 
 // batchMutationOptions sets the clients batch mode to Pending number of buffers each of Size.
@@ -81,12 +70,13 @@ type loader struct {
 	// To get time elapsed
 	start time.Time
 
+	inflight int32
+	conc     int32
+
 	conflicts map[uint64]struct{}
 	uidsLock  sync.RWMutex
 
-	reqNum     uint64
 	reqs       chan *request
-	zeroconn   *grpc.ClientConn
 	schema     *Schema
 	namespaces map[uint64]struct{}
 
@@ -124,7 +114,7 @@ func handleError(err error, isRetry bool) {
 			" Will retry after %s.\n", err, dur.Round(time.Second))
 		time.Sleep(dur)
 	case strings.Contains(s.Message(), "x509"):
-		x.Fatalf(s.Message())
+		x.Fatalf("%v", s.Message())
 	case s.Code() == codes.Aborted:
 		if !isRetry && opt.verbose {
 			fmt.Printf("Transaction aborted. Will retry in background.\n")
@@ -167,6 +157,8 @@ func (l *loader) infinitelyRetry(req *request) {
 }
 
 func (l *loader) mutate(req *request) error {
+	atomic.AddInt32(&l.inflight, 1)
+	defer atomic.AddInt32(&l.inflight, -1)
 	txn := l.dc.NewTxn()
 	req.CommitNow = true
 	request := &api.Request{
@@ -178,7 +170,6 @@ func (l *loader) mutate(req *request) error {
 }
 
 func (l *loader) request(req *request) {
-	atomic.AddUint64(&l.reqNum, 1)
 	err := l.mutate(req)
 	if err == nil {
 		atomic.AddUint64(&l.nquads, uint64(len(req.Set)))
@@ -342,7 +333,7 @@ func (l *loader) conflictKeysForNQuad(nq *api.NQuad) ([]uint64, error) {
 	}
 
 	if len(errs) > 0 {
-		return keys, fmt.Errorf(strings.Join(errs, "\n"))
+		return keys, fmt.Errorf("%v", strings.Join(errs, "\n"))
 	}
 	return keys, nil
 }
@@ -401,23 +392,52 @@ func (l *loader) deregister(req *request) {
 // caller functions.
 func (l *loader) makeRequests() {
 	defer l.requestsWg.Done()
+	atomic.AddInt32(&l.conc, 1)
+	defer atomic.AddInt32(&l.conc, -1)
 
 	buffer := make([]*request, 0, l.opts.bufferSize)
-	drain := func(maxSize int) {
-		for len(buffer) > maxSize {
-			i := 0
-			for _, req := range buffer {
-				// If there is no conflict in req, we will use it
-				// and then it would shift all the other reqs in buffer
-				if !l.addConflictKeys(req) {
-					buffer[i] = req
-					i++
-					continue
-				}
-				// Req will no longer be part of a buffer
-				l.request(req)
+	var loops int
+	drain := func() {
+		i := 0
+		for _, req := range buffer {
+			loops++
+			// If there is no conflict in req, we will use it
+			// and then it would shift all the other reqs in buffer
+			if !l.addConflictKeys(req) {
+				buffer[i] = req
+				i++
+				continue
 			}
-			buffer = buffer[:i]
+			// Req will no longer be part of a buffer
+			l.request(req)
+		}
+		buffer = buffer[:i]
+	}
+
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+
+loop:
+	for {
+		select {
+		case req, ok := <-l.reqs:
+			if !ok {
+				break loop
+			}
+			req.conflicts = l.conflictKeysForReq(req)
+			if l.addConflictKeys(req) {
+				l.request(req)
+			} else {
+				buffer = append(buffer, req)
+			}
+
+		case <-t.C:
+			for {
+				drain()
+				if len(buffer) < l.opts.bufferSize {
+					break
+				}
+			}
 		}
 	}
 
@@ -428,10 +448,13 @@ func (l *loader) makeRequests() {
 		} else {
 			buffer = append(buffer, req)
 		}
-		drain(l.opts.bufferSize - 1)
-	}
 
-	drain(0)
+		drain()
+		time.Sleep(100 * time.Millisecond)
+	}
+	fmt.Printf("Looped %d times over buffered requests.\n", loops)
+
+	drain()
 }
 
 func (l *loader) printCounters() {
@@ -445,8 +468,11 @@ func (l *loader) printCounters() {
 		rate := float64(counter.Nquads-last.Nquads) / period.Seconds()
 		elapsed := time.Since(start).Round(time.Second)
 		timestamp := time.Now().Format("15:04:05Z0700")
-		fmt.Printf("[%s] Elapsed: %s Txns: %d N-Quads: %d N-Quads/s [last 5s]: %5.0f Aborts: %d\n",
-			timestamp, x.FixedDuration(elapsed), counter.TxnsDone, counter.Nquads, rate, counter.Aborts)
+		fmt.Printf("[%s] Elapsed: %s Txns: %d N-Quads: %s N-Quads/s: %s"+
+			" Inflight: %2d/%2d Aborts: %d\n",
+			timestamp, x.FixedDuration(elapsed), counter.TxnsDone,
+			humanize.Comma(int64(counter.Nquads)), humanize.Comma(int64(rate)),
+			atomic.LoadInt32(&l.inflight), atomic.LoadInt32(&l.conc), counter.Aborts)
 		last = counter
 	}
 }

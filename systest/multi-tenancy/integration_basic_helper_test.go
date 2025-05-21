@@ -2,19 +2,8 @@
 // +build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -27,9 +16,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgraph/v24/dgraphapi"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type liveOpts struct {
@@ -52,7 +41,6 @@ func (msuite *MultitenancyTestSuite) liveLoadData(opts *liveOpts) error {
 	require.NoError(t, os.WriteFile(gqlSchemaFile, []byte(opts.gqlSchema), 0644))
 	// Load the data.
 	return testutil.LiveLoad(testutil.LiveOpts{
-		Zero:       testutil.ContainerAddr("zero1", 5080),
 		Alpha:      testutil.ContainerAddr("alpha1", 9080),
 		RdfFile:    rdfFile,
 		SchemaFile: schemaFile,
@@ -67,11 +55,11 @@ func (msuite *MultitenancyTestSuite) TestLiveLoadMulti() {
 	defer cleanup()
 	require.NoError(t, err)
 	require.NoError(t, gcli0.LoginIntoNamespace(context.Background(),
-		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace))
+		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace))
 
 	hcli, err := msuite.dc.HTTPClient()
 	require.NoError(t, err)
-	err = hcli.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace)
+	err = hcli.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace)
 	require.NoError(t, err, "login failed")
 
 	// Create a new namespace
@@ -84,8 +72,8 @@ func (msuite *MultitenancyTestSuite) TestLiveLoadMulti() {
 		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, ns))
 
 	// Load data.
-	galaxyCreds := &testutil.LoginParams{UserID: dgraphapi.DefaultUser,
-		Passwd: dgraphapi.DefaultPassword, Namespace: x.GalaxyNamespace}
+	rootNsCreds := &testutil.LoginParams{UserID: dgraphapi.DefaultUser,
+		Passwd: dgraphapi.DefaultPassword, Namespace: x.RootNamespace}
 	require.NoError(t, msuite.liveLoadData(&liveOpts{
 		rdfs: fmt.Sprintf(`
 		_:a <name> "galaxy alice" .
@@ -97,7 +85,7 @@ func (msuite *MultitenancyTestSuite) TestLiveLoadMulti() {
 		name: string @index(term) .
 		[%#x] name: string .
 `, ns),
-		creds:   galaxyCreds,
+		creds:   rootNsCreds,
 		forceNs: -1,
 	}))
 
@@ -132,7 +120,7 @@ func (msuite *MultitenancyTestSuite) TestLiveLoadMulti() {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "Attribute name is not indexed")
 
-	// live load data into namespace ns using the guardian of galaxy.
+	// live load data into namespace ns using the superadmin in root namespace.
 	require.NoError(t, msuite.liveLoadData(&liveOpts{
 		rdfs: fmt.Sprintf(`
 		_:a <name> "ns chew" .
@@ -142,7 +130,7 @@ func (msuite *MultitenancyTestSuite) TestLiveLoadMulti() {
 		schema: `
 		name: string @index(term) .
 `,
-		creds:   galaxyCreds,
+		creds:   rootNsCreds,
 		forceNs: int64(ns),
 	}))
 
@@ -155,7 +143,7 @@ func (msuite *MultitenancyTestSuite) TestLiveLoadMulti() {
 	err = msuite.liveLoadData(&liveOpts{
 		rdfs:    fmt.Sprintf(`_:c <name> "ns eon" <%#x> .`, ns),
 		schema:  `name: string @index(term) .`,
-		creds:   galaxyCreds,
+		creds:   rootNsCreds,
 		forceNs: int64(0x123456), // Assuming this namespace does not exist.
 	})
 	require.Error(t, err)
@@ -165,7 +153,7 @@ func (msuite *MultitenancyTestSuite) TestLiveLoadMulti() {
 	err = msuite.liveLoadData(&liveOpts{
 		rdfs:    fmt.Sprintf(`_:c <name> "ns eon" <%#x> .`, ns),
 		schema:  `[0x123456] name: string @index(term) .`,
-		creds:   galaxyCreds,
+		creds:   rootNsCreds,
 		forceNs: -1,
 	})
 	require.Error(t, err)
@@ -174,7 +162,7 @@ func (msuite *MultitenancyTestSuite) TestLiveLoadMulti() {
 	err = msuite.liveLoadData(&liveOpts{
 		rdfs:    `_:c <name> "ns eon" <0x123456> .`,
 		schema:  `name: string @index(term) .`,
-		creds:   galaxyCreds,
+		creds:   rootNsCreds,
 		forceNs: -1,
 	})
 	require.Error(t, err)
@@ -205,7 +193,12 @@ func (msuite *MultitenancyTestSuite) TestLiveLoadMulti() {
 			_:b <name> "ns gary" <%#x> .
 			_:c <name> "ns hola" <%#x> .`, ns, 0x100),
 		schema: `name: string @index(term) .`,
-		creds:  &testutil.LoginParams{UserID: dgraphapi.DefaultUser, Passwd: dgraphapi.DefaultPassword, Namespace: ns},
+		creds: &testutil.LoginParams{
+			UserID:    dgraphapi.DefaultUser,
+			Passwd:    dgraphapi.DefaultPassword,
+			Namespace: x.RootNamespace,
+		},
+		forceNs: int64(ns),
 	}))
 
 	resp, err = gcli1.Query(query3)

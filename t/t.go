@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -47,9 +36,9 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/tools/go/packages"
 
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -91,7 +80,7 @@ var (
 	skipSlow = pflag.BoolP("skip-slow", "s", false,
 		"If true, don't run tests on slow packages.")
 	suite = pflag.String("suite", "unit", "This flag is used to specify which "+
-		"test suites to run. Possible values are all, ldbc, load, unit. Multiple suites can be "+
+		"test suites to run. Possible values are all, ldbc, load, unit, systest, vector, core. Multiple suites can be "+
 		"selected like --suite=ldbc,load")
 	tmp               = pflag.String("tmp", "", "Temporary directory used to download data.")
 	downloadResources = pflag.BoolP("download", "d", true,
@@ -117,6 +106,7 @@ type TestSuite struct {
 	Name       string     `xml:"name,attr"`
 	Tests      int        `xml:"tests,attr"`
 	Failures   int        `xml:"failures,attr"`
+	Errors     int        `xml:"errors,attr,omitempty"`
 	Time       float64    `xml:"time,attr"`
 	Timestamp  string     `xml:"timestamp,attr,omitempty"`
 	TestCases  []TestCase `xml:"testcase"`
@@ -128,6 +118,14 @@ type TestCase struct {
 	ClassName string   `xml:"classname,attr"`
 	Name      string   `xml:"name,attr"`
 	Time      float64  `xml:"time,attr"`
+	Failure   *Failure `xml:"failure,omitempty"`
+}
+
+type Failure struct {
+	XMLName xml.Name `xml:"failure"`
+	Message string   `xml:"message,attr"`
+	Type    string   `xml:"type,attr,omitempty"`
+	Content string   `xml:",chardata"`
 }
 
 type Property struct {
@@ -406,7 +404,7 @@ func runTestsFor(ctx context.Context, pkg, prefix string, xmlFile string) error 
 }
 
 func hasTestFiles(pkg string) bool {
-	dir := strings.Replace(pkg, "github.com/dgraph-io/dgraph/v24/", "", 1)
+	dir := strings.Replace(pkg, "github.com/hypermodeinc/dgraph/v25/", "", 1)
 	dir = filepath.Join(*baseDir, dir)
 
 	hasTests := false
@@ -632,7 +630,7 @@ func (o *outputCatcher) Print() {
 		if dur.dur < time.Second {
 			continue
 		}
-		pkg := strings.Replace(dur.pkg, "github.com/dgraph-io/dgraph/v24/", "", 1)
+		pkg := strings.Replace(dur.pkg, "github.com/hypermodeinc/dgraph/v25/", "", 1)
 		fmt.Printf("[%6s]%s[%d] %s took: %s\n", dur.ts.Sub(baseTs).Round(time.Second),
 			strings.Repeat("   ", int(dur.threadId)), dur.threadId, pkg,
 			dur.dur.Round(time.Second))
@@ -650,21 +648,21 @@ type task struct {
 
 // for custom cluster tests (i.e. those not using default docker-compose.yml)
 func composeFileFor(pkg string) string {
-	dir := strings.Replace(pkg, "github.com/dgraph-io/dgraph/v24/", "", 1)
+	dir := strings.Replace(pkg, "github.com/hypermodeinc/dgraph/v25/", "", 1)
 	return filepath.Join(*baseDir, dir, "docker-compose.yml")
 }
 
 func getPackages() []task {
 	has := func(list []string, in string) bool {
 		for _, l := range list {
-			if len(l) > 0 && strings.Contains(in+"/", "github.com/dgraph-io/dgraph/v24/"+l+"/") {
+			if len(l) > 0 && strings.Contains(in+"/", "github.com/hypermodeinc/dgraph/v25/"+l+"/") {
 				return true
 			}
 		}
 		return false
 	}
 
-	slowPkgs := []string{"systest", "ee/acl", "cmd/alpha", "worker", "e2e"}
+	slowPkgs := []string{"systest", "acl", "cmd/alpha", "worker", "e2e"}
 	skipPkgs := strings.Split(*skip, ",")
 	runPkgs := strings.Split(*runPkg, ",")
 
@@ -806,7 +804,6 @@ var loadPackages = []string{
 	"/systest/bulk_live/bulk",
 	"/systest/bulk_live/live",
 	"/systest/bgindex",
-	"/contrib/scripts",
 	"/dgraph/cmd/bulk/systest",
 }
 
@@ -884,14 +881,14 @@ func isVectorPackage(pkg string) bool {
 }
 
 var datafiles = map[string]string{
-	"1million-noindex.schema": "https://github.com/dgraph-io/benchmarks/blob/master/data/1million-noindex.schema?raw=true",
-	"1million.schema":         "https://github.com/dgraph-io/benchmarks/blob/master/data/1million.schema?raw=true",
-	"1million.rdf.gz":         "https://github.com/dgraph-io/benchmarks/blob/master/data/1million.rdf.gz?raw=true",
-	"21million.schema":        "https://github.com/dgraph-io/benchmarks/blob/master/data/21million.schema?raw=true",
-	"21million.rdf.gz":        "https://github.com/dgraph-io/benchmarks/blob/master/data/21million.rdf.gz?raw=true",
+	"1million-noindex.schema": "https://raw.githubusercontent.com/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/1million-noindex.schema",
+	"1million.schema":         "https://raw.githubusercontent.com/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/1million.schema",
+	"1million.rdf.gz":         "https://media.githubusercontent.com/media/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/1million.rdf.gz",
+	"21million.schema":        "https://raw.githubusercontent.com/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/21million.schema",
+	"21million.rdf.gz":        "https://media.githubusercontent.com/media/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/21million.rdf.gz",
 }
 
-var baseUrl = "https://github.com/dgraph-io/benchmarks/blob/master/ldbc/sf0.3/ldbc_rdf_0.3/"
+var baseUrl = "https://media.githubusercontent.com/media/hypermodeinc/dgraph-benchmarks/refs/heads/main/ldbc/sf0.3/ldbc_rdf_0.3/"
 var suffix = "?raw=true"
 
 var rdfFileNames = [...]string{
@@ -921,7 +918,7 @@ var rdfFileNames = [...]string{
 	"workAt_0.rdf"}
 
 var ldbcDataFiles = map[string]string{
-	"ldbcTypes.schema": "https://github.com/dgraph-io/benchmarks/blob/master/ldbc/sf0.3/ldbcTypes.schema?raw=true",
+	"ldbcTypes.schema": "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/ldbc/sf0.3/ldbcTypes.schema?raw=true",
 }
 
 func downloadDataFiles() {
@@ -947,8 +944,7 @@ func downloadLDBCFiles() {
 	}
 
 	for _, name := range rdfFileNames {
-		filepath := baseUrl + name + suffix
-		ldbcDataFiles[name] = filepath
+		ldbcDataFiles[name] = baseUrl + name + suffix
 	}
 
 	start := time.Now()
@@ -1128,7 +1124,7 @@ func run() error {
 	}()
 	signal.Notify(sdCh, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
-	// pkgs, err := packages.Load(nil, "github.com/dgraph-io/dgraph/v24/...")
+	// pkgs, err := packages.Load(nil, "github.com/hypermodeinc/dgraph/v25/...")
 	go func() {
 		defer close(testCh)
 		valid := getPackages()
@@ -1192,8 +1188,6 @@ func main() {
 	pflag.Parse()
 	testsuite = strings.Split(*suite, ",")
 	validateAllowed(testsuite)
-
-	rand.Seed(time.Now().UnixNano())
 	procId = rand.Intn(1000)
 
 	err := run()

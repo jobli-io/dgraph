@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package live
@@ -28,13 +17,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var alphaService = testutil.SockAddr
-var zeroService = testutil.SockAddrZero
 
 var (
 	testDataDir string
@@ -102,8 +90,7 @@ func TestLiveLoadJSONFileEmpty(t *testing.T) {
 		{"echo", "[]"},
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/family.schema", "--files", "/dev/stdin",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file ran successfully")
@@ -115,8 +102,7 @@ func TestLiveLoadJSONFile(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.json",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
@@ -130,8 +116,7 @@ func TestLiveLoadCanUseAlphaForAssigningUids(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/family.schema", "--files", testDataDir + "/family.json",
-			"--alpha", alphaService, "--zero", alphaService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON file exited with error")
@@ -146,8 +131,7 @@ func TestLiveLoadJSONCompressedStream(t *testing.T) {
 		{"gzip", "-c", testDataDir + "/family.json"},
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/family.schema", "--files", "/dev/stdin",
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading JSON stream exited with error")
@@ -168,8 +152,7 @@ func TestLiveLoadJSONMultipleFiles(t *testing.T) {
 	pipeline := [][]string{
 		{testutil.DgraphBinaryPath(), "live",
 			"--schema", testDataDir + "/family.schema", "--files", fileList,
-			"--alpha", alphaService, "--zero", zeroService,
-			"--creds", "user=groot;password=password;"},
+			"--alpha", alphaService, "--creds", "user=groot;password=password;"},
 	}
 	_, err := testutil.Pipeline(pipeline)
 	require.NoError(t, err, "live loading multiple JSON files exited with error")

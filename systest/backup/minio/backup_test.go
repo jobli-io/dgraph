@@ -1,18 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -35,11 +25,11 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/dgraph-io/badger/v4/options"
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/worker"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/worker"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -59,7 +49,7 @@ func TestBackupMinio(t *testing.T) {
 	addr := testutil.ContainerAddr("minio", 9001)
 	localBackupDst = "minio://" + addr + "/dgraph-backup?secure=false"
 
-	conn, err := grpc.Dial(testutil.SockAddr,
+	conn, err := grpc.NewClient(testutil.SockAddr,
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))))
 	require.NoError(t, err)
 	dg := dgo.NewDgraphClient(api.NewDgraphClient(conn))
@@ -102,7 +92,7 @@ func TestBackupMinio(t *testing.T) {
 	for retry := 5; retry > 0; retry-- {
 		state, err := testutil.GetStateHttps(testutil.GetAlphaClientConfig(t))
 		require.NoError(t, err)
-		if _, ok := state.Groups["1"].Tablets[x.NamespaceAttr(x.GalaxyNamespace, "movie")]; ok {
+		if _, ok := state.Groups["1"].Tablets[x.NamespaceAttr(x.RootNamespace, "movie")]; ok {
 			moveOk = true
 			break
 		}
@@ -128,8 +118,8 @@ func TestBackupMinio(t *testing.T) {
 	// Check the predicates and types in the schema are as expected.
 	// TODO: refactor tests so that minio and filesystem tests share most of their logic.
 	preds := []string{"dgraph.graphql.schema", "dgraph.graphql.xid", "dgraph.type", "movie",
-		"dgraph.graphql.p_query", "dgraph.drop.op"}
-	types := []string{"Node", "dgraph.graphql", "dgraph.graphql.persisted_query"}
+		"dgraph.graphql.p_query", "dgraph.drop.op", "dgraph.namespace.name", "dgraph.namespace.id"}
+	types := []string{"Node", "dgraph.graphql", "dgraph.namespace", "dgraph.graphql.persisted_query"}
 	testutil.CheckSchema(t, preds, types)
 
 	checks := []struct {
@@ -357,7 +347,7 @@ func runRestore(t *testing.T, lastDir string, commitTs uint64) map[string]string
 		require.Equal(t, uint32(i+1), groupId)
 	}
 	pdir := "./data/restore/p1"
-	restored, err := testutil.GetPredicateValues(pdir, x.GalaxyAttr("movie"), commitTs)
+	restored, err := testutil.GetPredicateValues(pdir, x.AttrInRootNamespace("movie"), commitTs)
 	require.NoError(t, err)
 	t.Logf("--- Restored values: %+v\n", restored)
 	return restored

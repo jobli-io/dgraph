@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package bulk
@@ -39,14 +28,14 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/y"
-	"github.com/dgraph-io/dgraph/v24/chunker"
-	"github.com/dgraph-io/dgraph/v24/ee/enc"
-	"github.com/dgraph-io/dgraph/v24/filestore"
-	gqlSchema "github.com/dgraph-io/dgraph/v24/graphql/schema"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/dgraph/v24/xidmap"
+	"github.com/hypermodeinc/dgraph/v25/chunker"
+	"github.com/hypermodeinc/dgraph/v25/enc"
+	"github.com/hypermodeinc/dgraph/v25/filestore"
+	gqlSchema "github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/hypermodeinc/dgraph/v25/xidmap"
 )
 
 type options struct {
@@ -82,7 +71,7 @@ type options struct {
 	shardOutputDirs []string
 
 	// ........... Badger options ..........
-	// EncryptionKey is the key used for encryption. Enterprise only feature.
+	// EncryptionKey is the key used for encryption.
 	EncryptionKey x.Sensitive
 	// Badger options.
 	Badger badger.Options
@@ -114,20 +103,16 @@ func newLoader(opt *options) *loader {
 	}
 
 	fmt.Printf("Connecting to zero at %s\n", opt.ZeroAddr)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
 
 	tlsConf, err := x.LoadClientTLSConfigForInternalPort(Bulk.Conf)
 	x.Check(err)
-	dialOpts := []grpc.DialOption{
-		grpc.WithBlock(),
-	}
+	dialOpts := []grpc.DialOption{}
 	if tlsConf != nil {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConf)))
 	} else {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
-	zero, err := grpc.DialContext(ctx, opt.ZeroAddr, dialOpts...)
+	zero, err := grpc.NewClient(opt.ZeroAddr, dialOpts...)
 	x.Checkf(err, "Unable to connect to zero, Is it running at %s?", opt.ZeroAddr)
 	st := &state{
 		opt:    opt,
@@ -349,7 +334,7 @@ func parseGqlSchema(s string) map[uint64]string {
 	var schemas []x.ExportedGQLSchema
 	if err := json.Unmarshal([]byte(s), &schemas); err != nil {
 		fmt.Println("Error while decoding the graphql schema. Assuming it to be in format < 21.03.")
-		return map[uint64]string{x.GalaxyNamespace: s}
+		return map[uint64]string{x.RootNamespace: s}
 	}
 
 	schemaMap := make(map[uint64]string)

@@ -1,18 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -26,11 +16,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/systest/backup/common"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/systest/backup/common"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -41,10 +31,10 @@ var (
 func TestBackupMultiTenancy(t *testing.T) {
 	ctx := context.Background()
 
-	dg := testutil.DgClientWithLogin(t, "groot", "password", x.GalaxyNamespace)
+	dg := testutil.DgClientWithLogin(t, "groot", "password", x.RootNamespace)
 	testutil.DropAll(t, dg)
 
-	galaxyCreds := &testutil.LoginParams{UserID: "groot", Passwd: "password", Namespace: x.GalaxyNamespace}
+	galaxyCreds := &testutil.LoginParams{UserID: "groot", Passwd: "password", Namespace: x.RootNamespace}
 	galaxyToken, err := testutil.Login(t, galaxyCreds)
 	require.NoError(t, err, "login failed")
 
@@ -94,7 +84,7 @@ func TestBackupMultiTenancy(t *testing.T) {
 	}
 
 	original := make(map[uint64]*api.Response)
-	original[x.GalaxyNamespace] = addData(dg, "galaxy")
+	original[x.RootNamespace] = addData(dg, "galaxy")
 	original[ns1] = addData(dg1, "ns1")
 	original[ns2] = addData(dg2, "ns2")
 

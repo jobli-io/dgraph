@@ -1,17 +1,6 @@
 #
-# Copyright 2023 Dgraph Labs, Inc. and Contributors
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+# SPDX-License-Identifier: Apache-2.0
 #
 
 USER_ID         = $(shell id -u)
@@ -29,6 +18,7 @@ BUILD_VERSION := $(shell echo ${DGRAPH_VERSION} | sed -e 's/-amd64//' -e 's/-arm
 endif
 
 GOOS          ?= $(shell go env GOOS)
+GOARCH        ?= $(shell go env GOARCH)
 # Only build with jemalloc on Linux, mac
 ifeq ($(GOOS),$(filter $(GOOS),linux darwin))
 	BUILD_TAGS ?= jemalloc
@@ -36,20 +26,17 @@ endif
 GOPATH        ?= $(shell go env GOPATH)
 
 # Build-time Go variables
-dgraphVersion   = github.com/dgraph-io/dgraph/v24/x.dgraphVersion
-dgraphCodename  = github.com/dgraph-io/dgraph/v24/x.dgraphCodename
-gitBranch       = github.com/dgraph-io/dgraph/v24/x.gitBranch
-lastCommitSHA   = github.com/dgraph-io/dgraph/v24/x.lastCommitSHA
-lastCommitTime  = github.com/dgraph-io/dgraph/v24/x.lastCommitTime
+dgraphVersion   = github.com/hypermodeinc/dgraph/v25/x.dgraphVersion
+dgraphCodename  = github.com/hypermodeinc/dgraph/v25/x.dgraphCodename
+gitBranch       = github.com/hypermodeinc/dgraph/v25/x.gitBranch
+lastCommitSHA   = github.com/hypermodeinc/dgraph/v25/x.lastCommitSHA
+lastCommitTime  = github.com/hypermodeinc/dgraph/v25/x.lastCommitTime
 
 BUILD_FLAGS   ?= -ldflags '-X ${lastCommitSHA}=${BUILD} -X "${lastCommitTime}=${BUILD_DATE}" -X "${dgraphVersion}=${BUILD_VERSION}" -X "${dgraphCodename}=${BUILD_CODENAME}" -X ${gitBranch}=${BUILD_BRANCH}'
 
 # Insert build tags if specified
 ifneq ($(strip $(BUILD_TAGS)),)
 	BUILD_FLAGS += -tags '$(BUILD_TAGS)'
-	ifneq (,$(findstring oss,$(BUILD_TAGS)))
-		BUILD_VERSION := $(BUILD_VERSION)-oss
-	endif
 endif
 
 # Build with compiler optimizations disabled, which will help debugging with dlv.
@@ -71,6 +58,9 @@ HAS_SHA256SUM = $(shell which sha256sum)
 INSTALL_TARGET = $(GOPATH)/bin/$(BIN)
 ifneq ($(strip $(shell go env GOBIN)),)
 	INSTALL_TARGET = $(shell go env GOBIN)/$(BIN)
+endif
+ifneq ($(GOOS)_$(GOARCH),$(shell go env GOHOSTOS)_$(shell go env GOHOSTARCH))
+	INSTALL_TARGET = $(GOPATH)/bin/$(GOOS)_$(GOARCH)/$(BIN)
 endif
 
 .PHONY: all $(BIN)

@@ -1,17 +1,6 @@
 /*
- * Copyright 2015-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 //nolint:lll
@@ -25,10 +14,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/chunker"
-	"github.com/dgraph-io/dgraph/v24/lex"
-	"github.com/dgraph-io/dgraph/v24/types"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/chunker"
+	"github.com/hypermodeinc/dgraph/v25/lex"
+	"github.com/hypermodeinc/dgraph/v25/types"
 )
 
 func childAttrs(g *GraphQuery) []string {
@@ -1313,7 +1302,7 @@ func TestParseQueryWithMultipleVar(t *testing.T) {
 func TestParseShortestPath(t *testing.T) {
 	query := `
 	{
-		shortest(from:0x0a, to:0x0b, numpaths: 3, minweight: 3, maxweight: 6) {
+		shortest(from:0x0a, to:0x0b, numpaths: 3, minweight: 3, maxweight: 6, maxfrontiersize: 1) {
 			friends
 			name
 		}
@@ -1328,6 +1317,7 @@ func TestParseShortestPath(t *testing.T) {
 	require.Equal(t, "3", res.Query[0].Args["numpaths"])
 	require.Equal(t, "3", res.Query[0].Args["minweight"])
 	require.Equal(t, "6", res.Query[0].Args["maxweight"])
+	require.Equal(t, "1", res.Query[0].Args["maxfrontiersize"])
 }
 
 func TestParseShortestPathWithUidVars(t *testing.T) {
@@ -1971,7 +1961,7 @@ func TestParseMutationError(t *testing.T) {
 	`
 	_, err := ParseMutation(query)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), `Invalid block: [mutation]`)
+	require.Contains(t, err.Error(), `Unexpected token: [mutation]`)
 }
 
 func TestParseMutationError2(t *testing.T) {
@@ -1986,7 +1976,7 @@ func TestParseMutationError2(t *testing.T) {
 	`
 	_, err := ParseMutation(query)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), `Invalid block: [set]`)
+	require.Contains(t, err.Error(), `Invalid operation type: set`)
 }
 
 func TestParseMutationAndQueryWithComments(t *testing.T) {
@@ -4820,7 +4810,7 @@ func TestParseMutationTooManyBlocks(t *testing.T) {
          }{
 		   set { _:b2 <reg> "b2 content" . }
 		 }`,
-			errStr: "Unrecognized character in lexText",
+			errStr: "Unexpected { after the end of the block",
 		},
 		{m: `{set { _:a1 <reg> "a1 content" . }} something`,
 			errStr: "Invalid operation type: something",

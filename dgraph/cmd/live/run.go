@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package live
@@ -20,12 +9,10 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
-	"math/rand"
 	"net/http"
 	_ "net/http/pprof" // http profiler
 	"os"
@@ -44,24 +31,22 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	bopt "github.com/dgraph-io/badger/v4/options"
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/chunker"
-	"github.com/dgraph-io/dgraph/v24/ee"
-	"github.com/dgraph-io/dgraph/v24/ee/enc"
-	"github.com/dgraph-io/dgraph/v24/filestore"
-	schemapkg "github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/dgraph/v24/xidmap"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/chunker"
+	"github.com/hypermodeinc/dgraph/v25/enc"
+	"github.com/hypermodeinc/dgraph/v25/filestore"
+	schemapkg "github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/hypermodeinc/dgraph/v25/xidmap"
 )
 
 type options struct {
 	dataFiles       string
 	dataFormat      string
 	schemaFile      string
-	zero            string
 	concurrent      int
 	batchSize       int
 	clientDir       string
@@ -140,7 +125,7 @@ func init() {
 
 	flag := Live.Cmd.Flags()
 	// --vault SuperFlag and encryption flags
-	ee.RegisterEncFlag(flag)
+	x.RegisterEncFlag(flag)
 	// --tls SuperFlag
 	x.RegisterClientTLSFlags(flag)
 
@@ -150,7 +135,7 @@ func init() {
 		"from filename")
 	flag.StringP("alpha", "a", "127.0.0.1:9080",
 		"Comma-separated list of Dgraph alpha gRPC server addresses")
-	flag.StringP("zero", "z", "127.0.0.1:5080", "Dgraph zero gRPC server address")
+	flag.StringP("zero", "z", "", "(deprecated) Dgraph zero gRPC server address")
 	flag.IntP("conc", "c", 10,
 		"Number of concurrent requests to make to Dgraph")
 	flag.IntP("batch", "b", 1000,
@@ -182,7 +167,7 @@ func init() {
 		"be used to store blank nodes as an xid")
 	flag.String("tmp", "t", "Directory to store temporary buffers.")
 	flag.Int64("force-namespace", 0, "Namespace onto which to load the data."+
-		"Only guardian of galaxy should use this for loading data into multiple namespaces or some"+
+		"Only superadmin should use this for loading data into multiple namespaces or some"+
 		"specific namespace. Setting it to negative value will preserve the namespace.")
 }
 
@@ -612,7 +597,6 @@ func setup(opts batchMutationOptions, dc *dgo.Dgraph, conf *viper.Viper) *loader
 			WithIndexCacheSize(100 * (1 << 20)).
 			WithZSTDCompressionLevel(3))
 		x.Checkf(err, "Error while creating badger KV posting store")
-
 	}
 
 	dialOpts := []grpc.DialOption{}
@@ -620,26 +604,7 @@ func setup(opts batchMutationOptions, dc *dgo.Dgraph, conf *viper.Viper) *loader
 		dialOpts = append(dialOpts, x.WithAuthorizationCredentials(conf.GetString("auth_token")))
 	}
 
-	var tlsConfig *tls.Config
-	if conf.GetString("slash_grpc_endpoint") != "" {
-		var tlsErr error
-		tlsConfig, tlsErr = x.SlashTLSConfig(conf.GetString("slash_grpc_endpoint"))
-		x.Checkf(tlsErr, "Unable to generate TLS Cert Pool")
-	} else {
-		var tlsErr error
-		tlsConfig, tlsErr = x.LoadClientTLSConfigForInternalPort(conf)
-		x.Check(tlsErr)
-	}
-
-	// compression with zero server actually makes things worse
-	connzero, err := x.SetupConnection(opt.zero, tlsConfig, false, dialOpts...)
-	x.Checkf(err, "Unable to connect to zero, Is it running at %s?", opt.zero)
-
-	xopts := xidmap.XidMapOptions{UidAssigner: connzero, DB: db}
-	// Slash uses alpha to assign UIDs in live loader. Dgraph client is needed by xidmap to do
-	// authorization.
-	xopts.DgClient = dc
-
+	xopts := xidmap.XidMapOptions{DB: db, DgClient: dc}
 	alloc := xidmap.New(xopts)
 	l := &loader{
 		opts:       opts,
@@ -649,7 +614,6 @@ func setup(opts batchMutationOptions, dc *dgo.Dgraph, conf *viper.Viper) *loader
 		conflicts:  make(map[uint64]struct{}),
 		alloc:      alloc,
 		db:         db,
-		zeroconn:   connzero,
 		namespaces: make(map[uint64]struct{}),
 	}
 
@@ -658,7 +622,6 @@ func setup(opts batchMutationOptions, dc *dgo.Dgraph, conf *viper.Viper) *loader
 		go l.makeRequests()
 	}
 
-	rand.Seed(time.Now().Unix())
 	return l
 }
 
@@ -698,15 +661,8 @@ func (l *loader) populateNamespaces(ctx context.Context, dc *dgo.Dgraph, singleN
 }
 
 func run() error {
-	var zero string
-	if Live.Conf.GetString("slash_grpc_endpoint") != "" {
-		zero = Live.Conf.GetString("slash_grpc_endpoint")
-	} else {
-		zero = Live.Conf.GetString("zero")
-	}
-
 	creds := z.NewSuperFlag(Live.Conf.GetString("creds")).MergeAndCheckDefault(x.DefaultCreds)
-	keys, err := ee.GetKeys(Live.Conf)
+	keys, err := x.GetEncAclKeys(Live.Conf)
 	if err != nil {
 		return err
 	}
@@ -716,7 +672,6 @@ func run() error {
 		dataFiles:       Live.Conf.GetString("files"),
 		dataFormat:      Live.Conf.GetString("format"),
 		schemaFile:      Live.Conf.GetString("schema"),
-		zero:            zero,
 		concurrent:      Live.Conf.GetInt("conc"),
 		batchSize:       Live.Conf.GetInt("batch"),
 		clientDir:       Live.Conf.GetString("xidmap"),
@@ -733,7 +688,7 @@ func run() error {
 
 	forceNs := Live.Conf.GetInt64("force-namespace")
 	switch creds.GetUint64("namespace") {
-	case x.GalaxyNamespace:
+	case x.RootNamespace:
 		if forceNs < 0 {
 			opt.preserveNs = true
 			opt.namespaceToLoad = math.MaxUint64
@@ -743,9 +698,8 @@ func run() error {
 	default:
 		if Live.Conf.IsSet("force-namespace") {
 			return errors.Errorf("cannot force namespace %#x when provided creds are not of"+
-				" guardian of galaxy user", forceNs)
+				" superadmin user", forceNs)
 		}
-		opt.namespaceToLoad = creds.GetUint64("namespace")
 	}
 
 	z.SetTmpDir(opt.tmpDir)
@@ -759,16 +713,16 @@ func run() error {
 	// singleNsOp is set to false, when loading data into a namespace different from the one user
 	// provided credentials for.
 	singleNsOp := true
-	if len(creds.GetString("user")) > 0 && creds.GetUint64("namespace") == x.GalaxyNamespace &&
-		opt.namespaceToLoad != x.GalaxyNamespace {
+	if len(creds.GetString("user")) > 0 && creds.GetUint64("namespace") == x.RootNamespace &&
+		opt.namespaceToLoad != x.RootNamespace {
 		singleNsOp = false
 	}
-	galaxyOperation := false
+	rootNsOperation := false
 	if !singleNsOp {
-		// Attach the galaxy to the context to specify that the query/mutations with this context
-		// will be galaxy-wide.
-		galaxyOperation = true
-		ctx = x.AttachGalaxyOperation(ctx, opt.namespaceToLoad)
+		// Attach the root namespace to the context to specify that the query/mutations with this context
+		// will be root namespace wide.
+		rootNsOperation = true
+		ctx = x.AttachRootNsOperation(ctx, opt.namespaceToLoad)
 		// We don't support upsert predicate while loading data in multiple namespace.
 		if len(opt.upsertPredicate) > 0 {
 			return errors.Errorf("Upsert Predicate feature is not supported for loading" +
@@ -792,8 +746,6 @@ func run() error {
 	defer closeFunc()
 
 	l := setup(bmOpts, dg, Live.Conf)
-	defer l.zeroconn.Close()
-
 	if err := l.populateNamespaces(ctx, dg, singleNsOp); err != nil {
 		fmt.Printf("Error while populating namespaces %s\n", err)
 		return err
@@ -819,7 +771,7 @@ func run() error {
 		fmt.Printf("Processed schema file %q\n\n", opt.schemaFile)
 	}
 
-	if l.schema, err = getSchema(ctx, dg, galaxyOperation); err != nil {
+	if l.schema, err = getSchema(ctx, dg, rootNsOperation); err != nil {
 		fmt.Printf("Error while loading schema from alpha %s\n", err)
 		return err
 	}
@@ -841,7 +793,7 @@ func run() error {
 	for _, file := range filesList {
 		file = strings.Trim(file, " \t")
 		go func(file string) {
-			errCh <- errors.Wrapf(l.processFile(ctx, fs, file, opt.key), file)
+			errCh <- errors.Wrap(l.processFile(ctx, fs, file, opt.key), file)
 		}(file)
 	}
 

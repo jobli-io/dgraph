@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package testutil
@@ -40,10 +29,10 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dql"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // socket addr = IP address and port number
@@ -167,7 +156,7 @@ func DgraphClientWithGroot(serviceAddr string) (*dgo.Dgraph, error) {
 	ctx := context.Background()
 	for {
 		// keep retrying until we succeed or receive a non-retriable error
-		err = dg.LoginIntoNamespace(ctx, x.GrootId, "password", x.GalaxyNamespace)
+		err = dg.LoginIntoNamespace(ctx, x.GrootId, "password", x.RootNamespace)
 		if err == nil || !(strings.Contains(err.Error(), "Please retry") ||
 			strings.Contains(err.Error(), "user not found")) {
 
@@ -183,7 +172,7 @@ func DgraphClientWithGroot(serviceAddr string) (*dgo.Dgraph, error) {
 // It is intended to be called from TestMain() to establish a Dgraph connection shared
 // by all tests, so there is no testing.T instance for it to use.
 func DgraphClient(serviceAddr string) (*dgo.Dgraph, error) {
-	conn, err := grpc.Dial(serviceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(serviceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +197,7 @@ func DgraphClientWithCerts(serviceAddr string, conf *viper.Viper) (*dgo.Dgraph, 
 	} else {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
-	conn, err := grpc.Dial(serviceAddr, dialOpts...)
+	conn, err := grpc.NewClient(serviceAddr, dialOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +358,7 @@ func HttpLogin(params *LoginParams) (*HttpToken, error) {
 	}
 
 	if len(gqlResp.Errors) > 0 {
-		return nil, errors.Errorf(gqlResp.Errors.Error())
+		return nil, errors.Errorf("%v", gqlResp.Errors.Error())
 	}
 
 	if gqlResp.Data == nil {
@@ -483,7 +472,7 @@ top:
 		// the curl command should have returned an non-zero code
 		require.Error(t, err, "the curl command should have failed")
 		if ee, ok := err.(*exec.ExitError); ok {
-			require.True(t, strings.Contains(string(ee.Stderr), failureConfig.CurlErrMsg),
+			require.Contains(t, string(ee.Stderr), failureConfig.CurlErrMsg,
 				"the curl output does not contain the expected output")
 		}
 	} else {

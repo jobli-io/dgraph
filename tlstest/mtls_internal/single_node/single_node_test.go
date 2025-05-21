@@ -1,5 +1,10 @@
 //go:build integration
 
+/*
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package single_node
 
 import (
@@ -11,10 +16,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func runTests(t *testing.T, client *dgo.Dgraph) {
@@ -87,7 +92,7 @@ func TestClusterSetup(t *testing.T) {
 	}
 	tlsConf, err := x.GenerateClientTLSConfig(c)
 	require.NoError(t, err)
-	dgConn, err := grpc.Dial(testutil.SockAddr, grpc.WithTransportCredentials(credentials.NewTLS(tlsConf)))
+	dgConn, err := grpc.NewClient(testutil.SockAddr, grpc.WithTransportCredentials(credentials.NewTLS(tlsConf)))
 	require.NoError(t, err)
 	client := dgo.NewDgraphClient(api.NewDgraphClient(dgConn))
 	runTests(t, client)

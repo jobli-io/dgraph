@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 //nolint:lll
@@ -35,10 +24,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // TestAddMutation tests that add mutations work as expected.  There's a few angles
@@ -355,7 +344,7 @@ func deepMutationsTest(t *testing.T, executeRequest requestExecutor) {
 			},
 		},
 		// Country: anotherCountry,
-		// FIXME: Won't work till https://github.com/dgraph-io/dgraph/pull/4411 is merged
+		// FIXME: Won't work till https://github.com/hypermodeinc/dgraph/pull/4411 is merged
 	}
 
 	patchRemove := &author{
@@ -2149,7 +2138,7 @@ func manyMutationsWithQueryError(t *testing.T) {
 	// The schema states type Country `{ ... name: String! ... }`
 	// so a query error will be raised if we ask for the country's name in a
 	// query.  Don't think a GraphQL update can do this ATM, so do through Dgraph.
-	d, err := grpc.Dial(Alpha1gRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	d, err := grpc.NewClient(Alpha1gRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	client := dgo.NewDgraphClient(api.NewDgraphClient(d))
 	mu := &api.Mutation{

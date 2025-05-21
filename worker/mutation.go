@@ -1,17 +1,6 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -20,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,27 +17,30 @@ import (
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
 	ostats "go.opencensus.io/stats"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/y"
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/tok/hnsw"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
 	// ErrNonExistentTabletMessage is the error message sent when no tablet is serving a predicate.
 	ErrNonExistentTabletMessage = "Requested predicate is not being served by any tablet"
-	errNonExistentTablet        = errors.Errorf(ErrNonExistentTabletMessage)
+	errNonExistentTablet        = errors.Errorf("%v", ErrNonExistentTabletMessage)
 	errUnservedTablet           = errors.Errorf("Tablet isn't being served by this instance")
 )
 
@@ -90,35 +83,35 @@ func runMutation(ctx context.Context, edge *pb.DirectedEdge, txn *posting.Txn) e
 	// The following is a performance optimization which allows us to not read a posting list from
 	// disk. We calculate this based on how AddMutationWithIndex works. The general idea is that if
 	// we're not using the read posting list, we don't need to retrieve it. We need the posting list
-	// if we're doing indexing or count index or enforcing single UID, etc. In other cases, we can
-	// just create a posting list facade in memory and use it to store the delta in Badger. Later,
-	// the rollup operation would consolidate all these deltas into a posting list.
+	// if we're doing count index or delete operation. For scalar predicates, we just get the last item merged.
+	// In other cases, we can just create a posting list facade in memory and use it to store the delta in Badger.
+	// Later, the rollup operation would consolidate all these deltas into a posting list.
+	isList := su.GetList()
 	var getFn func(key []byte) (*posting.List, error)
 	switch {
-	case len(su.GetTokenizer()) > 0 || su.GetCount():
-		// Any index or count index.
-		getFn = txn.Get
-	case su.GetValueType() == pb.Posting_UID && !su.GetList():
-		// Single UID, not a list.
+	case len(edge.Lang) == 0 && !isList:
+		// Scalar Predicates, without lang
+		getFn = txn.GetScalarList
+	case len(edge.Lang) > 0 || su.GetCount():
+		// Language or Count Index
 		getFn = txn.Get
 	case edge.Op == pb.DirectedEdge_DEL:
 		// Covers various delete cases to keep things simple.
 		getFn = txn.Get
 	default:
-		// Reverse index doesn't need the posting list to be read. We already covered count index,
-		// single uid and delete all above.
-		// Values, whether single or list, don't need to be read.
-		// Uid list doesn't need to be read.
+		// Only count index needs to be read. For other indexes on list, we don't need to read any data.
+		// For indexes on scalar prediactes, only the last element needs to be left.
+		// Delete cases covered above.
 		getFn = txn.GetFromDelta
 	}
 
 	t := time.Now()
 	plist, err := getFn(key)
 	if dur := time.Since(t); dur > time.Millisecond {
-		if span := otrace.FromContext(ctx); span != nil {
-			span.Annotatef([]otrace.Attribute{otrace.BoolAttribute("slow-get", true)},
-				"GetLru took %s", dur)
-		}
+		span := trace.SpanFromContext(ctx)
+		span.AddEvent("Slow GetLru", trace.WithAttributes(
+			attribute.Bool("slow-get", true),
+			attribute.String("duration", dur.String())))
 	}
 	if err != nil {
 		return err
@@ -193,18 +186,15 @@ func runSchemaMutation(ctx context.Context, updates []*pb.SchemaUpdate, startTs 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	defer wg.Done()
-	// This throttle allows is used to limit the number of files which are opened simultaneously
-	// by badger while building indexes for predicates in background.
-	maxOpenFileLimit, err := x.QueryMaxOpenFiles()
-	if err != nil {
-		// Setting to default value on unix systems
-		maxOpenFileLimit = 1024
-	}
-	glog.Infof("Max open files limit: %d", maxOpenFileLimit)
+
 	// Badger opens around 8 files for indexing per predicate.
-	// The throttle limit is set to maxOpenFileLimit/8 to ensure that indexing does not throw
-	// "Too many open files" error.
-	throttle := y.NewThrottle(maxOpenFileLimit / 8)
+	// The throttle limit is set to 1024 to ensure that indexing
+	// does not throw "Too many open files" error.
+	maxPredicateAtATime := 1024
+	if len(updates) < maxPredicateAtATime {
+		maxPredicateAtATime = len(updates)
+	}
+	throttle := y.NewThrottle(maxPredicateAtATime)
 
 	buildIndexes := func(update *pb.SchemaUpdate, rebuild posting.IndexRebuild, c *z.Closer) {
 		// In case background indexing is running, we should call it here again.
@@ -248,6 +238,7 @@ func runSchemaMutation(ctx context.Context, updates []*pb.SchemaUpdate, startTs 
 
 		// Start opIndexing task only if schema update needs to build the indexes.
 		if shouldRebuild && !gr.Node.isRunningTask(opIndexing) {
+			var err error
 			closer, err = gr.Node.startTaskAtTs(opIndexing, startTs)
 			if err != nil {
 				return err
@@ -523,6 +514,10 @@ func ValidateAndConvert(edge *pb.DirectedEdge, su *pb.SchemaUpdate) error {
 		return nil
 	}
 
+	if strings.Contains(su.Predicate, hnsw.VecKeyword) {
+		return errors.Errorf("Not allowed to insert mutations in vector index keys, edge: [%v]", edge)
+	}
+
 	storageType := posting.TypeID(edge)
 	schemaType := types.TypeID(su.ValueType)
 
@@ -614,7 +609,7 @@ func AssignNsIdsOverNetwork(ctx context.Context, num *pb.Num) (*pb.AssignedIds, 
 	return c.AssignIds(ctx, num)
 }
 
-// AssignUidsOverNetwork sends a request to assign UIDs to blank nodes to the current zero leader.
+// AssignUidsOverNetwork sends a request to assign UIDs from the current zero leader.
 func AssignUidsOverNetwork(ctx context.Context, num *pb.Num) (*pb.AssignedIds, error) {
 	// Pass on the incoming metadata to the zero. Namespace from the metadata is required by zero.
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
@@ -758,7 +753,7 @@ type res struct {
 // MutateOverNetwork checks which group should be running the mutations
 // according to the group config and sends it to that instance.
 func MutateOverNetwork(ctx context.Context, m *pb.Mutations) (*api.TxnContext, error) {
-	ctx, span := otrace.StartSpan(ctx, "worker.MutateOverNetwork")
+	ctx, span := otel.Tracer("").Start(ctx, "worker.MutateOverNetwork")
 	defer span.End()
 
 	tctx := &api.TxnContext{StartTs: m.StartTs}
@@ -773,8 +768,10 @@ func MutateOverNetwork(ctx context.Context, m *pb.Mutations) (*api.TxnContext, e
 	resCh := make(chan res, len(mutationMap))
 	for gid, mu := range mutationMap {
 		if gid == 0 {
-			span.Annotatef(nil, "state: %+v", groups().state)
-			span.Annotatef(nil, "Group id zero for mutation: %+v", mu)
+			span.AddEvent("State information", trace.WithAttributes(
+				attribute.String("state", groups().state.String())))
+			span.AddEvent("Group id zero for mutation", trace.WithAttributes(
+				attribute.String("mutation", mu.String())))
 			return tctx, errNonExistentTablet
 		}
 		mu.StartTs = m.StartTs
@@ -888,7 +885,7 @@ func typeSanityCheck(t *pb.TypeUpdate) error {
 
 // CommitOverNetwork makes a proxy call to Zero to commit or abort a transaction.
 func CommitOverNetwork(ctx context.Context, tc *api.TxnContext) (uint64, error) {
-	ctx, span := otrace.StartSpan(ctx, "worker.CommitOverNetwork")
+	ctx, span := otel.Tracer("").Start(ctx, "worker.CommitOverNetwork")
 	defer span.End()
 
 	clientDiscard := false
@@ -911,13 +908,13 @@ func CommitOverNetwork(ctx context.Context, tc *api.TxnContext) (uint64, error) 
 	tctx, err := zc.CommitOrAbort(ctx, tc)
 
 	if err != nil {
-		span.Annotatef(nil, "Error=%v", err)
+		span.AddEvent("Error in CommitOrAbort", trace.WithAttributes(
+			attribute.String("error", err.Error())))
 		return 0, err
 	}
-	var attributes []otrace.Attribute
-	attributes = append(attributes, otrace.Int64Attribute("commitTs", int64(tctx.CommitTs)),
-		otrace.BoolAttribute("committed", tctx.CommitTs > 0))
-	span.Annotate(attributes, "")
+	span.AddEvent("Commit status", trace.WithAttributes(
+		attribute.Int64("commitTs", int64(tctx.CommitTs)),
+		attribute.Bool("committed", tctx.CommitTs > 0)))
 
 	if tctx.Aborted || tctx.CommitTs == 0 {
 		if !clientDiscard {
@@ -958,7 +955,7 @@ func (w *grpcWorker) proposeAndWait(ctx context.Context, txnCtx *api.TxnContext,
 
 // Mutate is used to apply mutations over the network on other instances.
 func (w *grpcWorker) Mutate(ctx context.Context, m *pb.Mutations) (*api.TxnContext, error) {
-	ctx, span := otrace.StartSpan(ctx, "worker.Mutate")
+	ctx, span := otel.Tracer("").Start(ctx, "worker.Mutate")
 	defer span.End()
 
 	txnCtx := &api.TxnContext{}

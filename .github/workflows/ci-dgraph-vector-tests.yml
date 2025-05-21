@@ -1,9 +1,13 @@
 name: ci-dgraph-vector-tests
+
 on:
   pull_request:
     paths:
-      - '**/*.go'
-      - '**/go.mod'
+      - "**/*.go"
+      - "**/go.mod"
+      - "**/*.yml"
+      - "**/Dockerfile"
+      - "**/Makefile"
     types:
       - opened
       - reopened
@@ -11,11 +15,18 @@ on:
       - ready_for_review
     branches:
       - main
-      - 'release/**'
+      - release/**
+  schedule:
+    - cron: 0 0 * * * # 1 run per day
+
+permissions:
+  contents: read
+
 jobs:
   dgraph-vector-tests:
     if: github.event.pull_request.draft == false
     runs-on: warp-ubuntu-latest-x64-4x
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Set up Go
@@ -29,7 +40,7 @@ jobs:
           cd ./protos
           go mod tidy
           make regenerate
-          git diff --exit-code -- .
+          git diff -b --exit-code -- .
       - name: Make Linux Build and Docker Image
         run: make docker-image
       - name: Install gotestsum
@@ -62,8 +73,8 @@ jobs:
       - name: Upload Test Results
         if: always() # Upload the results even if the tests fail
         continue-on-error: true # don't fail this job if the upload fails
-        uses: trunk-io/analytics-uploader@main
+        uses: trunk-io/analytics-uploader@v1
         with:
-          junit-paths: "./test-results.xml"        
+          junit-paths: ./test-results.xml
           org-slug: hypermode
           token: ${{ secrets.TRUNK_TOKEN }}

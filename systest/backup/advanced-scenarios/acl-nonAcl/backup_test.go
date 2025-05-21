@@ -1,18 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -21,10 +11,10 @@ import (
 	"net/http"
 	"testing"
 
-	e2eCommon "github.com/dgraph-io/dgraph/v24/graphql/e2e/common"
-	utilsCommon "github.com/dgraph-io/dgraph/v24/systest/backup/common"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	e2eCommon "github.com/hypermodeinc/dgraph/v25/graphql/e2e/common"
+	utilsCommon "github.com/hypermodeinc/dgraph/v25/systest/backup/common"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -53,7 +43,7 @@ func BackupRestore(t *testing.T, jwtTokenBackupAlpha string, jwtTokenRestoreAlph
 	utilsCommon.CheckItemExists(t, 5, jwtTokenBackupAlpha, backupAlpha)
 	utilsCommon.TakeBackup(t, jwtTokenBackupAlpha, backupDst, backupAlpha)
 	utilsCommon.RunRestore(t, jwtTokenRestoreAlpha, restoreLocation, restoreAlpha)
-	dg := testutil.DgClientWithLogin(t, "groot", "password", x.GalaxyNamespace)
+	dg := testutil.DgClientWithLogin(t, "groot", "password", x.RootNamespace)
 	testutil.WaitForRestore(t, dg, testutil.ContainerAddr(restoreAlpha, 8080))
 	utilsCommon.CheckItemExists(t, 5, jwtTokenRestoreAlpha, restoreAlpha)
 }

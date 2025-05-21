@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package dgraphtest
@@ -33,7 +22,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
@@ -44,10 +32,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dgraphapi"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // cluster's network struct
@@ -136,6 +124,10 @@ func (c *LocalCluster) init() error {
 		return errors.Wrap(err, "error while making binariesPath")
 	}
 
+	if err := os.Mkdir(datasetFilesPath, os.ModePerm); err != nil && !os.IsExist(err) {
+		return errors.Wrap(err, "error while making datafiles path")
+	}
+
 	for _, vol := range c.conf.volumes {
 		if err := c.createVolume(vol); err != nil {
 			return err
@@ -174,7 +166,7 @@ func (c *LocalCluster) init() error {
 
 func (c *LocalCluster) createNetwork() error {
 	c.net.name = c.conf.prefix + "-net"
-	opts := types.NetworkCreate{
+	opts := network.CreateOptions{
 		Driver: "bridge",
 		IPAM:   &network.IPAM{Driver: "default"},
 	}
@@ -550,7 +542,7 @@ func (c *LocalCluster) HealthCheck(zeroOnly bool) error {
 func (c *LocalCluster) containerHealthCheck(url func(c *LocalCluster) (string, error)) error {
 	endpoint, err := url(c)
 	if err != nil {
-		return errors.Wrap(err, "error getting health URL")
+		return errors.Wrapf(err, "error getting health URL %v", endpoint)
 	}
 
 	for range 60 {
@@ -628,7 +620,7 @@ func (c *LocalCluster) waitUntilGraphqlHealthCheck() error {
 		return errors.Wrap(err, "error creating http client while graphql health check")
 	}
 	if c.conf.acl {
-		if err := hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace); err != nil {
+		if err := hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace); err != nil {
 			return errors.Wrap(err, "error during login while graphql health check")
 		}
 	}
@@ -666,7 +658,7 @@ func (c *LocalCluster) Upgrade(version string, strategy UpgradeStrategy) error {
 			return err
 		}
 		if c.conf.acl {
-			if err := hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace); err != nil {
+			if err := hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace); err != nil {
 				return errors.Wrapf(err, "error during login before upgrade")
 			}
 		}
@@ -689,7 +681,7 @@ func (c *LocalCluster) Upgrade(version string, strategy UpgradeStrategy) error {
 			return errors.Wrapf(err, "error creating HTTP client after upgrade")
 		}
 		if c.conf.acl {
-			if err := hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace); err != nil {
+			if err := hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace); err != nil {
 				return errors.Wrapf(err, "error during login after upgrade")
 			}
 		}
@@ -707,7 +699,7 @@ func (c *LocalCluster) Upgrade(version string, strategy UpgradeStrategy) error {
 			return err
 		}
 		if c.conf.acl {
-			if err := hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace); err != nil {
+			if err := hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace); err != nil {
 				return errors.Wrapf(err, "error during login before upgrade")
 			}
 		}
@@ -764,17 +756,31 @@ func (c *LocalCluster) recreateContainers() error {
 // Client returns a grpc client that can talk to any Alpha in the cluster
 func (c *LocalCluster) Client() (*dgraphapi.GrpcClient, func(), error) {
 	// TODO(aman): can we cache the connections?
+	retryPolicy := `{
+		"methodConfig": [{
+			"retryPolicy": {
+				"MaxAttempts": 4,
+				"InitialBackoff": ".01s",
+				"MaxBackoff": ".01s",
+				"BackoffMultiplier": 1.0,
+				"RetryableStatusCodes": [ "UNAVAILABLE" ]
+			}
+		}]
+	}`
 	var apiClients []api.DgraphClient
 	var conns []*grpc.ClientConn
 	for _, aa := range c.alphas {
 		if !aa.isRunning {
+			// QUESTIONS(shivaji): Should this be 'continue' instead of a break from the loop
 			break
 		}
 		url, err := aa.alphaURL(c)
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "error getting health URL")
 		}
-		conn, err := grpc.Dial(url, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(url,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithDefaultServiceConfig(retryPolicy))
 		if err != nil {
 			return nil, nil, errors.Wrap(err, "error connecting to alpha")
 		}
@@ -782,6 +788,9 @@ func (c *LocalCluster) Client() (*dgraphapi.GrpcClient, func(), error) {
 		apiClients = append(apiClients, api.NewDgraphClient(conn))
 	}
 
+	if len(apiClients) == 0 {
+		return nil, nil, errors.New("no alphas running")
+	}
 	client := dgo.NewDgraphClient(apiClients...)
 	cleanup := func() {
 		for _, conn := range conns {
@@ -799,7 +808,7 @@ func (c *LocalCluster) AlphaClient(id int) (*dgraphapi.GrpcClient, func(), error
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "error getting health URL")
 	}
-	conn, err := grpc.Dial(url, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(url, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "error connecting to alpha")
 	}
@@ -1169,14 +1178,26 @@ func (c *LocalCluster) GeneratePlugins(raceEnabled bool) error {
 	return nil
 }
 
-func (c *LocalCluster) GetAlphaGrpcPublicPort() (string, error) {
-	return publicPort(c.dcli, c.alphas[0], alphaGrpcPort)
+func (c *LocalCluster) GetAlphaGrpcPublicPort(id int) (string, error) {
+	return publicPort(c.dcli, c.alphas[id], alphaGrpcPort)
 }
 
-func (c *LocalCluster) GetAlphaHttpPublicPort() (string, error) {
-	return publicPort(c.dcli, c.alphas[0], alphaHttpPort)
+func (c *LocalCluster) GetAlphaHttpPublicPort(id int) (string, error) {
+	return publicPort(c.dcli, c.alphas[id], alphaHttpPort)
+}
+
+func (c *LocalCluster) GetZeroGrpcPublicPort(id int) (string, error) {
+	return publicPort(c.dcli, c.zeros[id], zeroGrpcPort)
 }
 
 func (c *LocalCluster) GetTempDir() string {
 	return c.tempBinDir
+}
+
+func (c *LocalCluster) GetAlphaGrpcEndpoint(id int) (string, error) {
+	pubPort, err := c.GetAlphaGrpcPublicPort(id)
+	if err != nil {
+		return "", err
+	}
+	return "0.0.0.0:" + pubPort, nil
 }

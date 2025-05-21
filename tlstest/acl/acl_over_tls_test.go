@@ -1,5 +1,10 @@
 //go:build integration
 
+/*
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package acl
 
 import (
@@ -11,8 +16,8 @@ import (
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func TestLoginOverTLS(t *testing.T) {
@@ -26,7 +31,7 @@ func TestLoginOverTLS(t *testing.T) {
 	dg, err := testutil.DgraphClientWithCerts(testutil.SockAddr, conf)
 	require.NoError(t, err)
 	for i := 0; i < 30; i++ {
-		err = dg.LoginIntoNamespace(context.Background(), "groot", "password", x.GalaxyNamespace)
+		err = dg.LoginIntoNamespace(context.Background(), "groot", "password", x.RootNamespace)
 		if err == nil {
 			return
 		}

@@ -1,19 +1,8 @@
 //go:build integration || cloud || upgrade
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 //nolint:lll
@@ -29,8 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/dgraph-io/dgraph/v24/dgraphapi"
-	"github.com/dgraph-io/dgraph/v24/testutil"
+	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
 )
 
 func TestRecurseError(t *testing.T) {
@@ -957,7 +946,7 @@ func TestShortestPathRev(t *testing.T) {
 		js)
 }
 
-// Regression test for https://github.com/dgraph-io/dgraph/issues/3657.
+// Regression test for https://github.com/hypermodeinc/dgraph/issues/3657.
 func TestShortestPathPassword(t *testing.T) {
 	query := `
 		{
@@ -3232,7 +3221,7 @@ func TestMultiRegexInFilter2(t *testing.T) {
 	`
 
 	// run 20 times ensure that there is no data race
-	// https://github.com/dgraph-io/dgraph/issues/4030
+	// https://github.com/hypermodeinc/dgraph/issues/4030
 	for i := 0; i < 20; i++ {
 		res := processQueryNoErr(t, query)
 		require.JSONEq(t, `{"data": {"q": [{"firstName": "Han", "lastName":"Solo"}]}}`, res)

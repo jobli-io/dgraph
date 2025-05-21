@@ -2,19 +2,8 @@
 // +build integration
 
 /*
- * Copyright 2024 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -25,9 +14,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dgraphapi"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func addData(t *testing.T, gc *dgraphapi.GrpcClient) {
@@ -52,10 +41,10 @@ func (msuite *MultitenancyTestSuite) TestLoggingIntoTheNSAfterDropDataFromTheNS(
 	require.NoError(t, err)
 
 	require.NoError(t, gc.LoginIntoNamespace(context.Background(),
-		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace))
+		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace))
 	require.NoError(t, gc.DropAll())
 
-	require.NoError(t, hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace))
+	require.NoError(t, hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace))
 	for i := 1; i < 5; i++ {
 		ns, err := hc.AddNamespace()
 		require.NoError(t, err)
@@ -82,10 +71,10 @@ func (msuite *MultitenancyTestSuite) TestLoggingIntoAllNamespacesAfterDropDataOp
 	require.NoError(t, err)
 
 	require.NoError(t, gc.LoginIntoNamespace(context.Background(),
-		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace))
+		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace))
 
 	require.NoError(t, gc.DropAll())
-	require.NoError(t, hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace))
+	require.NoError(t, hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace))
 
 	nss := []uint64{}
 	for i := 1; i <= 2; i++ {
@@ -100,13 +89,13 @@ func (msuite *MultitenancyTestSuite) TestLoggingIntoAllNamespacesAfterDropDataOp
 
 	// Drop data from default namespace
 	require.NoError(t, gc.LoginIntoNamespace(context.Background(),
-		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace))
+		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace))
 
 	require.NoError(t, gc.Alter(context.Background(), &api.Operation{DropOp: api.Operation_DATA}))
 
 	// verify here that login into the namespace should not fail
 	require.NoError(t, gc.LoginIntoNamespace(context.Background(),
-		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace))
+		dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace))
 
 	for _, ns := range nss {
 		require.NoError(t, gc.LoginIntoNamespace(context.Background(),

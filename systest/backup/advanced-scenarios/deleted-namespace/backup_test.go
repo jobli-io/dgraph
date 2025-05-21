@@ -1,18 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -20,11 +10,12 @@ package main
 import (
 	"testing"
 
-	e2eCommon "github.com/dgraph-io/dgraph/v24/graphql/e2e/common"
-	utilsCommon "github.com/dgraph-io/dgraph/v24/systest/backup/common"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/stretchr/testify/require"
+
+	e2eCommon "github.com/hypermodeinc/dgraph/v25/graphql/e2e/common"
+	utilsCommon "github.com/hypermodeinc/dgraph/v25/systest/backup/common"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -52,7 +43,7 @@ func TestDeletedNamespaceID(t *testing.T) {
 	e2eCommon.DeleteNamespace(t, ns1[2], headerAlpha1Np0, "alpha1")
 	utilsCommon.TakeBackup(t, jwtTokenAlpha1Np0, backupDst, "alpha1")
 	utilsCommon.RunRestore(t, jwtTokenAlpha2Np0, restoreLocation, "alpha2")
-	dg1 := testutil.DgClientWithLogin(t, "groot", "password", x.GalaxyNamespace)
+	dg1 := testutil.DgClientWithLogin(t, "groot", "password", x.RootNamespace)
 	testutil.WaitForRestore(t, dg1, testutil.ContainerAddr("alpha2", 8080))
 	lastAddedNamespaceId := e2eCommon.CreateNamespace(t, headerAlpha2Np0, "alpha2")
 	require.Equal(t, lastAddedNamespaceId > ns1[3], true)
@@ -68,5 +59,4 @@ func TestDeletedNamespaceID(t *testing.T) {
 		require.NotEqual(t, ns, ns1[2])
 	}
 	require.Contains(t, nsl, lastAddedNamespaceId)
-
 }

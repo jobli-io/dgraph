@@ -1,14 +1,6 @@
-//go:build !oss
-// +build !oss
-
 /*
- * Copyright 2021 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Dgraph Community License (the "License"); you
- * may not use this file except in compliance with the License. You
- * may obtain a copy of the License at
- *
- *     https://github.com/dgraph-io/dgraph/blob/main/licenses/DCL.txt
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -24,8 +16,8 @@ import (
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func verifyManifests(manifests []*Manifest) error {
@@ -165,7 +157,7 @@ func getConsolidatedManifest(h UriHandler, uri *url.URL) (*MasterManifest, error
 // the drop data/attr operation.
 // If the manifest version is 2103, convert the format of predicate from <ns bytes>|<attr> to
 // <ns string>-<attr>. This is because of a bug for namespace greater than 127.
-// See https://github.com/dgraph-io/dgraph/pull/7810
+// See https://github.com/hypermodeinc/dgraph/pull/7810
 // NOTE: Do not use the upgraded manifest to overwrite the non-upgraded manifest.
 func upgradeManifest(m *Manifest) error {
 	switch m.Version {
@@ -173,16 +165,16 @@ func upgradeManifest(m *Manifest) error {
 		for gid, preds := range m.Groups {
 			parsedPreds := preds[:0]
 			for _, pred := range preds {
-				parsedPreds = append(parsedPreds, x.GalaxyAttr(pred))
+				parsedPreds = append(parsedPreds, x.AttrInRootNamespace(pred))
 			}
 			m.Groups[gid] = parsedPreds
 		}
 		for _, op := range m.DropOperations {
 			switch op.DropOp {
 			case pb.DropOperation_DATA:
-				op.DropValue = fmt.Sprintf("%#x", x.GalaxyNamespace)
+				op.DropValue = fmt.Sprintf("%#x", x.RootNamespace)
 			case pb.DropOperation_ATTR:
-				op.DropValue = x.GalaxyAttr(op.DropValue)
+				op.DropValue = x.AttrInRootNamespace(op.DropValue)
 			default:
 				// do nothing for drop all and drop namespace.
 			}

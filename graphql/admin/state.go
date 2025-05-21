@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package admin
 
 import (
@@ -7,11 +12,11 @@ import (
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/dgraph-io/dgraph/v24/edgraph"
-	"github.com/dgraph-io/dgraph/v24/graphql/resolve"
-	"github.com/dgraph-io/dgraph/v24/graphql/schema"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/edgraph"
+	"github.com/hypermodeinc/dgraph/v25/graphql/resolve"
+	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type membershipState struct {
@@ -24,7 +29,6 @@ type membershipState struct {
 	MaxRaftId  uint64         `json:"maxRaftId,omitempty"`
 	Removed    []*pb.Member   `json:"removed,omitempty"`
 	Cid        string         `json:"cid,omitempty"`
-	License    *pb.License    `json:"license,omitempty"`
 	Namespaces []uint64       `json:"namespaces,omitempty"`
 }
 
@@ -44,14 +48,13 @@ func resolveState(ctx context.Context, q schema.Query) *resolve.Resolved {
 
 	// unmarshal it back to MembershipState proto in order to map to graphql response
 	var ms pb.MembershipState
-	err = protojson.Unmarshal(resp.GetJson(), &ms)
-	if err != nil {
+	if err := protojson.Unmarshal(resp.GetJson(), &ms); err != nil {
 		return resolve.EmptyResult(q, err)
 	}
 
 	ns, _ := x.ExtractNamespace(ctx)
-	// map to graphql response structure. Only guardian of galaxy can list the namespaces.
-	state := convertToGraphQLResp(ms, ns == x.GalaxyNamespace)
+	// map to graphql response structure. Only superadmin can list the namespaces.
+	state := convertToGraphQLResp(&ms, ns == x.RootNamespace)
 	b, err := json.Marshal(state)
 	if err != nil {
 		return resolve.EmptyResult(q, err)
@@ -75,7 +78,7 @@ func resolveState(ctx context.Context, q schema.Query) *resolve.Resolved {
 // values and not the keys. For pb.MembershipState.Group, the keys are the group IDs
 // and pb.Group didn't contain this ID, so we are creating a custom clusterGroup type,
 // which is same as pb.Group and also contains the ID for the group.
-func convertToGraphQLResp(ms pb.MembershipState, listNs bool) membershipState {
+func convertToGraphQLResp(ms *pb.MembershipState, listNs bool) membershipState {
 	var state membershipState
 
 	// namespaces stores set of namespaces
@@ -112,7 +115,6 @@ func convertToGraphQLResp(ms pb.MembershipState, listNs bool) membershipState {
 	state.MaxRaftId = ms.MaxRaftId
 	state.Removed = ms.Removed
 	state.Cid = ms.Cid
-	state.License = ms.License
 
 	state.Namespaces = []uint64{}
 	for ns := range namespaces {

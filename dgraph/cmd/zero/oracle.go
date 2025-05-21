@@ -1,23 +1,13 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package zero
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -25,14 +15,16 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	attribute "go.opentelemetry.io/otel/attribute"
+	trace "go.opentelemetry.io/otel/trace"
 
 	"github.com/dgraph-io/badger/v4/y"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/tok/hnsw"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/tok/hnsw"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // Oracle stores and manages the transaction state and conflict detection.
@@ -348,8 +340,8 @@ func (s *Server) proposeTxn(ctx context.Context, src *api.TxnContext) error {
 }
 
 func (s *Server) commit(ctx context.Context, src *api.TxnContext) error {
-	span := otrace.FromContext(ctx)
-	span.Annotate([]otrace.Attribute{otrace.Int64Attribute("startTs", int64(src.StartTs))}, "")
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(attribute.Int64("startTs", int64(src.StartTs)))
 	if src.Aborted {
 		return s.proposeTxn(ctx, src)
 	}
@@ -359,8 +351,7 @@ func (s *Server) commit(ctx context.Context, src *api.TxnContext) error {
 	conflict := s.orc.hasConflict(src)
 	s.orc.RUnlock()
 	if conflict {
-		span.Annotate([]otrace.Attribute{otrace.BoolAttribute("abort", true)},
-			"Oracle found conflict")
+		span.SetAttributes(attribute.Bool("abort", true))
 		src.Aborted = true
 		return s.proposeTxn(ctx, src)
 	}
@@ -395,7 +386,7 @@ func (s *Server) commit(ctx context.Context, src *api.TxnContext) error {
 		return nil
 	}
 	if err := checkPreds(); err != nil {
-		span.Annotate([]otrace.Attribute{otrace.BoolAttribute("abort", true)}, err.Error())
+		span.SetAttributes(attribute.Bool("abort", true))
 		src.Aborted = true
 		return s.proposeTxn(ctx, src)
 	}
@@ -408,15 +399,16 @@ func (s *Server) commit(ctx context.Context, src *api.TxnContext) error {
 	src.CommitTs = assigned.StartId
 	// Mark the transaction as done, irrespective of whether the proposal succeeded or not.
 	defer s.orc.doneUntil.Done(src.CommitTs)
-	span.Annotatef([]otrace.Attribute{otrace.Int64Attribute("commitTs", int64(src.CommitTs))},
-		"Node Id: %d. Proposing TxnContext: %+v", s.Node.Id, src)
+	span.SetAttributes(attribute.Int64("commitTs", int64(src.CommitTs)))
+	span.SetAttributes(attribute.Int64("nodeId", int64(s.Node.Id)))
+	span.AddEvent(fmt.Sprintf("TXN Context: %+v", src))
 
 	if err := s.orc.commit(src); err != nil {
-		span.Annotatef(nil, "Found a conflict. Aborting.")
+		span.SetAttributes(attribute.Bool("abort", true))
 		src.Aborted = true
 	}
 	if err := ctx.Err(); err != nil {
-		span.Annotatef(nil, "Aborting txn due to context timing out.")
+		span.SetAttributes(attribute.Bool("abort", true))
 		src.Aborted = true
 	}
 	// Propose txn should be used to set watermark as done.
@@ -431,7 +423,7 @@ func (s *Server) CommitOrAbort(ctx context.Context, src *api.TxnContext) (*api.T
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	ctx, span := otrace.StartSpan(ctx, "Zero.CommitOrAbort")
+	ctx, span := otel.Tracer("").Start(ctx, "Zero.CommitOrAbort")
 	defer span.End()
 
 	if !s.Node.AmLeader() {
@@ -439,7 +431,7 @@ func (s *Server) CommitOrAbort(ctx context.Context, src *api.TxnContext) (*api.T
 	}
 	err := s.commit(ctx, src)
 	if err != nil {
-		span.Annotate([]otrace.Attribute{otrace.BoolAttribute("error", true)}, err.Error())
+		span.SetAttributes(attribute.Bool("error", true))
 	}
 	return src, err
 }
@@ -502,17 +494,18 @@ func (s *Server) TryAbort(ctx context.Context,
 
 // Timestamps is used to assign startTs for a new transaction
 func (s *Server) Timestamps(ctx context.Context, num *pb.Num) (*pb.AssignedIds, error) {
-	ctx, span := otrace.StartSpan(ctx, "Zero.Timestamps")
+	ctx, span := otel.Tracer("").Start(ctx, "Zero.Timestamps")
 	defer span.End()
 
-	span.Annotatef(nil, "Zero id: %d. Timestamp request: %+v", s.Node.Id, num)
+	span.SetAttributes(attribute.Int64("zeroId", int64(s.Node.Id)))
+	span.SetAttributes(attribute.String("timestampRequest", fmt.Sprintf("%+v", num)))
 	if ctx.Err() != nil {
 		return &emptyAssignedIds, ctx.Err()
 	}
 
 	num.Type = pb.Num_TXN_TS
 	reply, err := s.lease(ctx, num)
-	span.Annotatef(nil, "Response: %+v. Error: %v", reply, err)
+	span.AddEvent(fmt.Sprintf("Response: %+v, Error: %v", reply, err))
 
 	switch err {
 	case nil:

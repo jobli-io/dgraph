@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package alpha
@@ -36,11 +25,11 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"go.opencensus.io/plugin/ocgrpc"
-	otrace "go.opencensus.io/trace"
-	"go.opencensus.io/zpages"
+	"go.opentelemetry.io/contrib/zpages"
 	"golang.org/x/net/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -49,19 +38,19 @@ import (
 	hapi "google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/edgraph"
-	"github.com/dgraph-io/dgraph/v24/ee"
-	"github.com/dgraph-io/dgraph/v24/ee/audit"
-	"github.com/dgraph-io/dgraph/v24/ee/enc"
-	"github.com/dgraph-io/dgraph/v24/graphql/admin"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/tok"
-	"github.com/dgraph-io/dgraph/v24/worker"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	apiv25 "github.com/dgraph-io/dgo/v250/protos/api.v25"
 	_ "github.com/dgraph-io/gqlparser/v2/validator/rules" // make gql validator init() all rules
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/audit"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/mcp"
+	"github.com/hypermodeinc/dgraph/v25/edgraph"
+	"github.com/hypermodeinc/dgraph/v25/graphql/admin"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/tok"
+	"github.com/hypermodeinc/dgraph/v25/worker"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -106,7 +95,7 @@ they form a Raft group and provide synchronous replication.
 	// --tls SuperFlag
 	x.RegisterServerTLSFlags(flag)
 	// --encryption and --vault Superflag
-	ee.RegisterAclAndEncFlags(flag)
+	x.RegisterAclAndEncFlags(flag)
 
 	flag.StringP("postings", "p", "p", "Directory to store posting lists.")
 	flag.String("tmp", "t", "Directory to store temporary buffers.")
@@ -123,6 +112,8 @@ they form a Raft group and provide synchronous replication.
 	// Custom plugins.
 	flag.String("custom_tokenizers", "",
 		"Comma separated list of tokenizer plugins for custom indices.")
+
+	flag.Bool("mcp", false, "run MCP server along with alpha.")
 
 	// By default Go GRPC traces all requests.
 	grpc.EnableTracing = false
@@ -145,6 +136,15 @@ they form a Raft group and provide synchronous replication.
 		Flag("percentage",
 			"Cache percentages summing up to 100 for various caches (FORMAT: PostingListCache,"+
 				"PstoreBlockCache,PstoreIndexCache)").
+		Flag("remove-on-update",
+			"Dgraph implements a read-through cache (using Ristretto) to optimize query performance. On "+
+				"mutation, the new value is first written to disk and then updated in the cache "+
+				"before the transaction completes to ensure there are no stale reads during parallel "+
+				"transactions. In mutation-heavy use cases, it may be more advantageous to remove "+
+				"the cache entry on mutation instead of updating the value, as this executes ~14\\%"+
+				"faster on write. The new value will be added to the cache the first time it is "+
+				"queried, slightly delaying that read. To use this approach, set the --cache "+
+				"remove-on-update flag.").
 		String())
 
 	flag.String("raft", worker.RaftDefaults, z.NewSuperFlagHelp(worker.RaftDefaults).
@@ -269,7 +269,8 @@ they form a Raft group and provide synchronous replication.
 		Head("Feature flags to enable various experimental features").
 		Flag("normalize-compatibility-mode", "configure @normalize response formatting."+
 			" 'v20': returns values with repeated key for fields with same alias (same as v20.11)."+
-			" For more details, see https://github.com/dgraph-io/dgraph/pull/7639").
+			" For more details, see https://github.com/hypermodeinc/dgraph/pull/7639").
+		Flag("enable-detailed-metrics", "Enable metrics about disk reads and cache per predicate").
 		String())
 }
 
@@ -466,6 +467,7 @@ func serveGRPC(l net.Listener, tlsCfg *tls.Config, closer *z.Closer) {
 
 	s := grpc.NewServer(opt...)
 	api.RegisterDgraphServer(s, &edgraph.Server{})
+	apiv25.RegisterDgraphServer(s, &edgraph.ServerV25{})
 	hapi.RegisterHealthServer(s, health.NewServer())
 	worker.RegisterZeroProxyServer(s)
 
@@ -474,9 +476,27 @@ func serveGRPC(l net.Listener, tlsCfg *tls.Config, closer *z.Closer) {
 	s.Stop()
 }
 
-func setupServer(closer *z.Closer) {
-	go worker.RunServer(bindall) // For pb.communication.
+func setupMcp(baseMux *http.ServeMux, connectionString, url string, readOnly bool) error {
+	s, err := mcp.NewMCPServer(connectionString, readOnly)
+	if err != nil {
+		glog.Errorf("Failed to initialize MCPServer: %v", err)
+		return err
+	}
 
+	sse := server.NewSSEServer(s,
+		server.WithBasePath(url),
+	)
+	baseMux.HandleFunc(url, sse.ServeHTTP)
+	baseMux.HandleFunc(url+"/", sse.ServeHTTP)
+	return nil
+}
+
+func buildConnectionString(addr string, port int) string {
+	return fmt.Sprintf("dgraph://%s:%d", addr, port)
+}
+
+func setupServer(closer *z.Closer, enableMcp bool) {
+	go worker.RunServer(bindall) // For pb.communication.
 	laddr := "localhost"
 	if bindall {
 		laddr = "0.0.0.0"
@@ -500,6 +520,7 @@ func setupServer(closer *z.Closer) {
 	baseMux := http.NewServeMux()
 	http.Handle("/", audit.AuditRequestHttp(baseMux))
 
+	http.HandleFunc("/login", loginHandler)
 	baseMux.HandleFunc("/query", queryHandler)
 	baseMux.HandleFunc("/query/", queryHandler)
 	baseMux.HandleFunc("/mutate", mutationHandler)
@@ -509,7 +530,7 @@ func setupServer(closer *z.Closer) {
 	baseMux.HandleFunc("/health", healthCheck)
 	baseMux.HandleFunc("/state", stateHandler)
 	baseMux.HandleFunc("/debug/jemalloc", x.JemallocHandler)
-	zpages.Handle(baseMux, "/debug/z")
+	http.DefaultServeMux.Handle("/debug/z", zpages.NewTracezHandler(zpages.NewSpanProcessor()))
 
 	// TODO: Figure out what this is for?
 	http.HandleFunc("/debug/store", storeStatsHandler)
@@ -533,7 +554,7 @@ func setupServer(closer *z.Closer) {
 	globalEpoch := make(map[uint64]*uint64)
 	e := new(uint64)
 	atomic.StoreUint64(e, 0)
-	globalEpoch[x.GalaxyNamespace] = e
+	globalEpoch[x.RootNamespace] = e
 	var mainServer admin.IServeGraphQL
 	var gqlHealthStore *admin.GraphQLHealthStore
 	// Do not use := notation here because adminServer is a global variable.
@@ -577,6 +598,16 @@ func setupServer(closer *z.Closer) {
 	// Initialize the servers.
 	x.ServerCloser.AddRunning(3)
 	go serveGRPC(grpcListener, tlsCfg, x.ServerCloser)
+
+	if enableMcp {
+		if err := setupMcp(baseMux, buildConnectionString(laddr, grpcPort()), "/mcp", false); err != nil {
+			log.Fatal(err)
+		}
+		if err := setupMcp(baseMux, buildConnectionString(laddr, grpcPort()), "/mcp-ro", true); err != nil {
+			log.Fatal(err)
+		}
+	}
+
 	go x.StartListenHttpAndHttps(httpListener, tlsCfg, x.ServerCloser)
 
 	go func() {
@@ -584,7 +615,7 @@ func setupServer(closer *z.Closer) {
 
 		<-x.ServerCloser.HasBeenClosed()
 		// TODO - Verify why do we do this and does it have to be done for all namespaces.
-		e = globalEpoch[x.GalaxyNamespace]
+		e = globalEpoch[x.RootNamespace]
 		atomic.StoreUint64(e, math.MaxUint64)
 
 		// Stops grpc/http servers; Already accepted connections are not closed.
@@ -604,8 +635,7 @@ func setupServer(closer *z.Closer) {
 	// Therefore we wait for the cluster initialization to be done.
 	for {
 		if x.HealthCheck() == nil {
-			// Audit is enterprise feature.
-			x.Check(audit.InitAuditorIfNecessary(worker.Config.Audit, worker.EnterpriseEnabled))
+			x.Check(audit.InitAuditorIfNecessary(worker.Config.Audit))
 			break
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -614,17 +644,9 @@ func setupServer(closer *z.Closer) {
 }
 
 func run() {
-	var err error
-
-	telemetry := z.NewSuperFlag(Alpha.Conf.GetString("telemetry")).MergeAndCheckDefault(
-		x.TelemetryDefaults)
-	if telemetry.GetBool("sentry") {
-		x.InitSentry(enc.EeBuild)
-		defer x.FlushSentry()
-		x.ConfigureSentryScope("alpha")
-		x.WrapPanics()
-		x.SentryOptOutNote()
-	}
+	// keeping this flag for backward compatibility
+	_ = z.NewSuperFlag(Alpha.Conf.GetString("telemetry")).
+		MergeAndCheckDefault(x.TelemetryDefaults)
 
 	bindall = Alpha.Conf.GetBool("bindall")
 	cache := z.NewSuperFlag(Alpha.Conf.GetString("cache")).MergeAndCheckDefault(
@@ -633,6 +655,7 @@ func run() {
 	x.AssertTruef(totalCache >= 0, "ERROR: Cache size must be non-negative")
 
 	cachePercentage := cache.GetString("percentage")
+	removeOnUpdate := cache.GetBool("remove-on-update")
 	cachePercent, err := x.GetCachePercentages(cachePercentage, 3)
 	x.Check(err)
 	postingListCacheSize := (cachePercent[0] * (totalCache << 20)) / 100
@@ -650,20 +673,23 @@ func run() {
 	x.Config.Limit = z.NewSuperFlag(Alpha.Conf.GetString("limit")).MergeAndCheckDefault(
 		worker.LimitDefaults)
 
+	enableMcp := Alpha.Conf.GetBool("mcp")
+
 	opts := worker.Options{
 		PostingDir:      Alpha.Conf.GetString("postings"),
 		WALDir:          Alpha.Conf.GetString("wal"),
 		CacheMb:         totalCache,
 		CachePercentage: cachePercentage,
+		RemoveOnUpdate:  removeOnUpdate,
 
 		MutationsMode:      worker.AllowMutations,
 		AuthToken:          security.GetString("token"),
 		Audit:              conf,
 		ChangeDataConf:     Alpha.Conf.GetString("cdc"),
-		TypeFilterUidLimit: x.Config.Limit.GetInt64("type-filter-uid-limit"),
+		TypeFilterUidLimit: x.Config.Limit.GetUint64("type-filter-uid-limit"),
 	}
 
-	keys, err := ee.GetKeys(Alpha.Conf)
+	keys, err := x.GetEncAclKeys(Alpha.Conf)
 	x.Check(err)
 
 	if keys.AclSecretKey != nil {
@@ -719,10 +745,6 @@ func run() {
 	}
 	x.WorkerConfig.Parse(Alpha.Conf)
 
-	if telemetry.GetBool("reports") {
-		go edgraph.PeriodicallyPostTelemetry()
-	}
-
 	// Set the directory for temporary buffers.
 	z.SetTmpDir(x.WorkerConfig.TmpDir)
 
@@ -759,6 +781,7 @@ func run() {
 	featureFlagsConf := z.NewSuperFlag(Alpha.Conf.GetString("feature-flags")).MergeAndCheckDefault(
 		worker.FeatureFlagsDefaults)
 	x.Config.NormalizeCompatibilityMode = featureFlagsConf.GetString("normalize-compatibility-mode")
+	enableDetailedMetrics := featureFlagsConf.GetBool("enable-detailed-metrics")
 
 	x.PrintVersion()
 	glog.Infof("x.Config: %+v", x.Config)
@@ -774,15 +797,12 @@ func run() {
 			return true, true
 		}
 	}
-	otrace.ApplyConfig(otrace.Config{
-		DefaultSampler:             otrace.ProbabilitySampler(x.WorkerConfig.Trace.GetFloat64("ratio")),
-		MaxAnnotationEventsPerSpan: 256,
-	})
 
 	// Posting will initialize index which requires schema. Hence, initialize
 	// schema before calling posting.Init().
 	schema.Init(worker.State.Pstore)
-	posting.Init(worker.State.Pstore, postingListCacheSize)
+	posting.Init(worker.State.Pstore, postingListCacheSize, removeOnUpdate)
+	posting.SetEnabledDetailedMetrics(enableDetailedMetrics)
 	defer posting.Cleanup()
 	worker.Init(worker.State.Pstore)
 
@@ -835,7 +855,7 @@ func run() {
 	// close alpha. This closer is for closing and waiting that subscription.
 	adminCloser := z.NewCloser(1)
 
-	setupServer(adminCloser)
+	setupServer(adminCloser, enableMcp)
 	glog.Infoln("GRPC and HTTP stopped.")
 
 	// This might not close until group is given the signal to close. So, only signal here,
@@ -851,7 +871,6 @@ func run() {
 	audit.Close()
 
 	worker.State.Dispose()
-	x.RemoveCidFile()
 	glog.Info("worker.State disposed.")
 
 	updaters.Wait()

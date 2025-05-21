@@ -1,5 +1,10 @@
 //go:build integration
 
+/*
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package main
 
 import (
@@ -11,9 +16,9 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
-	"github.com/dgraph-io/dgraph/v24/testutil"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
 )
 
 type TestCases struct {

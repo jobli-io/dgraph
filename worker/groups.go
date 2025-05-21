@@ -1,17 +1,6 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -30,14 +19,13 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	badgerpb "github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/ee/enc"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/raftwal"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/raftwal"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type groupi struct {
@@ -118,7 +106,7 @@ func StartRaftNodes(walStore *raftwal.DiskStorage, bindall bool) {
 	var connState *pb.ConnectionState
 	var err error
 
-	for { // Keep on retrying. See: https://github.com/dgraph-io/dgraph/issues/2289
+	for { // Keep on retrying. See: https://github.com/hypermodeinc/dgraph/issues/2289
 		pl := gr.connToZeroLeader()
 		if pl == nil {
 			continue
@@ -199,7 +187,7 @@ func (g *groupi) informZeroAboutTablets() {
 }
 
 func (g *groupi) applyInitialTypes() {
-	initialTypes := schema.InitialTypes(x.GalaxyNamespace)
+	initialTypes := schema.InitialTypes(x.RootNamespace)
 	for _, t := range initialTypes {
 		if _, ok := schema.State().GetType(t.TypeName); ok {
 			continue
@@ -215,7 +203,7 @@ func (g *groupi) applyInitialSchema() {
 	if g.groupId() != 1 {
 		return
 	}
-	initialSchema := schema.InitialSchema(x.GalaxyNamespace)
+	initialSchema := schema.InitialSchema(x.RootNamespace)
 	ctx := g.Ctx()
 
 	apply := func(s *pb.SchemaUpdate) {
@@ -235,8 +223,7 @@ func (g *groupi) applyInitialSchema() {
 		} else if gid == 0 {
 			// The tablet is not being served currently.
 			apply(s)
-		} else if curr, _ := schema.State().Get(ctx, s.Predicate); gid == g.groupId() &&
-			!proto.Equal(s, &curr) {
+		} else if curr, _ := schema.State().Get(ctx, s.Predicate); gid == g.groupId() && !proto.Equal(s, &curr) {
 			// If this tablet is served to the group, do not upsert the schema unless the
 			// stored schema and the proposed one are different.
 			apply(s)
@@ -310,13 +297,6 @@ func (g *groupi) applyState(myId uint64, state *pb.MembershipState) {
 	// last update. For leader changes at zero since we don't propose, state can get
 	// updated at same counter value. So ignore only if counter is less.
 	if g.state != nil && g.state.Counter > state.Counter {
-		return
-	}
-
-	invalid := state.License != nil && !state.License.Enabled
-	if g.Node != nil && g.Node.RaftContext.IsLearner && invalid {
-		glog.Errorf("ENTERPRISE_ONLY_LEARNER: License Expired. Cannot run learner nodes.")
-		x.ServerCloser.Signal()
 		return
 	}
 
@@ -723,7 +703,7 @@ func (g *groupi) connToZeroLeader() *conn.Pool {
 	// No leader found. Let's get the latest membership state from Zero.
 	delay := connBaseDelay
 	maxHalfDelay := time.Second
-	for i := 0; ; i++ { // Keep on retrying. See: https://github.com/dgraph-io/dgraph/issues/2289
+	for i := 0; ; i++ { // Keep on retrying. See: https://github.com/hypermodeinc/dgraph/issues/2289
 		if g.IsClosed() {
 			return nil
 		}
@@ -790,7 +770,7 @@ func (g *groupi) doSendMembership(tablets map[string]*pb.Tablet) error {
 	if string(reply.GetData()) == "OK" {
 		return nil
 	}
-	return errors.Errorf(string(reply.GetData()))
+	return errors.Errorf("%v", string(reply.GetData()))
 }
 
 // sendMembershipUpdates sends the membership update to Zero leader. If this Alpha is the leader, it
@@ -897,7 +877,6 @@ START:
 			}
 			if i == 0 {
 				glog.Infof("Received first state update from Zero: %+v", state)
-				x.WriteCidFile(state.Cid)
 			}
 			select {
 			case stateCh <- state:
@@ -1113,11 +1092,8 @@ func (g *groupi) processOracleDeltaStream() {
 	}
 }
 
-// GetEEFeaturesList returns a list of Enterprise Features that are available.
-func GetEEFeaturesList() []string {
-	if !EnterpriseEnabled() {
-		return nil
-	}
+// GetFeaturesList returns a list of Dgraph features that are available.
+func GetFeaturesList() []string {
 	var ee []string
 	if Config.AclSecretKey != nil {
 		ee = append(ee, "acl")
@@ -1135,54 +1111,6 @@ func GetEEFeaturesList() []string {
 		ee = append(ee, "cdc")
 	}
 	return ee
-}
-
-// EnterpriseEnabled returns whether enterprise features can be used or not.
-func EnterpriseEnabled() bool {
-	if !enc.EeBuild {
-		return false
-	}
-	state := GetMembershipState()
-	if state == nil {
-		return groups().askZeroForEE()
-	}
-	return state.GetLicense().GetEnabled()
-}
-
-func (g *groupi) askZeroForEE() bool {
-	var err error
-	var connState *pb.ConnectionState
-
-	createConn := func() bool {
-		pl := g.connToZeroLeader()
-		if pl == nil {
-			return false
-		}
-		zc := pb.NewZeroClient(pl.Get())
-
-		ctx, cancel := context.WithTimeout(g.Ctx(), 10*time.Second)
-		defer cancel()
-
-		connState, err = zc.Connect(ctx, &pb.Member{ClusterInfoOnly: true})
-		if connState == nil ||
-			connState.GetState() == nil ||
-			connState.GetState().GetLicense() == nil {
-			glog.Info("Retry Zero Connection")
-			return false
-		}
-		if err == nil || x.ShouldCrash(err) {
-			return true
-		}
-		return false
-	}
-
-	for !g.IsClosed() {
-		if createConn() {
-			break
-		}
-		time.Sleep(time.Second)
-	}
-	return connState.GetState().GetLicense().GetEnabled()
 }
 
 // SubscribeForUpdates will listen for updates for the given group.

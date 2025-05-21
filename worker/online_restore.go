@@ -1,14 +1,6 @@
-//go:build !oss
-// +build !oss
-
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Dgraph Community License (the "License"); you
- * may not use this file except in compliance with the License. You
- * may obtain a copy of the License at
- *
- *     https://github.com/dgraph-io/dgraph/blob/main/licenses/DCL.txt
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -31,12 +23,11 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/ee"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -410,7 +401,10 @@ func handleRestoreProposal(ctx context.Context, req *pb.RestoreRequest, pidx uin
 		return errors.Wrapf(err, "cannot load schema after restore")
 	}
 
+	posting.ResetCache()
 	ResetAclCache()
+	groups().applyInitialSchema()
+	groups().applyInitialTypes()
 
 	// Reset gql schema only when the restore is not partial, so that after this restore
 	// the cluster can be in non-draining mode and hence gqlSchema can be lazy loaded.
@@ -472,13 +466,13 @@ func bumpLease(ctx context.Context, mr *mapResult) error {
 func getEncConfig(req *pb.RestoreRequest) (*viper.Viper, error) {
 	config := viper.New()
 	flags := &pflag.FlagSet{}
-	ee.RegisterEncFlag(flags)
+	x.RegisterEncFlag(flags)
 	if err := config.BindPFlags(flags); err != nil {
 		return nil, errors.Wrapf(err, "bad config bind")
 	}
 
 	// Copy from the request.
-	config.Set("encryption", ee.BuildEncFlag(req.EncryptionKeyFile))
+	config.Set("encryption", x.BuildEncFlag(req.EncryptionKeyFile))
 
 	vaultBuilder := new(strings.Builder)
 	if req.VaultRoleidFile != "" {

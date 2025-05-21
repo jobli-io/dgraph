@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package testaudit
 
 import (
@@ -8,16 +13,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
-	"github.com/dgraph-io/dgraph/v24/testutil"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
 	"github.com/stretchr/testify/require"
 )
 
 func VerifyLogs(t *testing.T, path string, cmds []string) {
+	// to make sure that the audit log is flushed
+	time.Sleep(time.Second * 5)
+
 	abs, err := filepath.Abs(path)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	f, err := os.Open(abs)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	type log struct {
 		Msg string `json:"endpoint"`
@@ -28,7 +37,7 @@ func VerifyLogs(t *testing.T, path string, cmds []string) {
 	for fileScanner.Scan() {
 		bytes := fileScanner.Bytes()
 		l := new(log)
-		_ = json.Unmarshal(bytes, l)
+		require.NoError(t, json.Unmarshal(bytes, l))
 		logMap[l.Msg] = true
 	}
 	for _, m := range cmds {
@@ -43,11 +52,11 @@ func TestGenerateAuditForTestDecrypt(t *testing.T) {
 	// to generate audit logs, uncomment and run ./t --test=TestGenerateAuditForTestDecrypt
 	t.Skip()
 	zeroCmd := map[string][]string{
-		"/removeNode": {`--location`, "--request", "GET",
+		"/removeNode": {`--location`, "--request", "GET", "--ipv4",
 			fmt.Sprintf("%s/removeNode?id=3&group=1", testutil.SockAddrZeroHttp)},
-		"/assign": {"--location", "--request", "GET",
+		"/assign": {"--location", "--request", "GET", "--ipv4",
 			fmt.Sprintf("%s/assign?what=uids&num=100", testutil.SockAddrZeroHttp)},
-		"/moveTablet": {"--location", "--request", "GET",
+		"/moveTablet": {"--location", "--request", "GET", "--ipv4",
 			fmt.Sprintf("%s/moveTablet?tablet=name&group=2", testutil.SockAddrZeroHttp)}}
 
 	for _, c := range zeroCmd {

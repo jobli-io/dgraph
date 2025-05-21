@@ -1,19 +1,6 @@
 /*
- * Copyright 2016-2024 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * Co-authored by: jairad26@gmail.com, sunil@hypermode.com, bill@hypdermode.com
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package hnsw
@@ -25,14 +12,14 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/dgraph-io/dgraph/v24/tok/index"
+	"github.com/hypermodeinc/dgraph/v25/tok/index"
 	"github.com/pkg/errors"
 )
 
 // holds an map in memory that is a string (which will be []bytes as string)
 // as the key, with an index.Val as the value
 type indexStorage struct {
-	inMemTestDb map[string]index.Value
+	inMemTestDb map[string][]byte
 
 	//Two locks allow for lock promotion when writing, so we promote a read lock
 	//between the start and finish times to a full lock on the finish time
@@ -50,7 +37,7 @@ var tsDbs [100]indexStorage
 
 func emptyTsDbs() {
 	for i := range tsDbs {
-		tsDbs[i] = indexStorage{inMemTestDb: make(map[string]index.Value)}
+		tsDbs[i] = indexStorage{inMemTestDb: make(map[string][]byte)}
 	}
 }
 
@@ -74,7 +61,7 @@ func newInMemList(key string, startTs, finishTs uint64) *inMemList {
 }
 
 // locks the posting list & invokes ValueWithLockHeld
-func (l *inMemList) Value(readTs uint64) (rval index.Value, rerr error) {
+func (l *inMemList) Value(readTs uint64) (rval []byte, rerr error) {
 	// reading should only lock the db at current instance in time
 	tsDbs[readTs].readMu.RLock()
 	defer tsDbs[readTs].readMu.RUnlock()
@@ -82,7 +69,7 @@ func (l *inMemList) Value(readTs uint64) (rval index.Value, rerr error) {
 }
 
 // reads value from the database at readTs corresponding to List's key
-func (l *inMemList) ValueWithLockHeld(readTs uint64) (rval index.Value, rerr error) {
+func (l *inMemList) ValueWithLockHeld(readTs uint64) (rval []byte, rerr error) {
 	val, ok := tsDbs[readTs].inMemTestDb[l.key]
 	if !ok {
 		return nil, errors.New("Could not find data with key " + l.key)
@@ -145,7 +132,7 @@ func (t *inMemTxn) Find(prefix []byte, filter func([]byte) bool) (uint64, error)
 	tsDbs[t.startTs].readMu.RLock()
 	defer tsDbs[t.startTs].readMu.RUnlock()
 	for _, b := range tsDbs[t.startTs].inMemTestDb {
-		if filter(b.([]byte)) {
+		if filter(b) {
 			return 1, nil
 		}
 	}
@@ -157,14 +144,14 @@ func (t *inMemTxn) StartTs() uint64 {
 }
 
 // locks the txn and invokes GetWithLockHeld
-func (t *inMemTxn) Get(key []byte) (rval index.Value, rerr error) {
+func (t *inMemTxn) Get(key []byte) (rval []byte, rerr error) {
 	tsDbs[t.startTs].readMu.RLock()
 	defer tsDbs[t.startTs].readMu.RUnlock()
 	return t.GetWithLockHeld(key)
 }
 
 // reads value from the database at txn's startTs
-func (t *inMemTxn) GetWithLockHeld(key []byte) (rval index.Value, rerr error) {
+func (t *inMemTxn) GetWithLockHeld(key []byte) (rval []byte, rerr error) {
 	val, ok := tsDbs[t.startTs].inMemTestDb[string(key[:])]
 	if !ok {
 		return nil, errors.New("Could not find data with key " + string(key[:]))
@@ -219,7 +206,7 @@ type inMemLocalCache struct {
 }
 
 // locks the local cache and invokes GetWithLockHeld
-func (c *inMemLocalCache) Get(key []byte) (rval index.Value, rerr error) {
+func (c *inMemLocalCache) Get(key []byte) (rval []byte, rerr error) {
 	tsDbs[c.readTs].readMu.RLock()
 	defer tsDbs[c.readTs].readMu.RUnlock()
 	return c.GetWithLockHeld(key)
@@ -229,7 +216,7 @@ func (c *inMemLocalCache) Find(prefix []byte, filter func([]byte) bool) (uint64,
 	tsDbs[c.readTs].readMu.RLock()
 	defer tsDbs[c.readTs].readMu.RUnlock()
 	for _, b := range tsDbs[c.readTs].inMemTestDb {
-		if filter(b.([]byte)) {
+		if filter(b) {
 			return 1, nil
 		}
 	}
@@ -237,7 +224,7 @@ func (c *inMemLocalCache) Find(prefix []byte, filter func([]byte) bool) (uint64,
 }
 
 // reads value from the database at c's readTs
-func (c *inMemLocalCache) GetWithLockHeld(key []byte) (rval index.Value, rerr error) {
+func (c *inMemLocalCache) GetWithLockHeld(key []byte) (rval []byte, rerr error) {
 	val, ok := tsDbs[c.readTs].inMemTestDb[string(key[:])]
 	if !ok {
 		return nil, errors.New("Could not find data with key " + string(key[:]))

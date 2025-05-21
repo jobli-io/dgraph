@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -27,14 +16,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/graphql/e2e/common"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/graphql/e2e/common"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func setup(t *testing.T) {
-	dc := testutil.DgClientWithLogin(t, "groot", "password", x.GalaxyNamespace)
+	dc := testutil.DgClientWithLogin(t, "groot", "password", x.RootNamespace)
 	require.NoError(t, dc.Alter(context.Background(), &api.Operation{DropAll: true}))
 }
 
@@ -50,7 +39,7 @@ func getHttpToken(t *testing.T, user, password string, ns uint64) *testutil.Http
 		Groups: []string{"guardians"},
 		Ns:     ns,
 		Exp:    time.Hour,
-		Secret: readFile(t, "../../ee/acl/hmac-secret"),
+		Secret: readFile(t, "../../acl/hmac-secret"),
 	})
 
 	return &testutil.HttpToken{
@@ -74,7 +63,7 @@ func graphqlHelper(t *testing.T, query string, headers http.Header,
 func TestDisallowNonGalaxy(t *testing.T) {
 	setup(t)
 
-	galaxyToken := getHttpToken(t, "groot", "password", x.GalaxyNamespace)
+	galaxyToken := getHttpToken(t, "groot", "password", x.RootNamespace)
 	// Create a new namespace
 	ns, err := testutil.CreateNamespaceWithRetry(t, galaxyToken)
 	require.NoError(t, err)
@@ -134,12 +123,12 @@ func TestDisallowNonGalaxy(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "operation is not allowed in shared cloud mode")
 
-	// Ns guardian should not be able to create user.
+	// Ns superadmin should not be able to create user.
 	resp := testutil.CreateUser(t, nsToken, "alice", "newpassword")
 	require.Greater(t, len(resp.Errors), 0)
 	require.Contains(t, resp.Errors.Error(), "unauthorized to mutate acl predicates")
 
-	// Galaxy guardian should be able to create user.
+	// root superadmin should be able to create user.
 	resp = testutil.CreateUser(t, galaxyToken, "alice", "newpassword")
 	require.Equal(t, 0, len(resp.Errors))
 }
@@ -147,7 +136,7 @@ func TestDisallowNonGalaxy(t *testing.T) {
 func TestEnvironmentAccess(t *testing.T) {
 	setup(t)
 
-	galaxyToken := getHttpToken(t, "groot", "password", x.GalaxyNamespace)
+	galaxyToken := getHttpToken(t, "groot", "password", x.RootNamespace)
 	// Create a new namespace
 	ns, err := testutil.CreateNamespaceWithRetry(t, galaxyToken)
 	require.NoError(t, err)

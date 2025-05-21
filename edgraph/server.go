@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package edgraph
@@ -35,29 +24,31 @@ import (
 	"github.com/pkg/errors"
 	ostats "go.opencensus.io/stats"
 	"go.opencensus.io/tag"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/chunker"
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/dql"
-	gqlSchema "github.com/dgraph-io/dgraph/v24/graphql/schema"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/query"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/telemetry"
-	"github.com/dgraph-io/dgraph/v24/tok"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/types/facets"
-	"github.com/dgraph-io/dgraph/v24/worker"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	apiv25 "github.com/dgraph-io/dgo/v250/protos/api.v25"
+	"github.com/hypermodeinc/dgraph/v25/chunker"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/dql"
+	gqlSchema "github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/query"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/tok"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/types/facets"
+	"github.com/hypermodeinc/dgraph/v25/worker"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -115,37 +106,6 @@ type graphQLSchemaNode struct {
 
 type existingGQLSchemaQryResp struct {
 	ExistingGQLSchema []graphQLSchemaNode `json:"ExistingGQLSchema"`
-}
-
-// PeriodicallyPostTelemetry periodically reports telemetry data for alpha.
-func PeriodicallyPostTelemetry() {
-	glog.V(2).Infof("Starting telemetry data collection for alpha...")
-
-	start := time.Now()
-	ticker := time.NewTicker(time.Minute * 10)
-	defer ticker.Stop()
-
-	var lastPostedAt time.Time
-	for range ticker.C {
-		if time.Since(lastPostedAt) < time.Hour {
-			continue
-		}
-		ms := worker.GetMembershipState()
-		t := telemetry.NewAlpha(ms)
-		t.NumDQL = atomic.SwapUint64(&numDQL, 0)
-		t.NumGraphQL = atomic.SwapUint64(&numGraphQL, 0)
-		t.SinceHours = int(time.Since(start).Hours())
-		glog.V(2).Infof("Posting Telemetry data: %+v", t)
-
-		err := t.Post()
-		if err == nil {
-			lastPostedAt = time.Now()
-		} else {
-			atomic.AddUint64(&numDQL, t.NumDQL)
-			atomic.AddUint64(&numGraphQL, t.NumGraphQL)
-			glog.V(2).Infof("Telemetry couldn't be posted. Error: %v", err)
-		}
-	}
 }
 
 // GetGQLSchema queries for the GraphQL schema node, and returns the uid and the GraphQL schema.
@@ -208,7 +168,7 @@ func UpdateGQLSchema(ctx context.Context, gqlSchema,
 	parsedDgraphSchema := &schema.ParsedSchema{}
 
 	if !x.WorkerConfig.AclEnabled {
-		ctx = x.AttachNamespace(ctx, x.GalaxyNamespace)
+		ctx = x.AttachNamespace(ctx, x.RootNamespace)
 	}
 	// The schema could be empty if it only has custom types/queries/mutations.
 	if dgraphSchema != "" {
@@ -216,7 +176,7 @@ func UpdateGQLSchema(ctx context.Context, gqlSchema,
 		if err = validateAlterOperation(ctx, op); err != nil {
 			return nil, err
 		}
-		if parsedDgraphSchema, err = parseSchemaFromAlterOperation(ctx, op); err != nil {
+		if parsedDgraphSchema, err = parseSchemaFromAlterOperation(ctx, op.Schema); err != nil {
 			return nil, err
 		}
 	}
@@ -264,7 +224,7 @@ func validateAlterOperation(ctx context.Context, op *api.Operation) error {
 
 // parseSchemaFromAlterOperation parses the string schema given in input operation to a Go
 // struct, and performs some checks to make sure that the schema is valid.
-func parseSchemaFromAlterOperation(ctx context.Context, op *api.Operation) (
+func parseSchemaFromAlterOperation(ctx context.Context, sch string) (
 	*schema.ParsedSchema, error) {
 
 	// If a background task is already running, we should reject all the new alter requests.
@@ -277,13 +237,13 @@ func parseSchemaFromAlterOperation(ctx context.Context, op *api.Operation) (
 		return nil, errors.Wrapf(err, "While parsing schema")
 	}
 
-	if x.IsGalaxyOperation(ctx) {
+	if x.IsRootNsOperation(ctx) {
 		// Only the guardian of the galaxy can do a galaxy wide query/mutation. This operation is
 		// needed by live loader.
-		if err := AuthGuardianOfTheGalaxy(ctx); err != nil {
+		if err := AuthSuperAdmin(ctx); err != nil {
 			s := status.Convert(err)
 			return nil, status.Error(s.Code(),
-				"Non guardian of galaxy user cannot bypass namespaces. "+s.Message())
+				"Non superadmin user cannot bypass namespaces. "+s.Message())
 		}
 		var err error
 		namespace, err = strconv.ParseUint(x.GetForceNamespace(ctx), 0, 64)
@@ -292,7 +252,7 @@ func parseSchemaFromAlterOperation(ctx context.Context, op *api.Operation) (
 		}
 	}
 
-	result, err := schema.ParseWithNamespace(op.Schema, namespace)
+	result, err := schema.ParseWithNamespace(sch, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -376,11 +336,11 @@ func InsertDropRecord(ctx context.Context, dropOp string) error {
 
 // Alter handles requests to change the schema or remove parts or all of the data.
 func (s *Server) Alter(ctx context.Context, op *api.Operation) (*api.Payload, error) {
-	ctx, span := otrace.StartSpan(ctx, "Server.Alter")
+	ctx, span := otel.Tracer("").Start(ctx, "Server.Alter")
 	defer span.End()
 
 	ctx = x.AttachJWTNamespace(ctx)
-	span.Annotatef(nil, "Alter operation: %+v", op)
+	span.AddEvent("Alter operation", trace.WithAttributes(attribute.String("op", op.String())))
 
 	// Always print out Alter operations because they are important and rare.
 	glog.Infof("Received ALTER op: %+v", op)
@@ -406,7 +366,7 @@ func (s *Server) Alter(ctx context.Context, op *api.Operation) (*api.Payload, er
 			glog.V(2).Info("Blocked drop-all because it is not permitted.")
 			return empty, errors.New("Drop all operation is not permitted.")
 		}
-		if err := AuthGuardianOfTheGalaxy(ctx); err != nil {
+		if err := AuthSuperAdmin(ctx); err != nil {
 			s := status.Convert(err)
 			return empty, status.Error(s.Code(),
 				"Drop all can only be called by the guardian of the galaxy. "+s.Message())
@@ -524,7 +484,7 @@ func (s *Server) Alter(ctx context.Context, op *api.Operation) (*api.Payload, er
 		_, err := query.ApplyMutations(ctx, m)
 		return empty, err
 	}
-	result, err := parseSchemaFromAlterOperation(ctx, op)
+	result, err := parseSchemaFromAlterOperation(ctx, op.Schema)
 	if err == errIndexingInProgress {
 		// Make the client wait a bit.
 		time.Sleep(time.Second)
@@ -550,16 +510,15 @@ func (s *Server) Alter(ctx context.Context, op *api.Operation) (*api.Payload, er
 	return empty, nil
 }
 
-func annotateNamespace(span *otrace.Span, ns uint64) {
-	span.AddAttributes(otrace.Int64Attribute("ns", int64(ns)))
+func annotateNamespace(span trace.Span, ns uint64) {
+	span.SetAttributes(attribute.String("ns", fmt.Sprintf("%d", ns)))
 }
 
-func annotateStartTs(span *otrace.Span, ts uint64) {
-	span.AddAttributes(otrace.Int64Attribute("startTs", int64(ts)))
+func annotateStartTs(span trace.Span, ts uint64) {
+	span.SetAttributes(attribute.String("startTs", fmt.Sprintf("%d", ts)))
 }
 
 func (s *Server) doMutate(ctx context.Context, qc *queryContext, resp *api.Response) error {
-
 	if len(qc.gmuList) == 0 {
 		return nil
 	}
@@ -632,9 +591,15 @@ func (s *Server) doMutate(ctx context.Context, qc *queryContext, resp *api.Respo
 		return err
 	}
 
-	qc.span.Annotatef(nil, "Applying mutations: %+v", m)
+	qc.span.AddEvent("Applying mutations",
+		trace.WithAttributes(attribute.String("m", fmt.Sprintf("%+v", m))))
 	resp.Txn, err = query.ApplyMutations(ctx, m)
-	qc.span.Annotatef(nil, "Txn Context: %+v. Err=%v", resp.Txn, err)
+	qc.span.AddEvent("Txn Context",
+		trace.WithAttributes(attribute.String("txn", fmt.Sprintf("%+v", resp.Txn))))
+	if err != nil {
+		qc.span.AddEvent("Error",
+			trace.WithAttributes(attribute.String("err", err.Error())))
+	}
 
 	// calculateMutationMetrics calculate cost for the mutation.
 	calculateMutationMetrics := func() {
@@ -671,14 +636,15 @@ func (s *Server) doMutate(ctx context.Context, qc *queryContext, resp *api.Respo
 		return err
 	}
 
-	qc.span.Annotatef(nil, "Prewrites err: %v. Attempting to commit/abort immediately.", err)
 	ctxn := resp.Txn
 	// zero would assign the CommitTs
 	cts, err := worker.CommitOverNetwork(ctx, ctxn)
-	qc.span.Annotatef(nil, "Status of commit at ts: %d: %v", ctxn.StartTs, err)
 	if err != nil {
+		qc.span.AddEvent("Status of commit at ts",
+			trace.WithAttributes(attribute.String("err", err.Error())))
+
 		if err == dgo.ErrAborted {
-			err = status.Errorf(codes.Aborted, err.Error())
+			err = status.Error(codes.Aborted, err.Error())
 			resp.Txn.Aborted = true
 		}
 
@@ -1064,7 +1030,7 @@ type queryContext struct {
 	// l stores latency numbers
 	latency *query.Latency
 	// span stores a opencensus span used throughout the query processing
-	span *otrace.Span
+	span trace.Span
 	// graphql indicates whether the given request is from graphql admin or not.
 	graphql bool
 	// gqlField stores the GraphQL field for which the query is being processed.
@@ -1124,7 +1090,7 @@ func (s *Server) Health(ctx context.Context, all bool) (*api.Response, error) {
 		LastEcho:    time.Now().Unix(),
 		Ongoing:     worker.GetOngoingTasks(),
 		Indexing:    schema.GetIndexingPredicates(),
-		EeFeatures:  worker.GetEEFeaturesList(),
+		EeFeatures:  worker.GetFeaturesList(),
 		MaxAssigned: posting.Oracle().MaxAssigned(),
 	})
 
@@ -1145,7 +1111,7 @@ func filterTablets(ctx context.Context, ms *pb.MembershipState) error {
 	if err != nil {
 		return errors.Errorf("Namespace not found in JWT.")
 	}
-	if namespace == x.GalaxyNamespace {
+	if namespace == x.RootNamespace {
 		// For galaxy namespace, we don't want to filter out the predicates.
 		return nil
 	}
@@ -1282,11 +1248,10 @@ func (s *Server) doQuery(ctx context.Context, req *Request) (resp *api.Response,
 	l := &query.Latency{}
 	l.Start = time.Now()
 
-	// TODO: Following trace messages have been commented out as stringified trace messages allocate
-	// too much memory. These trace messages need to be generated if tracing is enabled.
-	// if bool(glog.V(3)) || worker.LogDQLRequestEnabled() {
-	// 	glog.Infof("Got a query, DQL form: %+v at %+v", req.req, l.Start.Format(time.RFC3339))
-	// }
+	if bool(glog.V(3)) || worker.LogDQLRequestEnabled() {
+		glog.Infof("Got a query, DQL form: %+v %+v at %+v",
+			req.req.Query, req.req.Mutations, l.Start.Format(time.RFC3339))
+	}
 
 	isMutation := len(req.req.Mutations) > 0
 	methodRequest := methodQuery
@@ -1295,7 +1260,7 @@ func (s *Server) doQuery(ctx context.Context, req *Request) (resp *api.Response,
 	}
 
 	var measurements []ostats.Measurement
-	ctx, span := otrace.StartSpan(ctx, methodRequest)
+	ctx, span := otel.Tracer("").Start(ctx, methodRequest)
 	if ns, err := x.ExtractNamespace(ctx); err == nil {
 		annotateNamespace(span, ns)
 	}
@@ -1320,12 +1285,12 @@ func (s *Server) doQuery(ctx context.Context, req *Request) (resp *api.Response,
 	req.req.Query = strings.TrimSpace(req.req.Query)
 	isQuery := len(req.req.Query) != 0
 	if !isQuery && !isMutation {
-		span.Annotate(nil, "empty request")
+		span.AddEvent("empty request")
 		return nil, errors.Errorf("empty request")
 	}
 
-	span.AddAttributes(otrace.StringAttribute("Query", req.req.Query))
-	span.Annotatef(nil, "Request received: %v", req.req)
+	span.AddEvent("Request received",
+		trace.WithAttributes(attribute.String("Query", req.req.Query)))
 	if isQuery {
 		ostats.Record(ctx, x.PendingQueries.M(1), x.NumQueries.M(1))
 		defer func() {
@@ -1336,13 +1301,13 @@ func (s *Server) doQuery(ctx context.Context, req *Request) (resp *api.Response,
 		ostats.Record(ctx, x.NumMutations.M(1))
 	}
 
-	if req.doAuth == NeedAuthorize && x.IsGalaxyOperation(ctx) {
+	if req.doAuth == NeedAuthorize && x.IsRootNsOperation(ctx) {
 		// Only the guardian of the galaxy can do a galaxy wide query/mutation. This operation is
 		// needed by live loader.
-		if err := AuthGuardianOfTheGalaxy(ctx); err != nil {
+		if err := AuthSuperAdmin(ctx); err != nil {
 			s := status.Convert(err)
 			return nil, status.Error(s.Code(),
-				"Non guardian of galaxy user cannot bypass namespaces. "+s.Message())
+				"Non superadmin user cannot bypass namespaces. "+s.Message())
 		}
 	}
 
@@ -1442,11 +1407,11 @@ func processQuery(ctx context.Context, qc *queryContext) (*api.Response, error) 
 	// If we haven't processed any updates yet then fall back to getting TS from Zero.
 	switch {
 	case qc.req.BestEffort:
-		qc.span.Annotate([]otrace.Attribute{otrace.BoolAttribute("be", true)}, "")
+		qc.span.AddEvent("", trace.WithAttributes(attribute.Bool("be", true)))
 	case qc.req.ReadOnly:
-		qc.span.Annotate([]otrace.Attribute{otrace.BoolAttribute("ro", true)}, "")
+		qc.span.AddEvent("", trace.WithAttributes(attribute.Bool("ro", true)))
 	default:
-		qc.span.Annotate([]otrace.Attribute{otrace.BoolAttribute("no", true)}, "")
+		qc.span.AddEvent("", trace.WithAttributes(attribute.Bool("no", true)))
 	}
 
 	if qc.req.BestEffort {
@@ -1513,7 +1478,8 @@ func processQuery(ctx context.Context, qc *queryContext) (*api.Response, error) 
 	if err != nil && (qc.gqlField == nil || !x.IsGqlErrorList(err)) {
 		return resp, err
 	}
-	qc.span.Annotatef(nil, "Response = %s", resp.Json)
+	qc.span.AddEvent("Response",
+		trace.WithAttributes(attribute.String("response", string(resp.Json))))
 
 	// varToUID contains a map of variable name to the uids corresponding to it.
 	// It is used later for constructing set and delete mutations by replacing
@@ -1720,7 +1686,7 @@ func addQueryIfUnique(qctx context.Context, qc *queryContext) error {
 		glog.Errorf("Error while extracting namespace, assuming default %s", err)
 		namespace = 0
 	}
-	isGalaxyQuery := x.IsGalaxyOperation(ctx)
+	isGalaxyQuery := x.IsRootNsOperation(ctx)
 
 	qc.uniqueVars = map[uint64]uniquePredMeta{}
 	for gmuIndex, gmu := range qc.gmuList {
@@ -1844,9 +1810,36 @@ func validateNamespace(ctx context.Context, tc *api.TxnContext) error {
 	return nil
 }
 
+func (s *ServerV25) InitiatePDirStream(ctx context.Context,
+	c *apiv25.InitiatePDirStreamRequest) (v *apiv25.InitiatePDirStreamResponse, err error) {
+
+	drainMode := &pb.DrainModeRequest{State: true}
+	groups, err := worker.ProposeDrain(ctx, drainMode)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &apiv25.InitiatePDirStreamResponse{Groups: groups}
+
+	return resp, nil
+}
+
+func (s *ServerV25) StreamPDir(stream apiv25.Dgraph_StreamPDirServer) error {
+	if err := worker.InStream(stream); err != nil {
+		return err
+	}
+
+	drainMode := &pb.DrainModeRequest{State: false}
+	if _, err := worker.ProposeDrain(stream.Context(), drainMode); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // CommitOrAbort commits or aborts a transaction.
 func (s *Server) CommitOrAbort(ctx context.Context, tc *api.TxnContext) (*api.TxnContext, error) {
-	ctx, span := otrace.StartSpan(ctx, "Server.CommitOrAbort")
+	ctx, span := otel.Tracer("").Start(ctx, "Server.CommitOrAbort")
 	defer span.End()
 
 	if err := x.HealthCheck(); err != nil {
@@ -1867,7 +1860,7 @@ func (s *Server) CommitOrAbort(ctx context.Context, tc *api.TxnContext) (*api.Tx
 		return &api.TxnContext{}, err
 	}
 
-	span.Annotatef(nil, "Txn Context received: %+v", tc)
+	span.AddEvent("Txn Context received", trace.WithAttributes(attribute.Stringer("txn", tc)))
 	commitTs, err := worker.CommitOverNetwork(ctx, tc)
 	if err == dgo.ErrAborted {
 		// If err returned is dgo.ErrAborted and tc.Aborted was set, that means the client has
@@ -1877,7 +1870,7 @@ func (s *Server) CommitOrAbort(ctx context.Context, tc *api.TxnContext) (*api.Tx
 			return tctx, nil
 		}
 
-		return tctx, status.Errorf(codes.Aborted, err.Error())
+		return tctx, status.Error(codes.Aborted, err.Error())
 	}
 	tctx.StartTs = tc.StartTs
 	tctx.CommitTs = commitTs
@@ -2017,10 +2010,10 @@ func validateAndConvertFacets(nquads []*api.NQuad) error {
 	return nil
 }
 
-// validateForGraphql validate nquads for graphql
-func validateForGraphql(nq *api.NQuad, isGraphql bool) error {
-	// Check whether the incoming predicate is graphql reserved predicate or not.
-	if !isGraphql && x.IsGraphqlReservedPredicate(nq.Predicate) {
+// validateForOtherReserved validate nquads for other reserved predicates
+func validateForOtherReserved(nq *api.NQuad, isGraphql bool) error {
+	// Check whether the incoming predicate is other reserved predicate.
+	if !isGraphql && x.IsOtherReservedPredicate(nq.Predicate) {
 		return errors.Errorf("Cannot mutate graphql reserved predicate %s", nq.Predicate)
 	}
 	return nil
@@ -2041,7 +2034,7 @@ func validateNQuads(set, del []*api.NQuad, isGraphql bool) error {
 		if err := validateKeys(nq); err != nil {
 			return errors.Wrapf(err, "key error: %+v", nq)
 		}
-		if err := validateForGraphql(nq, isGraphql); err != nil {
+		if err := validateForOtherReserved(nq, isGraphql); err != nil {
 			return err
 		}
 	}
@@ -2056,7 +2049,7 @@ func validateNQuads(set, del []*api.NQuad, isGraphql bool) error {
 		if nq.Subject == x.Star || (nq.Predicate == x.Star && !ostar) {
 			return errors.Errorf("Only valid wildcard delete patterns are 'S * *' and 'S P *': %v", nq)
 		}
-		if err := validateForGraphql(nq, isGraphql); err != nil {
+		if err := validateForOtherReserved(nq, isGraphql); err != nil {
 			return err
 		}
 		// NOTE: we dont validateKeys() with delete to let users fix existing mistakes

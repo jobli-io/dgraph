@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package x
@@ -30,9 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"contrib.go.opencensus.io/exporter/jaeger"
 	oc_prom "contrib.go.opencensus.io/exporter/prometheus"
-	datadog "github.com/DataDog/opencensus-go-exporter-datadog"
 	"github.com/dustin/go-humanize"
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
@@ -41,7 +28,12 @@ import (
 	ostats "go.opencensus.io/stats"
 	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
-	"go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
+	traceTel "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/ristretto/v2/z"
@@ -70,6 +62,9 @@ var (
 		"Total number of backups failed", ostats.UnitDimensionless)
 	// LatencyMs is the latency of the various Dgraph operations.
 	LatencyMs = ostats.Float64("latency",
+		"Latency of the various methods", ostats.UnitMilliseconds)
+	// BadgerReadLatencyMs is the latency of various different predicate reads from badger.
+	BadgerReadLatencyMs = ostats.Float64("badger_read_latency_ms",
 		"Latency of the various methods", ostats.UnitMilliseconds)
 
 	// Point-in-time metrics.
@@ -147,6 +142,12 @@ var (
 	// RaftLeaderChanges records the total number of leader changes seen.
 	RaftLeaderChanges = ostats.Int64("raft_leader_changes_total",
 		"Total number of leader changes seen", ostats.UnitDimensionless)
+	NumPostingListCacheRead = ostats.Int64("num_posting_list_cache_reads",
+		"Number of times cache was read", ostats.UnitDimensionless)
+	NumPostingListCacheReadFail = ostats.Int64("num_posting_list_cache_reads_fail",
+		"Number of times cache was read", ostats.UnitDimensionless)
+	NumPostingListCacheSave = ostats.Int64("num_posting_list_cache_saves",
+		"Number of times item was saved in cache", ostats.UnitDimensionless)
 
 	// Conf holds the metrics config.
 	// TODO: Request statistics, latencies, 500, timeouts
@@ -196,9 +197,37 @@ var (
 			TagKeys:     allTagKeys,
 		},
 		{
+			Name:        BadgerReadLatencyMs.Name(),
+			Measure:     BadgerReadLatencyMs,
+			Description: BadgerReadLatencyMs.Description(),
+			Aggregation: defaultLatencyMsDistribution,
+			TagKeys:     allTagKeys,
+		},
+		{
 			Name:        NumQueries.Name(),
 			Measure:     NumQueries,
 			Description: NumQueries.Description(),
+			Aggregation: view.Count(),
+			TagKeys:     allTagKeys,
+		},
+		{
+			Name:        NumPostingListCacheRead.Name(),
+			Measure:     NumPostingListCacheRead,
+			Description: NumPostingListCacheRead.Description(),
+			Aggregation: view.Count(),
+			TagKeys:     allTagKeys,
+		},
+		{
+			Name:        NumPostingListCacheReadFail.Name(),
+			Measure:     NumPostingListCacheReadFail,
+			Description: NumPostingListCacheReadFail.Description(),
+			Aggregation: view.Count(),
+			TagKeys:     allTagKeys,
+		},
+		{
+			Name:        NumPostingListCacheSave.Name(),
+			Measure:     NumPostingListCacheSave,
+			Description: NumPostingListCacheSave.Description(),
 			Aggregation: view.Count(),
 			TagKeys:     allTagKeys,
 		},
@@ -580,34 +609,78 @@ func SinceMs(startTime time.Time) float64 {
 func RegisterExporters(conf *viper.Viper, service string) {
 	if traceFlag := conf.GetString("trace"); len(traceFlag) > 0 {
 		t := z.NewSuperFlag(traceFlag).MergeAndCheckDefault(TraceDefaults)
+		// Create resource with service information
+		res := resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceNameKey.String(service),
+		)
+
+		// Configure the batch span processor options
+		batchOpts := []traceTel.BatchSpanProcessorOption{
+			traceTel.WithMaxExportBatchSize(traceTel.DefaultMaxExportBatchSize),
+			traceTel.WithBatchTimeout(traceTel.DefaultScheduleDelay * time.Millisecond),
+		}
+
+		traceSampler := traceTel.AlwaysSample()
+		if ratio := t.GetString("ratio"); len(ratio) > 0 {
+			f, err := strconv.ParseFloat(ratio, 64)
+			if err != nil {
+				log.Fatalf("Trace sampler ratio not a float: %s", ratio)
+			}
+			traceSampler = traceTel.TraceIDRatioBased(f)
+		}
+
+		// Set up Jaeger exporter if configured
 		if collector := t.GetString("jaeger"); len(collector) > 0 {
-			// Port details: https://www.jaegertracing.io/docs/getting-started/
-			// Default collectorEndpointURI := "http://localhost:14268"
-			je, err := jaeger.NewExporter(jaeger.Options{
-				Endpoint:    collector,
-				ServiceName: service,
-			})
+			// Create Jaeger exporter using OpenTelemetry OTLP
+			jaegerExp, err := otlptrace.New(
+				context.Background(),
+				otlptracehttp.NewClient(
+					otlptracehttp.WithEndpoint(collector),
+					otlptracehttp.WithInsecure(),
+				),
+			)
 			if err != nil {
 				log.Fatalf("Failed to create the Jaeger exporter: %v", err)
 			}
-			// And now finally register it as a Trace Exporter
-			trace.RegisterExporter(je)
+
+			// Create trace provider with Jaeger exporter
+			tp := traceTel.NewTracerProvider(
+				traceTel.WithBatcher(jaegerExp, batchOpts...),
+				traceTel.WithResource(res),
+				traceTel.WithSampler(traceSampler),
+			)
+
+			// Set the trace provider
+			otel.SetTracerProvider(tp)
+			glog.Infof("Registered Jaeger exporter for tracing")
 		}
+
+		// Set up OTLP exporter for Datadog if configured
+		// Note: In OpenTelemetry, typically Datadog integration uses the OTLP exporter
 		if collector := t.GetString("datadog"); len(collector) > 0 {
-			exporter, err := datadog.NewExporter(datadog.Options{
-				Service:   service,
-				TraceAddr: collector,
-			})
+			// Create OTLP exporter for Datadog
+			ddExporter, err := otlptrace.New(
+				context.Background(),
+				otlptracehttp.NewClient(
+					otlptracehttp.WithEndpoint(collector),
+					otlptracehttp.WithInsecure(),
+				),
+			)
 			if err != nil {
-				log.Fatal(err)
+				log.Fatalf("Failed to create OTLP exporter for Datadog: %v", err)
 			}
 
-			trace.RegisterExporter(exporter)
+			// Create trace provider with Datadog exporter
+			tp := traceTel.NewTracerProvider(
+				traceTel.WithBatcher(ddExporter, batchOpts...),
+				traceTel.WithResource(res),
+				traceTel.WithSampler(traceTel.AlwaysSample()),
+			)
 
-			// For demoing purposes, always sample.
-			trace.ApplyConfig(trace.Config{
-				DefaultSampler: trace.AlwaysSample(),
-			})
+			// Set the trace provider
+			otel.SetTracerProvider(tp)
+			glog.Infof("Registered Datadog exporter for tracing")
 		}
 	}
 

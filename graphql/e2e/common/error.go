@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package common
@@ -32,15 +21,15 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/peer"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	admin2 "github.com/dgraph-io/dgraph/v24/graphql/admin"
-	"github.com/dgraph-io/dgraph/v24/graphql/resolve"
-	"github.com/dgraph-io/dgraph/v24/graphql/schema"
-	"github.com/dgraph-io/dgraph/v24/graphql/test"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	admin2 "github.com/hypermodeinc/dgraph/v25/graphql/admin"
+	"github.com/hypermodeinc/dgraph/v25/graphql/resolve"
+	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/graphql/test"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -62,7 +51,7 @@ func graphQLCompletionOn(t *testing.T) {
 	// The schema states type Country `{ ... name: String! ... }`
 	// so a query error will be raised if we ask for the country's name in a
 	// query.  Don't think a GraphQL update can do this ATM, so do through Dgraph.
-	d, err := grpc.Dial(Alpha1gRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	d, err := grpc.NewClient(Alpha1gRPC, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 	client := dgo.NewDgraphClient(api.NewDgraphClient(d))
 	mu := &api.Mutation{
@@ -291,7 +280,7 @@ func panicCatcher(t *testing.T) {
 	schemaEpoch := uint64(0)
 	resolvers := resolve.New(gqlSchema, resolverFactory)
 	server := admin2.NewServer()
-	server.Set(x.GalaxyNamespace, &schemaEpoch, resolvers)
+	server.Set(x.RootNamespace, &schemaEpoch, resolvers)
 
 	ts := httptest.NewServer(server.HTTPHandler())
 	defer ts.Close()
@@ -353,7 +342,7 @@ func clientInfoLogin(t *testing.T) {
 	schemaEpoch := uint64(0)
 	resolvers := resolve.New(gqlSchema, resolverFactory)
 	server := admin2.NewServer()
-	server.Set(x.GalaxyNamespace, &schemaEpoch, resolvers)
+	server.Set(x.RootNamespace, &schemaEpoch, resolvers)
 
 	ts := httptest.NewServer(server.HTTPHandler())
 	defer ts.Close()

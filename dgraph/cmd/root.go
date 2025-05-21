@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package cmd
@@ -32,21 +21,25 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	checkupgrade "github.com/dgraph-io/dgraph/v24/check_upgrade"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/alpha"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/bulk"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/cert"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/conv"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/debug"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/debuginfo"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/decrypt"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/increment"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/live"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/migrate"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/version"
-	"github.com/dgraph-io/dgraph/v24/dgraph/cmd/zero"
-	"github.com/dgraph-io/dgraph/v24/upgrade"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/acl"
+	"github.com/hypermodeinc/dgraph/v25/audit"
+	"github.com/hypermodeinc/dgraph/v25/backup"
+	checkupgrade "github.com/hypermodeinc/dgraph/v25/check_upgrade"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/alpha"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/bulk"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/cert"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/conv"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/debug"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/debuginfo"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/decrypt"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/increment"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/live"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/mcp"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/migrate"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/version"
+	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/zero"
+	"github.com/hypermodeinc/dgraph/v25/upgrade"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // RootCmd represents the base command when called without any subcommands
@@ -85,7 +78,8 @@ var rootConf = viper.New()
 var subcommands = []*x.SubCommand{
 	&bulk.Bulk, &cert.Cert, &conv.Conv, &live.Live, &alpha.Alpha, &zero.Zero, &version.Version,
 	&debug.Debug, &migrate.Migrate, &debuginfo.DebugInfo, &upgrade.Upgrade, &decrypt.Decrypt, &increment.Increment,
-	&checkupgrade.CheckUpgrade,
+	&checkupgrade.CheckUpgrade, &backup.Restore, &backup.LsBackup, &backup.ExportBackup, &acl.CmdAcl,
+	&audit.CmdAudit, &mcp.Mcp,
 }
 
 func initCmds() {

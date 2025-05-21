@@ -1,17 +1,6 @@
 /*
- * Copyright (C) 2017 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 // Style guide for Protocol Buffer 3.
@@ -23,7 +12,8 @@ syntax = "proto3";
 
 package pb;
 
-import "github.com/dgraph-io/dgo/v240/protos/api.proto";
+import "github.com/dgraph-io/dgo/v250/protos/api.proto";
+import "github.com/dgraph-io/dgo/v250/protos/api.v25.proto";
 import "github.com/dgraph-io/badger/v4/pb/pb.proto";
 import "google/protobuf/descriptor.proto";
 
@@ -143,13 +133,6 @@ message Group {
   uint64 checkpoint_ts = 5;         // Stores checkpoint ts as seen by leader.
 }
 
-message License {
-  string user = 1;
-  uint64 maxNodes = 2;
-  int64 expiryTs = 3;
-  bool enabled = 4;
-}
-
 message ZeroProposal {
   reserved 8;                           // Was used for string key.
   map<uint32, uint64> snapshot_ts = 1;  // Group ID -> Snapshot Ts.
@@ -161,7 +144,7 @@ message ZeroProposal {
   uint64 maxRaftId = 6;
   api.TxnContext txn = 7;
   string cid = 9;  // Used as unique identifier for the cluster.
-  License license = 10;
+  reserved 10; // was used for license
   ZeroSnapshot snapshot = 11;  // Used to make Zeros take a snapshot.
   // 12 has already been used.
   DeleteNsRequest delete_ns = 13;  // Used to delete namespace.
@@ -181,7 +164,7 @@ message MembershipState {
   uint64 maxRaftId = 6;
   repeated Member removed = 7;
   string cid = 8;  // Used to uniquely identify the Dgraph cluster.
-  License license = 9;
+  reserved 9; // was used for License
   // 10 has already been used.
 }
 
@@ -247,6 +230,7 @@ message Mutations {
     ALL = 1;
     DATA = 2;
     TYPE = 3;
+    ALL_IN_NS = 4;
   }
   DropOp drop_op = 7;
   string drop_value = 8;
@@ -335,6 +319,7 @@ message Proposal {
   DeleteNsRequest delete_ns = 14;  // Used to delete namespace.
   // Skipping 15 as it is used for uint64 key in master and might be needed later here.
   uint64 start_ts = 16;
+  DrainModeRequest drainmode = 17;
 }
 
 message CDCState {
@@ -592,7 +577,6 @@ service Zero {
   rpc DeleteNamespace(DeleteNsRequest) returns (Status) {}
   rpc RemoveNode(RemoveNodeRequest) returns (Status) {}
   rpc MoveTablet(MoveTabletRequest) returns (Status) {}
-  rpc ApplyLicense(ApplyLicenseRequest) returns (Status) {}
 }
 
 service Worker {
@@ -612,6 +596,12 @@ service Worker {
       returns (UpdateGraphQLSchemaResponse) {}
   rpc DeleteNamespace(DeleteNsRequest) returns (Status) {}
   rpc TaskStatus(TaskStatusRequest) returns (TaskStatusResponse) {}
+  rpc ApplyDrainmode(DrainModeRequest) returns (Status) {}
+  rpc InternalStreamPDir(stream api.v25.StreamPDirRequest) returns (api.v25.StreamPDirResponse) {}
+}
+
+message DrainModeRequest {
+  bool state = 1;
 }
 
 message TabletResponse {
@@ -663,10 +653,6 @@ message MoveTabletRequest {
   uint64 namespace = 1;
   string tablet = 2;
   uint32 dstGroup = 3;
-}
-
-message ApplyLicenseRequest {
-  bytes license = 1;
 }
 
 message SnapshotMeta {

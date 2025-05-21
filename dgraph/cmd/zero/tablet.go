@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package zero
@@ -25,10 +14,11 @@ import (
 	humanize "github.com/dustin/go-humanize"
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
-	otrace "go.opencensus.io/trace"
+	attribute "go.opentelemetry.io/otel/attribute"
+	trace "go.opentelemetry.io/otel/trace"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -131,7 +121,7 @@ func (s *Server) movePredicate(predicate string, srcGroup, dstGroup uint32) erro
 	ctx, cancel := context.WithTimeout(context.Background(), predicateMoveTimeout)
 	defer cancel()
 
-	ctx, span := otrace.StartSpan(ctx, "Zero.MovePredicate")
+	span := trace.SpanFromContext(ctx)
 	defer span.End()
 
 	// Ensure that reserved predicates cannot be moved.
@@ -154,7 +144,8 @@ func (s *Server) movePredicate(predicate string, srcGroup, dstGroup uint32) erro
 		" from group %d to %d\n", predicate, humanize.IBytes(uint64(tab.OnDiskBytes)),
 		humanize.IBytes(uint64(tab.UncompressedBytes)), srcGroup, dstGroup)
 	glog.Info(msg)
-	span.Annotate([]otrace.Attribute{otrace.StringAttribute("tablet", predicate)}, msg)
+	span.SetAttributes(attribute.String("tablet", predicate))
+	span.SetStatus(1, msg)
 
 	// Block all commits on this predicate. Keep them blocked until we return from this function.
 	unblock := s.blockTablet(predicate)
@@ -179,7 +170,7 @@ func (s *Server) movePredicate(predicate string, srcGroup, dstGroup uint32) erro
 		DestGid:   dstGroup,
 		TxnTs:     ids.StartId,
 	}
-	span.Annotatef(nil, "Starting move: %+v", in)
+	span.AddEvent(fmt.Sprintf("Move Predicate payload: %+v", in))
 	glog.Infof("Starting move: %+v", in)
 	if _, err := wc.MovePredicate(ctx, in); err != nil {
 		return errors.Wrapf(err, "while calling MovePredicate")
@@ -195,15 +186,15 @@ func (s *Server) movePredicate(predicate string, srcGroup, dstGroup uint32) erro
 		MoveTs:            in.TxnTs,
 	}
 	msg = fmt.Sprintf("Move at Alpha done. Now proposing: %+v", p)
-	span.Annotate(nil, msg)
+	span.AddEvent(fmt.Sprintf("Zero proposal: %+v", p))
 	glog.Info(msg)
 	if err := s.Node.proposeAndWait(ctx, p); err != nil {
 		return errors.Wrapf(err, "while proposing tablet reassignment. Proposal: %+v", p)
 	}
 	msg = fmt.Sprintf("Predicate move done for: [%v] from group %d to %d\n",
 		predicate, srcGroup, dstGroup)
+	span.AddEvent(msg)
 	glog.Info(msg)
-	span.Annotate(nil, msg)
 
 	// Now that the move has happened, we can delete the predicate from the source group. But before
 	// doing that, we should ensure the source group understands that the predicate is now being
@@ -216,11 +207,11 @@ func (s *Server) movePredicate(predicate string, srcGroup, dstGroup uint32) erro
 	if _, err := wc.MovePredicate(ctx, in); err != nil {
 		msg = fmt.Sprintf("While deleting predicate [%v] in group %d. Error: %v",
 			in.Predicate, in.SourceGid, err)
-		span.Annotate(nil, msg)
+		span.AddEvent(msg)
 		glog.Warningf(msg)
 	} else {
 		msg = fmt.Sprintf("Deleted predicate %v in group %d", in.Predicate, in.SourceGid)
-		span.Annotate(nil, msg)
+		span.AddEvent(msg)
 		glog.V(1).Infof(msg)
 	}
 	return nil

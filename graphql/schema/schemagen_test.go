@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package schema
@@ -24,13 +13,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 
-	dschema "github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/gqlparser/v2/gqlerror"
 	_ "github.com/dgraph-io/gqlparser/v2/validator/rules"
 	"github.com/dgraph-io/ristretto/v2/z"
+	dschema "github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type Tests map[string][]TestCase
@@ -89,7 +78,7 @@ func TestSchemaString(t *testing.T) {
 
 			newSchemaStr := schHandler.GQLSchema()
 
-			_, err = FromString(newSchemaStr, x.GalaxyNamespace)
+			_, err = FromString(newSchemaStr, x.RootNamespace)
 			require.NoError(t, err)
 			outputFileName := outputDir + testFile.Name()
 			str2, err := os.ReadFile(outputFileName)
@@ -120,7 +109,7 @@ func TestApolloServiceQueryResult(t *testing.T) {
 
 			apolloServiceResult := schHandler.GQLSchemaWithoutApolloExtras()
 
-			_, err = FromString(schHandler.GQLSchema(), x.GalaxyNamespace)
+			_, err = FromString(schHandler.GQLSchema(), x.RootNamespace)
 			require.NoError(t, err)
 			outputFileName := outputDir + testFile.Name()
 			str2, err := os.ReadFile(outputFileName)
@@ -149,7 +138,7 @@ func TestSchemas(t *testing.T) {
 
 				newSchemaStr := schHandler.GQLSchema()
 
-				_, err = FromString(newSchemaStr, x.GalaxyNamespace)
+				_, err = FromString(newSchemaStr, x.RootNamespace)
 				require.NoError(t, err)
 			})
 		}
@@ -160,7 +149,7 @@ func TestSchemas(t *testing.T) {
 			t.Run(sch.Name, func(t *testing.T) {
 				schHandler, errlist := NewHandler(sch.Input, false)
 				if errlist == nil {
-					_, errlist = FromString(schHandler.GQLSchema(), x.GalaxyNamespace)
+					_, errlist = FromString(schHandler.GQLSchema(), x.RootNamespace)
 				}
 				if diff := cmp.Diff(sch.Errlist, errlist, cmpopts.IgnoreUnexported(gqlerror.Error{})); diff != "" {
 					t.Errorf("error mismatch (-want +got):\n%s", diff)
@@ -190,7 +179,7 @@ func TestAuthSchemas(t *testing.T) {
 				schHandler, errlist := NewHandler(sch.Input, false)
 				require.NoError(t, errlist, sch.Name)
 
-				_, authError := FromString(schHandler.GQLSchema(), x.GalaxyNamespace)
+				_, authError := FromString(schHandler.GQLSchema(), x.RootNamespace)
 				require.NoError(t, authError, sch.Name)
 			})
 		}
@@ -202,7 +191,7 @@ func TestAuthSchemas(t *testing.T) {
 				schHandler, errlist := NewHandler(sch.Input, false)
 				require.NoError(t, errlist, sch.Name)
 
-				_, authError := FromString(schHandler.GQLSchema(), x.GalaxyNamespace)
+				_, authError := FromString(schHandler.GQLSchema(), x.RootNamespace)
 
 				if diff := cmp.Diff(authError, sch.Errlist); diff != "" {
 					t.Errorf("error mismatch (-want +got):\n%s", diff)

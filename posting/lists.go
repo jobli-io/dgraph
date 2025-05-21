@@ -1,17 +1,6 @@
 /*
- * Copyright 2015-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package posting
@@ -24,15 +13,14 @@ import (
 	"time"
 
 	ostats "go.opencensus.io/stats"
+	"go.opencensus.io/tag"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/tok/index"
-	"github.com/dgraph-io/dgraph/v24/x"
-	"github.com/dgraph-io/ristretto/v2"
+	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -40,43 +28,22 @@ const (
 )
 
 var (
-	pstore *badger.DB
-	closer *z.Closer
-	lCache *ristretto.Cache[[]byte, *List]
+	pstore                *badger.DB
+	closer                *z.Closer
+	EnableDetailedMetrics bool
 )
 
 // Init initializes the posting lists package, the in memory and dirty list hash.
-func Init(ps *badger.DB, cacheSize int64) {
+func Init(ps *badger.DB, cacheSize int64, removeOnUpdate bool) {
 	pstore = ps
 	closer = z.NewCloser(1)
 	go x.MonitorMemoryMetrics(closer)
 
-	// Initialize cache.
-	if cacheSize == 0 {
-		return
-	}
+	memoryLayer = initMemoryLayer(cacheSize, removeOnUpdate)
+}
 
-	var err error
-	lCache, err = ristretto.NewCache[[]byte, *List](&ristretto.Config[[]byte, *List]{
-		// Use 5% of cache memory for storing counters.
-		NumCounters: int64(float64(cacheSize) * 0.05 * 2),
-		MaxCost:     int64(float64(cacheSize) * 0.95),
-		BufferItems: 64,
-		Metrics:     true,
-		Cost: func(val *List) int64 {
-			return 0
-		},
-	})
-	x.Check(err)
-	go func() {
-		m := lCache.Metrics
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			// Record the posting list cache hit ratio
-			ostats.Record(context.Background(), x.PLCacheHitRatio.M(m.Ratio()))
-		}
-	}()
+func SetEnabledDetailedMetrics(enableMetrics bool) {
+	EnableDetailedMetrics = enableMetrics
 }
 
 func UpdateMaxCost(maxCost int64) {
@@ -124,7 +91,7 @@ func (vc *viLocalCache) Find(prefix []byte, filter func([]byte) bool) (uint64, e
 	return vc.delegate.Find(prefix, filter)
 }
 
-func (vc *viLocalCache) Get(key []byte) (rval index.Value, rerr error) {
+func (vc *viLocalCache) Get(key []byte) ([]byte, error) {
 	pl, err := vc.delegate.Get(key)
 	if err != nil {
 		return nil, err
@@ -134,7 +101,7 @@ func (vc *viLocalCache) Get(key []byte) (rval index.Value, rerr error) {
 	return vc.GetValueFromPostingList(pl)
 }
 
-func (vc *viLocalCache) GetWithLockHeld(key []byte) (rval index.Value, rerr error) {
+func (vc *viLocalCache) GetWithLockHeld(key []byte) ([]byte, error) {
 	pl, err := vc.delegate.Get(key)
 	if err != nil {
 		return nil, err
@@ -142,18 +109,22 @@ func (vc *viLocalCache) GetWithLockHeld(key []byte) (rval index.Value, rerr erro
 	return vc.GetValueFromPostingList(pl)
 }
 
-func (vc *viLocalCache) GetValueFromPostingList(pl *List) (rval index.Value, rerr error) {
+func (vc *viLocalCache) GetValueFromPostingList(pl *List) ([]byte, error) {
+	if pl.cache != nil {
+		return pl.cache, nil
+	}
 	value := pl.findStaticValue(vc.delegate.startTs)
 
-	if value == nil {
+	if value == nil || len(value.Postings) == 0 {
 		return nil, ErrNoValue
 	}
 
-	if hasDeleteAll(value.Postings[0]) || value.Postings[0].Op == Del {
+	if value.Postings[0].Op == Del {
 		return nil, ErrNoValue
 	}
 
-	return value.Postings[0].Value, nil
+	pl.cache = value.Postings[0].Value
+	return pl.cache, nil
 }
 
 func NewViLocalCache(delegate *LocalCache) *viLocalCache {
@@ -314,8 +285,9 @@ func (lc *LocalCache) getInternal(key []byte, readFromDisk bool) (*List, error) 
 		}
 	} else {
 		pl = &List{
-			key:   key,
-			plist: new(pb.PostingList),
+			key:         key,
+			plist:       new(pb.PostingList),
+			mutationMap: newMutableLayer(),
 		}
 	}
 
@@ -327,6 +299,35 @@ func (lc *LocalCache) getInternal(key []byte, readFromDisk bool) (*List, error) 
 	}
 	lc.RUnlock()
 	return lc.SetIfAbsent(skey, pl), nil
+}
+
+func (lc *LocalCache) readPostingListAt(key []byte) (*pb.PostingList, error) {
+	if EnableDetailedMetrics {
+		start := time.Now()
+		defer func() {
+			ms := x.SinceMs(start)
+			pk, _ := x.Parse(key)
+			var tags []tag.Mutator
+			tags = append(tags, tag.Upsert(x.KeyMethod, "get"))
+			tags = append(tags, tag.Upsert(x.KeyStatus, pk.Attr))
+			_ = ostats.RecordWithTags(context.Background(), tags, x.BadgerReadLatencyMs.M(ms))
+		}()
+	}
+
+	pl := &pb.PostingList{}
+	txn := pstore.NewTransactionAt(lc.startTs, false)
+	defer txn.Discard()
+
+	item, err := txn.Get(key)
+	if err != nil {
+		return nil, err
+	}
+
+	err = item.Value(func(val []byte) error {
+		return proto.Unmarshal(val, pl)
+	})
+
+	return pl, err
 }
 
 // GetSinglePosting retrieves the cached version of the first item in the list associated with the
@@ -361,20 +362,7 @@ func (lc *LocalCache) GetSinglePosting(key []byte) (*pb.PostingList, error) {
 			return pl, err
 		}
 
-		pl = &pb.PostingList{}
-		txn := pstore.NewTransactionAt(lc.startTs, false)
-		defer txn.Discard()
-
-		item, err := txn.Get(key)
-		if err != nil {
-			return nil, err
-		}
-
-		err = item.Value(func(val []byte) error {
-			return proto.Unmarshal(val, pl)
-		})
-
-		return pl, err
+		return lc.readPostingListAt(key)
 	}
 
 	pl, err := getPostings()
@@ -421,8 +409,6 @@ func (lc *LocalCache) UpdateDeltasAndDiscardLists() {
 	}
 
 	for key, pl := range lc.plists {
-		//pk, _ := x.Parse([]byte(key))
-		//fmt.Printf("{TXN} Closing %v\n", pk)
 		data := pl.getMutation(lc.startTs)
 		if len(data) > 0 {
 			lc.deltas[key] = data

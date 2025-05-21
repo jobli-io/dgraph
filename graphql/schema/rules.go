@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package schema
@@ -24,14 +13,14 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/gqlparser/v2/ast"
 	"github.com/dgraph-io/gqlparser/v2/gqlerror"
 	"github.com/dgraph-io/gqlparser/v2/parser"
 	"github.com/dgraph-io/gqlparser/v2/validator"
 	"github.com/expr-lang/expr"
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v2"
+	"github.com/hypermodeinc/dgraph/v25/x"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -444,30 +433,22 @@ func dataTypeCheck(schema *ast.Schema, defn *ast.Definition) gqlerror.List {
 
 func nameCheck(schema *ast.Schema, defn *ast.Definition) gqlerror.List {
 	if defn.Kind != ast.Scalar && isReservedKeyWord(defn.Name) {
-		var errMesg string
-
 		if isQueryOrMutationType(defn) {
 			for _, fld := range defn.Fields {
 				// If we find any query or mutation field defined without a @custom/@lambda
 				// directive, that is an error for us.
 				if !hasCustomOrLambda(fld) {
-					errMesg = "GraphQL Query and Mutation types are only allowed to have fields " +
-						"with @custom/@lambda directive. Other fields are built automatically for" +
-						" you. Found " + defn.Name + " " + fld.Name + " without @custom/@lambda."
-					break
+					return []*gqlerror.Error{gqlerror.ErrorPosf(defn.Position,
+						"GraphQL Query and Mutation types are only allowed to have fields "+
+							"with @custom/@lambda directive. Other fields are built automatically for"+
+							" you. Found %v %v without @custom/@lambda.", defn.Name, fld.Name)}
 				}
 			}
-			if errMesg == "" {
-				return nil
-			}
 		} else {
-			errMesg = fmt.Sprintf(
+			return []*gqlerror.Error{gqlerror.ErrorPosf(defn.Position,
 				"%s is a reserved word, so you can't declare a type with this name. "+
-					"Pick a different name for the type.", defn.Name,
-			)
+					"Pick a different name for the type.", defn.Name)}
 		}
-
-		return []*gqlerror.Error{gqlerror.ErrorPosf(defn.Position, errMesg)}
 	}
 
 	return nil
@@ -899,7 +880,7 @@ func hasInverseValidation(sch *ast.Schema, typ *ast.Definition,
 	}
 
 	if errMsg := isInverse(sch, typ.Name, field.Name, invTypeName, invField); errMsg != "" {
-		errs = append(errs, gqlerror.ErrorPosf(dir.Position, errMsg))
+		errs = append(errs, gqlerror.ErrorPosf(dir.Position, "%v", errMsg))
 		return errs
 	}
 
@@ -1455,7 +1436,7 @@ func lambdaDirectiveValidation(sch *ast.Schema,
 	secrets map[string]x.Sensitive) gqlerror.List {
 	// if the lambda url wasn't specified during alpha startup,
 	// just return that error. Don't confuse the user with errors from @custom yet.
-	if x.LambdaUrl(x.GalaxyNamespace) == "" {
+	if x.LambdaUrl(x.RootNamespace) == "" {
 		return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
 			"Type %s; Field %s: has the @lambda directive, but the "+
 				`--graphql "lambda-url=...;" flag wasn't specified during alpha startup.`,
@@ -1463,7 +1444,7 @@ func lambdaDirectiveValidation(sch *ast.Schema,
 	}
 	// reuse @custom directive validation
 	errs := customDirectiveValidation(sch, typ, field, buildCustomDirectiveForLambda(typ, field,
-		dir, x.GalaxyNamespace, func(f *ast.FieldDefinition) bool { return false }), secrets)
+		dir, x.RootNamespace, func(f *ast.FieldDefinition) bool { return false }), secrets)
 	for _, err := range errs {
 		err.Message = "While building @custom for @lambda: " + err.Message
 	}
@@ -1583,7 +1564,7 @@ func lambdaOnMutateValidation(sch *ast.Schema, typ *ast.Definition) gqlerror.Lis
 	var errs []*gqlerror.Error
 
 	// lambda url must be specified during alpha startup
-	if x.LambdaUrl(x.GalaxyNamespace) == "" {
+	if x.LambdaUrl(x.RootNamespace) == "" {
 		errs = append(errs, gqlerror.ErrorPosf(dir.Position,
 			"Type %s: has the @lambdaOnMutate directive, but the "+
 				"`--graphql lambda-url` flag wasn't specified during alpha startup.", typ.Name))

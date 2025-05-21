@@ -1,18 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package main
@@ -34,10 +24,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/v4/options"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/worker"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/worker"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -52,7 +42,6 @@ var (
 )
 
 func TestBackupMinioE(t *testing.T) {
-	t.Skip()
 	backupDst = "minio://minio:9001/dgraph-backup?secure=false"
 	addr := testutil.ContainerAddr("minio", 9001)
 	localBackupDst = "minio://" + addr + "/dgraph-backup?secure=false"
@@ -96,7 +85,7 @@ func TestBackupMinioE(t *testing.T) {
 	t.Logf("--- Original uid mapping: %+v\n", original.Uids)
 
 	client := testutil.GetHttpsClient(t)
-	tabletName := x.NamespaceAttr(x.GalaxyNamespace, "movie")
+	tabletName := x.NamespaceAttr(x.RootNamespace, "movie")
 	// Move tablet to group 1 to avoid messes later.
 	_, err = client.Get("https://" + testutil.SockAddrZeroHttp + "/moveTablet?tablet=movie&group=1")
 	require.NoError(t, err)
@@ -116,8 +105,8 @@ func TestBackupMinioE(t *testing.T) {
 	require.True(t, moveOk)
 
 	// Setup environmental variables for use during restore.
-	os.Setenv("MINIO_ACCESS_KEY", "accesskey")
-	os.Setenv("MINIO_SECRET_KEY", "secretkey")
+	t.Setenv("MINIO_ACCESS_KEY", "accesskey")
+	t.Setenv("MINIO_SECRET_KEY", "secretkey")
 
 	// Setup test directories.
 	dirSetup(t)
@@ -319,7 +308,7 @@ func runRestore(t *testing.T, lastDir string, commitTs uint64) map[string]string
 	require.NoError(t, os.RemoveAll(restoreDir))
 
 	t.Logf("--- Restoring from: %q", localBackupDst)
-	testutil.KeyFile = "../../../ee/enc/test-fixtures/enc-key"
+	testutil.KeyFile = "../../../enc/test-fixtures/enc-key"
 	result := worker.RunOfflineRestore(restoreDir, localBackupDst, lastDir,
 		testutil.KeyFile, nil, options.Snappy, 0)
 	require.NoError(t, result.Err)
@@ -331,19 +320,19 @@ func runRestore(t *testing.T, lastDir string, commitTs uint64) map[string]string
 		require.Equal(t, uint32(i+1), groupId)
 	}
 	pdir := "./data/restore/p1"
-	restored, err := testutil.GetPredicateValues(pdir, x.GalaxyAttr("movie"), commitTs)
+	restored, err := testutil.GetPredicateValues(pdir, x.AttrInRootNamespace("movie"), commitTs)
 	require.NoError(t, err)
 
 	restoredPreds, err := testutil.GetPredicateNames(pdir)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"dgraph.graphql.schema", "dgraph.graphql.xid", "dgraph.type",
-		"movie", "dgraph.graphql.p_query", "dgraph.drop.op"},
+		"movie", "dgraph.graphql.p_query", "dgraph.drop.op", "dgraph.namespace.id", "dgraph.namespace.name"},
 		restoredPreds)
 
 	restoredTypes, err := testutil.GetTypeNames(pdir)
 	require.NoError(t, err)
 	require.ElementsMatch(t, []string{"Node", "dgraph.graphql",
-		"dgraph.graphql.persisted_query"}, restoredTypes)
+		"dgraph.graphql.persisted_query", "dgraph.namespace"}, restoredTypes)
 
 	require.NoError(t, err)
 	t.Logf("--- Restored values: %+v\n", restored)
@@ -356,7 +345,7 @@ func runFailingRestore(t *testing.T, backupLocation, lastDir string, commitTs ui
 	// Recreate the restore directory to make sure there's no previous data when
 	// calling restore.
 	require.NoError(t, os.RemoveAll(restoreDir))
-	keyFile := "../../../ee/enc/test-fixtures/enc-key"
+	keyFile := "../../../enc/test-fixtures/enc-key"
 
 	result := worker.RunOfflineRestore(restoreDir, backupLocation, lastDir, keyFile, nil,
 		options.Snappy, 0)

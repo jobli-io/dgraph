@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package dgraphtest
@@ -142,7 +131,7 @@ func (z *zero) cmd(c *LocalCluster) []string {
 	if c.lowerThanV21 {
 		zcmd = append(zcmd, fmt.Sprintf(`--idx=%v`, z.id+1), "--telemetry=false")
 	} else {
-		zcmd = append(zcmd, fmt.Sprintf(`--raft=idx=%v`, z.id+1), "--telemetry=reports=false;sentry=false;",
+		zcmd = append(zcmd, fmt.Sprintf(`--raft=idx=%v`, z.id+1), "--telemetry=reports=false;",
 			fmt.Sprintf(`--limit=refill-interval=%v;uid-lease=%v`, c.conf.refillInterval, c.conf.uidLease))
 	}
 
@@ -247,7 +236,7 @@ func (a *alpha) cmd(c *LocalCluster) []string {
 		acmd = append(acmd, `--whitelist=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`, "--telemetry=false")
 	} else {
 		acmd = append(acmd, `--security=whitelist=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`,
-			"--telemetry=reports=false;sentry=false;")
+			"--telemetry=reports=false;")
 	}
 
 	if c.conf.lambdaURL != "" {
@@ -322,8 +311,8 @@ func (a *alpha) mounts(c *LocalCluster) ([]mount.Mount, error) {
 		})
 	}
 
-	if c.conf.bulkOutDir != "" {
-		pDir := filepath.Join(c.conf.bulkOutDir, strconv.Itoa(a.id/c.conf.replicas), "p")
+	if c.conf.bulkOutDirForMount != "" {
+		pDir := filepath.Join(c.conf.bulkOutDirForMount, strconv.Itoa(a.id/c.conf.replicas), "p")
 		if err := os.MkdirAll(pDir, os.ModePerm); err != nil {
 			return nil, errors.Wrap(err, "erorr creating bulk dir")
 		}
@@ -421,7 +410,7 @@ func mountBinary(c *LocalCluster) (mount.Mount, error) {
 }
 
 // ShouldSkipTest skips a given test if clusterVersion < minVersion
-func ShouldSkipTest(t *testing.T, minVersion, clusterVersion string) error {
+func ShouldSkipTest(t *testing.T, minVersion, clusterVersion string) {
 	supported, err := IsHigherVersion(clusterVersion, minVersion)
 	if err != nil {
 		t.Fatal(err)
@@ -429,5 +418,4 @@ func ShouldSkipTest(t *testing.T, minVersion, clusterVersion string) error {
 	if !supported {
 		t.Skipf("test is valid for commits greater than [%v]", minVersion)
 	}
-	return nil
 }

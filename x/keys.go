@@ -1,17 +1,6 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package x
@@ -26,7 +15,7 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
 )
 
 const (
@@ -52,8 +41,8 @@ const (
 	ByteSplit = byte(0x04)
 	// ByteUnused is a constant to specify keys which need to be discarded.
 	ByteUnused = byte(0xff)
-	// GalaxyNamespace is the default namespace name.
-	GalaxyNamespace = uint64(0)
+	// RootNamespace is the default namespace name.
+	RootNamespace = uint64(0)
 	// IgnoreBytes is the byte range which will be ignored while prefix match in subscription.
 	IgnoreBytes = "1-8"
 	// NamespaceOffset is the offset in badger key from which the next 8 bytes contain namespace.
@@ -98,8 +87,8 @@ func NamespaceAttrList(ns uint64, preds []string) []string {
 	return resp
 }
 
-func GalaxyAttr(attr string) string {
-	return NamespaceAttr(GalaxyNamespace, attr)
+func AttrInRootNamespace(attr string) string {
+	return NamespaceAttr(RootNamespace, attr)
 }
 
 // ParseNamespaceAttr returns the namespace and attr from the given value.
@@ -307,7 +296,7 @@ func (p ParsedKey) String() string {
 	} else if p.IsCountOrCountRev() {
 		return fmt.Sprintf("UID: %v, Attr: %v, IsCount/Ref: true, Count: %v", p.Uid, p.Attr, p.Count)
 	} else {
-		return fmt.Sprintf("UID: %v, Attr: %v, Data key", p.Uid, p.Attr)
+		return fmt.Sprintf("UID: %v, Attr: %v, Data key, prefix; %v, byte: %v", p.Uid, p.Attr, p.bytePrefix, p.ByteType)
 	}
 }
 
@@ -645,11 +634,13 @@ var aclPredicateMap = map[string]struct{}{
 // TODO: rename this map to a better suited name as per its properties. It is not just for GraphQL
 // predicates, but for all those which are PreDefined and whose value is not allowed to be mutated
 // by users. When renaming this also rename the IsGraphql context key in edgraph/server.go.
-var graphqlReservedPredicate = map[string]struct{}{
+var otherReservedPredicate = map[string]struct{}{
 	"dgraph.graphql.xid":     {},
 	"dgraph.graphql.schema":  {},
 	"dgraph.drop.op":         {},
 	"dgraph.graphql.p_query": {},
+	"dgraph.namespace.id":    {},
+	"dgraph.namespace.name":  {},
 }
 
 // internalPredicateMap stores a set of Dgraph's internal predicate. An internal
@@ -666,13 +657,14 @@ var preDefinedTypeMap = map[string]struct{}{
 	"dgraph.type.Group":              {},
 	"dgraph.type.Rule":               {},
 	"dgraph.graphql.persisted_query": {},
+	"dgraph.namespace":               {},
 }
 
-// IsGraphqlReservedPredicate returns true if it is the predicate is reserved by graphql.
+// IsOtherReservedPredicate returns true if it is the predicate is reserved by graphql.
 // These are a subset of PreDefined predicates, so follow all their properties. In addition,
 // the value for these predicates is also not allowed to be mutated directly by the users.
-func IsGraphqlReservedPredicate(pred string) bool {
-	_, ok := graphqlReservedPredicate[pred]
+func IsOtherReservedPredicate(pred string) bool {
+	_, ok := otherReservedPredicate[pred]
 	return ok
 }
 
@@ -710,7 +702,7 @@ func IsReservedPredicate(pred string) bool {
 func IsPreDefinedPredicate(pred string) bool {
 	pred = ParseAttr(pred)
 	_, ok := starAllPredicateMap[strings.ToLower(pred)]
-	return ok || IsAclPredicate(pred) || IsGraphqlReservedPredicate(pred)
+	return ok || IsAclPredicate(pred) || IsOtherReservedPredicate(pred)
 }
 
 // IsAclPredicate returns true if the predicate is in the list of reserved

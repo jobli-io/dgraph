@@ -1,19 +1,6 @@
 /*
- * Copyright 2016-2024 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * Co-authored by: jai@hypermode.com, sunil@hypermode.com, bill@hypdermode.com
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package index
@@ -21,8 +8,8 @@ package index
 import (
 	"context"
 
-	c "github.com/dgraph-io/dgraph/v24/tok/constraints"
-	opts "github.com/dgraph-io/dgraph/v24/tok/options"
+	c "github.com/hypermodeinc/dgraph/v25/tok/constraints"
+	opts "github.com/hypermodeinc/dgraph/v25/tok/options"
 )
 
 // IndexFactory is responsible for being able to create, find, and remove
@@ -137,9 +124,9 @@ type Txn interface {
 	// StartTs gets the exact time that the transaction started, returned in uint64 format
 	StartTs() uint64
 	// Get uses a []byte key to return the Value corresponding to the key
-	Get(key []byte) (rval Value, rerr error)
+	Get(key []byte) (rval []byte, rerr error)
 	// GetWithLockHeld uses a []byte key to return the Value corresponding to the key with a mutex lock held
-	GetWithLockHeld(key []byte) (rval Value, rerr error)
+	GetWithLockHeld(key []byte) (rval []byte, rerr error)
 	Find(prefix []byte, filter func(val []byte) bool) (uint64, error)
 	// Adds a mutation operation on a index.Txn interface, where the mutation
 	// is represented in the form of an index.DirectedEdge
@@ -155,18 +142,15 @@ type Txn interface {
 // Local cache is an interface representation of the local cache of a persistent storage system
 type LocalCache interface {
 	// Get uses a []byte key to return the Value corresponding to the key
-	Get(key []byte) (rval Value, rerr error)
+	Get(key []byte) (rval []byte, rerr error)
 	// GetWithLockHeld uses a []byte key to return the Value corresponding to the key with a mutex lock held
-	GetWithLockHeld(key []byte) (rval Value, rerr error)
+	GetWithLockHeld(key []byte) (rval []byte, rerr error)
 	Find(prefix []byte, filter func(val []byte) bool) (uint64, error)
 }
 
-// Value is an interface representation of the value of a persistent storage system
-type Value interface{}
-
 // CacheType is an interface representation of the cache of a persistent storage system
 type CacheType interface {
-	Get(key []byte) (rval Value, rerr error)
+	Get(key []byte) (rval []byte, rerr error)
 	Ts() uint64
 	Find(prefix []byte, filter func(val []byte) bool) (uint64, error)
 }

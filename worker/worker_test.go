@@ -1,19 +1,8 @@
 //go:build integration
 
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -31,13 +20,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/testutil"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var ts uint64
@@ -56,6 +45,7 @@ func commitTransaction(t *testing.T, edge *pb.DirectedEdge, l *posting.List) {
 	startTs := timestamp()
 	txn := posting.Oracle().RegisterStartTs(startTs)
 	l = txn.Store(l)
+	l.SetTs(startTs)
 	require.NoError(t, l.AddMutationWithIndex(context.Background(), edge, txn))
 
 	commit := commitTs(startTs)
@@ -98,7 +88,7 @@ func getOrCreate(key []byte) *posting.List {
 
 func populateGraph(t *testing.T) {
 	// Add uid edges : predicate neightbour.
-	neighbour := x.GalaxyAttr("neighbour")
+	neighbour := x.AttrInRootNamespace("neighbour")
 	edge := &pb.DirectedEdge{
 		ValueId: 23,
 		Attr:    neighbour,
@@ -126,7 +116,7 @@ func populateGraph(t *testing.T) {
 	addEdge(t, edge, getOrCreate(x.DataKey(neighbour, 12)))
 
 	// add value edges: friend : with name
-	friend := x.GalaxyAttr("friend")
+	friend := x.AttrInRootNamespace("friend")
 	edge.Attr = neighbour
 	edge.Entity = 12
 	edge.Value = []byte("photon")
@@ -246,6 +236,42 @@ func runQuery(dg *dgo.Dgraph, attr string, uids []uint64, srcFunc []string) (*ap
 	resp, err := testutil.RetryQuery(dg, query)
 
 	return resp, err
+}
+
+func BenchmarkEqFilter(b *testing.B) {
+	dg, err := testutil.DgraphClient(testutil.SockAddr)
+	if err != nil {
+		panic(err)
+	}
+	err = dg.Alter(context.Background(), &api.Operation{DropAll: true})
+	if err != nil {
+		panic(err)
+	}
+
+	n := 10000
+	for i := 0; i < n; i++ {
+		rdf := fmt.Sprintf("<%#x> <dgraph.type> \"abc\" .", i+1)
+		mu := &api.Mutation{SetNquads: []byte(rdf), CommitNow: true}
+		err := testutil.RetryMutation(dg, mu)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		query := `
+		{
+			q(func: uid(1, 2)) @filter(type(abc)) {
+				uid
+			}
+		}
+		`
+		_, err := testutil.RetryQuery(dg, query)
+		if err != nil {
+			panic(err)
+		}
+	}
 }
 
 // Index-related test. Similar to TestProcessTaskIndex but we call MergeLists only
@@ -487,8 +513,8 @@ func TestMain(m *testing.M) {
 
 	addTablets([]string{"name", "name2", "age", "http://www.w3.org/2000/01/rdf-schema#range", "",
 		"friend", "dgraph.type", "dgraph.graphql.xid", "dgraph.graphql.schema"},
-		1, x.GalaxyNamespace)
-	addTablets([]string{"friend_not_served"}, 2, x.GalaxyNamespace)
+		1, x.RootNamespace)
+	addTablets([]string{"friend_not_served"}, 2, x.RootNamespace)
 	addTablets([]string{"name"}, 1, 0x2)
 
 	dir, err := os.MkdirTemp("", "storetest_")
@@ -500,7 +526,7 @@ func TestMain(m *testing.M) {
 	x.Check(err)
 	pstore = ps
 	// Not using posting list cache
-	posting.Init(ps, 0)
+	posting.Init(ps, 0, false)
 	Init(ps)
 
 	m.Run()

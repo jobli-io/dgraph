@@ -1,19 +1,6 @@
 /*
- * Copyright 2016-2024 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * Co-authored by: jairad26@gmail.com, sunil@hypermode.com, bill@hypdermode.com
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package index
@@ -28,8 +15,8 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	c "github.com/dgraph-io/dgraph/v24/tok/constraints"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	c "github.com/hypermodeinc/dgraph/v25/tok/constraints"
 	"github.com/viterin/vek/vek32"
 	"google.golang.org/protobuf/proto"
 )
@@ -379,7 +366,7 @@ func littleEndianBytesAsFloatArray[T c.Float](encoded []byte, retVal *[]T, float
 		// Assume LittleEndian for encoding since this is
 		// the assumption elsewhere when reading from client.
 		// See dgraph-io/dgo/protos/api.pb.go
-		// See also dgraph-io/dgraph/types/conversion.go
+		// See also hypermodeinc/dgraph/types/conversion.go
 		// This also seems to be the preference from many examples
 		// I have found via Google search. It's unclear why this
 		// should be a preference.

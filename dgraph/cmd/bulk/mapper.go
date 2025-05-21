@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package bulk
@@ -31,20 +20,20 @@ import (
 
 	farm "github.com/dgryski/go-farm"
 	"github.com/golang/glog"
-	"github.com/golang/snappy"
+	"github.com/klauspost/compress/s2"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/chunker"
-	"github.com/dgraph-io/dgraph/v24/dql"
-	"github.com/dgraph-io/dgraph/v24/ee/acl"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/tok"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/types/facets"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/acl"
+	"github.com/hypermodeinc/dgraph/v25/chunker"
+	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/tok"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/types/facets"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -176,7 +165,7 @@ func (m *mapper) writeMapEntriesToFile(cbuf *z.Buffer, shardIdx int) {
 		x.Check(f.Close())
 	}()
 
-	w := snappy.NewBufferedWriter(f)
+	w := s2.NewWriter(f)
 	defer func() {
 		x.Check(w.Close())
 	}()
@@ -241,10 +230,10 @@ func (m *mapper) run(inputFormat chunker.InputFormat) {
 			}
 		}
 		aclOnce.Do(func() {
-			if m.opt.Namespace != math.MaxUint64 && m.opt.Namespace != x.GalaxyNamespace {
+			if m.opt.Namespace != math.MaxUint64 && m.opt.Namespace != x.RootNamespace {
 				// Insert ACL related RDFs force uploading the data into non-galaxy namespace.
 				aclNquads := make([]*api.NQuad, 0)
-				aclNquads = append(aclNquads, acl.CreateGroupNQuads(x.GuardiansId)...)
+				aclNquads = append(aclNquads, acl.CreateGroupNQuads(x.SuperAdminId)...)
 				aclNquads = append(aclNquads, acl.CreateUserNQuads(x.GrootId, "password")...)
 				aclNquads = append(aclNquads, &api.NQuad{
 					Subject:   "_:newuser",

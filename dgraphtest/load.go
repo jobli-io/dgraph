@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package dgraphtest
@@ -33,15 +22,30 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/dgraphapi"
-	"github.com/dgraph-io/dgraph/v24/ee/enc"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
+	"github.com/hypermodeinc/dgraph/v25/enc"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
+
+var datafiles = map[string]string{
+	"1million.schema":  "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/data/1million.schema?raw=true",
+	"1million.rdf.gz":  "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/data/1million.rdf.gz?raw=true",
+	"21million.schema": "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/data/21million.schema?raw=true",
+	"21million.rdf.gz": "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/data/21million.rdf.gz?raw=true",
+}
+
+type DatasetType int
+type Dataset struct {
+	name string
+}
 
 const (
 	groupOneRdfFile   = "g01.rdf"
 	groupOneRdfGzFile = "g01.rdf.gz"
+
+	OneMillionDataset DatasetType = iota
+	TwentyOneMillionDataset
 )
 
 // LiveOpts are options that are used for running live loader.
@@ -139,7 +143,7 @@ func setDQLSchema(c *LocalCluster, files []string) error {
 	if c.conf.acl {
 		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 		defer cancel()
-		err := gc.LoginIntoNamespace(ctx, dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace)
+		err := gc.LoginIntoNamespace(ctx, dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace)
 		if err != nil {
 			return errors.Wrap(err, "error login to default namespace")
 		}
@@ -234,7 +238,7 @@ func (c *LocalCluster) LiveLoad(opts LiveOpts) error {
 	}
 	if c.conf.acl {
 		args = append(args, fmt.Sprintf("--creds=user=%s;password=%s;namespace=%d",
-			dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace))
+			dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace))
 	}
 	if c.conf.encryption {
 		args = append(args, fmt.Sprintf("--encryption=key-file=%v", c.encKeyPath))
@@ -262,7 +266,7 @@ func findGrootAndGuardians(c *LocalCluster) (string, string, error) {
 	if c.conf.acl {
 		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 		defer cancel()
-		err = gc.LoginIntoNamespace(ctx, dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.GalaxyNamespace)
+		err = gc.LoginIntoNamespace(ctx, dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace)
 		if err != nil {
 			return "", "", errors.Wrapf(err, "error logging in as groot")
 		}
@@ -462,6 +466,7 @@ type BulkOpts struct {
 	DataFiles      []string
 	SchemaFiles    []string
 	GQLSchemaFiles []string
+	OutDir         string
 }
 
 func (c *LocalCluster) BulkLoad(opts BulkOpts) error {
@@ -470,13 +475,20 @@ func (c *LocalCluster) BulkLoad(opts BulkOpts) error {
 		return errors.Wrap(err, "error finding URL of first zero")
 	}
 
+	var outDir string
+	if opts.OutDir != "" {
+		outDir = opts.OutDir
+	} else {
+		outDir = c.conf.bulkOutDirForMount
+	}
+
 	shards := c.conf.numAlphas / c.conf.replicas
 	args := []string{"bulk",
 		"--store_xids=true",
 		"--zero", zeroURL,
 		"--reduce_shards", strconv.Itoa(shards),
 		"--map_shards", strconv.Itoa(shards),
-		"--out", c.conf.bulkOutDir,
+		"--out", outDir,
 		// we had to create the dir for setting up docker, hence, replacing it here.
 		"--replace_out",
 	}
@@ -514,4 +526,51 @@ func AddData(gc *dgraphapi.GrpcClient, pred string, start, end int) error {
 	}
 	_, err := gc.Mutate(&api.Mutation{SetNquads: []byte(rdf), CommitNow: true})
 	return err
+}
+
+func GetDataset(d DatasetType) *Dataset {
+	switch d {
+	case OneMillionDataset:
+		return &Dataset{name: "1million"}
+	case TwentyOneMillionDataset:
+		return &Dataset{name: "21million"}
+	default:
+		panic("unknown dataset type")
+	}
+}
+
+func (d *Dataset) DataFilePath() string {
+	return d.ensureFile(fmt.Sprintf("%s.rdf.gz", d.name))
+}
+
+func (d *Dataset) SchemaPath() string {
+	return d.ensureFile(fmt.Sprintf("%s.schema", d.name))
+}
+
+func (d *Dataset) GqlSchemaPath() string {
+	return d.ensureFile(fmt.Sprintf("%s.gql_schema", d.name))
+}
+
+func (d *Dataset) ensureFile(filename string) string {
+	fullPath := filepath.Join(datasetFilesPath, filename)
+	if exists, _ := fileExists(fullPath); !exists {
+		url, ok := datafiles[filename]
+		if !ok {
+			panic(fmt.Sprintf("dataset file %s not found in datafiles map", filename))
+		}
+		if err := downloadFile(filename, url); err != nil {
+			panic(fmt.Sprintf("failed to download %s: %v", filename, err))
+		}
+	}
+	return fullPath
+}
+
+func downloadFile(fname, url string) error {
+	cmd := exec.Command("wget", "-O", fname, url)
+	cmd.Dir = datasetFilesPath
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("error downloading file %s: %s", fname, string(out))
+	}
+	return nil
 }

@@ -1,17 +1,6 @@
 /*
- * Copyright 2015-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package query
@@ -27,17 +16,18 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/dgraph-io/dgraph/v24/algo"
-	"github.com/dgraph-io/dgraph/v24/dql"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/types/facets"
-	"github.com/dgraph-io/dgraph/v24/worker"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/hypermodeinc/dgraph/v25/algo"
+	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/types/facets"
+	"github.com/hypermodeinc/dgraph/v25/worker"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 /*
@@ -175,6 +165,10 @@ type params struct {
 	MaxWeight float64
 	// MinWeight is the min weight allowed in a path returned by the shortest path algorithm.
 	MinWeight float64
+	// MaxFrontierSize limits the number of candidate paths stored in the priority queue.
+	// During shortest path computation. This prevents out-of-memory errors on large graphs
+	// but may affect solution optimality if set too low.
+	MaxFrontierSize int64
 
 	// ExploreDepth is used by recurse and shortest path queries to specify the maximum graph
 	// depth to explore.
@@ -202,7 +196,6 @@ type params struct {
 	// Shortest is true when the subgraph holds the results of a shortest paths query.
 	Shortest bool
 	// AllowedPreds is a list of predicates accessible to query in context of ACL.
-	// For OSS this should remain nil.
 	AllowedPreds []string
 }
 
@@ -723,6 +716,16 @@ func (args *params) fill(gq *dql.GraphQuery) error {
 			args.MinWeight = minWeight
 		} else if !ok {
 			args.MinWeight = -math.MaxFloat64
+		}
+
+		if v, ok := gq.Args["maxfrontiersize"]; ok {
+			maxfrontiersize, err := strconv.ParseInt(v, 0, 64)
+			if err != nil {
+				return err
+			}
+			args.MaxFrontierSize = maxfrontiersize
+		} else if !ok {
+			args.MaxFrontierSize = math.MaxInt64
 		}
 
 		if gq.ShortestPathArgs.From == nil || gq.ShortestPathArgs.To == nil {
@@ -1946,7 +1949,7 @@ func recursiveCopy(dst *SubGraph, src *SubGraph) {
 }
 
 func expandSubgraph(ctx context.Context, sg *SubGraph) ([]*SubGraph, error) {
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "expandSubgraph: "+sg.Attr)
 	defer stop()
 
@@ -1972,15 +1975,14 @@ func expandSubgraph(ctx context.Context, sg *SubGraph) ([]*SubGraph, error) {
 		switch child.Params.Expand {
 		// It could be expand(_all_) or expand(val(x)).
 		case "_all_":
-			span.Annotate(nil, "expand(_all_)")
+			span.AddEvent("expand(_all_)")
 			if len(typeNames) == 0 {
 				break
 			}
 
 			preds = getPredicatesFromTypes(namespace, typeNames)
-			// We check if enterprise is enabled and only
 			// restrict preds to allowed preds if ACL is turned on.
-			if worker.EnterpriseEnabled() && sg.Params.AllowedPreds != nil {
+			if sg.Params.AllowedPreds != nil {
 				// Take intersection of both the predicate lists
 				intersectPreds := make([]string, 0)
 				hashMap := make(map[string]bool)
@@ -1997,7 +1999,7 @@ func expandSubgraph(ctx context.Context, sg *SubGraph) ([]*SubGraph, error) {
 
 		default:
 			if len(child.ExpandPreds) > 0 {
-				span.Annotate(nil, "expand default")
+				span.AddEvent("expand default")
 				// We already have the predicates populated from the var.
 				temp := getPredsFromVals(child.ExpandPreds)
 				for _, pred := range temp {
@@ -2072,7 +2074,7 @@ func ProcessGraph(ctx context.Context, sg, parent *SubGraph, rch chan error) {
 	if len(sg.Attr) > 0 {
 		suffix += "." + sg.Attr
 	}
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "query.ProcessGraph"+suffix)
 	defer stop()
 
@@ -2383,9 +2385,8 @@ func ProcessGraph(ctx context.Context, sg, parent *SubGraph, rch chan error) {
 
 	if (sg.DestUIDs == nil || len(sg.DestUIDs.Uids) == 0) && childErr == nil {
 		// Looks like we're done here. Be careful with nil srcUIDs!
-		if span != nil {
-			span.Annotatef(nil, "Zero uids for %q", sg.Attr)
-		}
+		span.AddEvent("Zero uids", trace.WithAttributes(
+			attribute.String("attr", sg.Attr)))
 		out := sg.Children[:0]
 		for _, child := range sg.Children {
 			if child.IsInternal() && child.Attr == "expand" {
@@ -2653,7 +2654,7 @@ func (sg *SubGraph) sortAndPaginateUsingVar(ctx context.Context) error {
 func isValidArg(a string) bool {
 	switch a {
 	case "numpaths", "from", "to", "orderasc", "orderdesc", "first", "offset", "after", "depth",
-		"minweight", "maxweight":
+		"minweight", "maxweight", "maxfrontiersize":
 		return true
 	}
 	return false
@@ -2772,7 +2773,7 @@ type Request struct {
 // Fills Subgraphs and Vars.
 // It can process multiple query blocks that are part of the query..
 func (req *Request) ProcessQuery(ctx context.Context) (err error) {
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "query.ProcessQuery")
 	defer stop()
 
@@ -2797,7 +2798,7 @@ func (req *Request) ProcessQuery(ctx context.Context) (err error) {
 			sg.ReadTs = req.ReadTs
 			sg.Cache = req.Cache
 		})
-		span.Annotate(nil, "Query parsed")
+		span.AddEvent("Query parsed")
 		req.Subgraphs = append(req.Subgraphs, sg)
 	}
 	req.Latency.Parsing += time.Since(loopStart)
@@ -2977,7 +2978,7 @@ func (req *Request) Process(ctx context.Context) (er ExecutionResult, err error)
 		}
 	}
 
-	if !x.IsGalaxyOperation(ctx) {
+	if !x.IsRootNsOperation(ctx) {
 		// Filter the schema nodes for the given namespace.
 		er.SchemaNode = filterSchemaNodeForNamespace(namespace, er.SchemaNode)
 		// Filter the types for the given namespace.

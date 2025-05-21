@@ -1,17 +1,6 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -25,10 +14,10 @@ import (
 	"github.com/golang/glog"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/raftwal"
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/raftwal"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -52,8 +41,8 @@ const (
 	ZeroLimitsDefaults = `uid-lease=0; refill-interval=30s; disable-admin-http=false;`
 	GraphQLDefaults    = `introspection=true; debug=false; extensions=true; poll-interval=1s; ` +
 		`lambda-url=;`
-	CacheDefaults        = `size-mb=1024; percentage=0,80,20;`
-	FeatureFlagsDefaults = `normalize-compatibility-mode=`
+	CacheDefaults        = `size-mb=1024; percentage=40,40,20; remove-on-update=false`
+	FeatureFlagsDefaults = `normalize-compatibility-mode=; enable-detailed-metrics=false`
 )
 
 // ServerState holds the state of the Dgraph server.
@@ -107,14 +96,7 @@ func (s *ServerState) InitStorage() {
 	var err error
 
 	if x.WorkerConfig.EncryptionKey != nil {
-		// non-nil key file
-		if !EnterpriseEnabled() {
-			// not licensed --> crash.
-			glog.Fatal("Valid Enterprise License needed for the Encryption feature.")
-		} else {
-			// licensed --> OK.
-			glog.Infof("Encryption feature enabled.")
-		}
+		glog.Infof("Encryption feature enabled.")
 	}
 
 	{

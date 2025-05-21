@@ -1,17 +1,6 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -20,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,24 +19,26 @@ import (
 	cindex "github.com/google/codesearch/index"
 	cregexp "github.com/google/codesearch/regexp"
 	"github.com/pkg/errors"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/algo"
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	ctask "github.com/dgraph-io/dgraph/v24/task"
-	"github.com/dgraph-io/dgraph/v24/tok"
-	"github.com/dgraph-io/dgraph/v24/tok/hnsw"
-	"github.com/dgraph-io/dgraph/v24/tok/index"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/types/facets"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/algo"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	ctask "github.com/hypermodeinc/dgraph/v25/task"
+	"github.com/hypermodeinc/dgraph/v25/tok"
+	"github.com/hypermodeinc/dgraph/v25/tok/hnsw"
+	"github.com/hypermodeinc/dgraph/v25/tok/index"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/types/facets"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func invokeNetworkRequest(ctx context.Context, addr string,
@@ -56,9 +48,9 @@ func invokeNetworkRequest(ctx context.Context, addr string,
 		return nil, errors.Wrapf(err, "dispatchTaskOverNetwork: while retrieving connection.")
 	}
 
-	if span := otrace.FromContext(ctx); span != nil {
-		span.Annotatef(nil, "invokeNetworkRequest: Sending request to %v", addr)
-	}
+	span := trace.SpanFromContext(ctx)
+	span.AddEvent("invokeNetworkRequest", trace.WithAttributes(
+		attribute.String("destination", addr)))
 	c := pb.NewWorkerClient(pl.Get())
 	return f(ctx, c)
 }
@@ -141,11 +133,12 @@ func ProcessTaskOverNetwork(ctx context.Context, q *pb.Query) (*pb.Result, error
 		return nil, errNonExistentTablet
 	}
 
-	span := otrace.FromContext(ctx)
-	if span != nil {
-		span.Annotatef(nil, "ProcessTaskOverNetwork. attr: %v gid: %v, readTs: %d, node id: %d",
-			attr, gid, q.ReadTs, groups().Node.Id)
-	}
+	span := trace.SpanFromContext(ctx)
+	span.AddEvent("ProcessTaskOverNetwork", trace.WithAttributes(
+		attribute.String("attr", attr),
+		attribute.String("gid", fmt.Sprintf("%d", gid)),
+		attribute.String("readTs", fmt.Sprintf("%d", q.ReadTs)),
+		attribute.String("node_id", fmt.Sprintf("%d", groups().Node.Id))))
 
 	if groups().ServesGroup(gid) {
 		// No need for a network call, as this should be run from within this instance.
@@ -161,10 +154,10 @@ func ProcessTaskOverNetwork(ctx context.Context, q *pb.Query) (*pb.Result, error
 	}
 
 	reply := result.(*pb.Result)
-	if span != nil {
-		span.Annotatef(nil, "Reply from server. len: %v gid: %v Attr: %v",
-			len(reply.UidMatrix), gid, attr)
-	}
+	span.AddEvent("Reply from server", trace.WithAttributes(
+		attribute.Int("len", len(reply.UidMatrix)),
+		attribute.Int64("gid", int64(gid)),
+		attribute.String("attr", attr)))
 	return reply, nil
 }
 
@@ -341,12 +334,12 @@ func (qs *queryState) handleValuePostings(ctx context.Context, args funcArgs) er
 		return err
 	}
 
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "handleValuePostings")
 	defer stop()
-	if span != nil {
-		span.Annotatef(nil, "Number of uids: %d. args.srcFn: %+v", srcFn.n, args.srcFn)
-	}
+	span.AddEvent("Number of uids and args.srcFn", trace.WithAttributes(
+		attribute.Int64("uids_count", int64(srcFn.n)),
+		attribute.String("srcFn", fmt.Sprintf("%+v", args.srcFn))))
 
 	switch srcFn.fnType {
 	case notAFunction, aggregatorFn, passwordFn, compareAttrFn, similarToFn:
@@ -415,7 +408,9 @@ func (qs *queryState) handleValuePostings(ctx context.Context, args funcArgs) er
 	// logic constitutes most of the code volume here.
 	numGo, width := x.DivideAndRule(srcFn.n)
 	x.AssertTrue(width > 0)
-	span.Annotatef(nil, "Width: %d. NumGo: %d", width, numGo)
+	span.AddEvent("Processing distribution", trace.WithAttributes(
+		attribute.Int("width", width),
+		attribute.Int("numGo", numGo)))
 
 	outputs := make([]*pb.Result, numGo)
 	listType := schema.State().IsList(q.Attr)
@@ -768,12 +763,12 @@ func (qs *queryState) handleUidPostings(
 		return err
 	}
 
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "handleUidPostings")
 	defer stop()
-	if span != nil {
-		span.Annotatef(nil, "Number of uids: %d. args.srcFn: %+v", srcFn.n, args.srcFn)
-	}
+	span.AddEvent("Number of uids and args.srcFn", trace.WithAttributes(
+		attribute.Int64("uids_count", int64(srcFn.n)),
+		attribute.String("srcFn", fmt.Sprintf("%+v", args.srcFn))))
 	if srcFn.n == 0 {
 		return nil
 	}
@@ -793,7 +788,9 @@ func (qs *queryState) handleUidPostings(
 	// Divide the task into many goroutines.
 	numGo, width := x.DivideAndRule(srcFn.n)
 	x.AssertTrue(width > 0)
-	span.Annotatef(nil, "Width: %d. NumGo: %d", width, numGo)
+	span.AddEvent("Processing distribution", trace.WithAttributes(
+		attribute.Int("width", width),
+		attribute.Int("numGo", numGo)))
 
 	lang := langForFunc(q.Langs)
 	needFiltering := needsStringFiltering(srcFn, q.Langs, q.Attr)
@@ -836,10 +833,15 @@ func (qs *queryState) handleUidPostings(
 				return err
 			}
 
+			if srcFn.fnType == compareAttrFn {
+				posting.GetStatsHolder().InsertRecord(
+					q.Attr, []byte(srcFn.tokens[i]), uint64(pl.ApproxLen()))
+			}
+
 			switch {
 			case q.DoCount:
 				if i == 0 {
-					span.Annotate(nil, "DoCount")
+					span.AddEvent("DoCount")
 				}
 				count, err := countForUidPostings(args, pl, facetsTree, opts)
 				if err != nil {
@@ -850,7 +852,7 @@ func (qs *queryState) handleUidPostings(
 				out.UidMatrix = append(out.UidMatrix, &pb.List{})
 			case srcFn.fnType == compareScalarFn:
 				if i == 0 {
-					span.Annotate(nil, "CompareScalarFn")
+					span.AddEvent("CompareScalarFn")
 				}
 				len := pl.Length(args.q.ReadTs, 0)
 				if len == -1 {
@@ -863,7 +865,7 @@ func (qs *queryState) handleUidPostings(
 				}
 			case srcFn.fnType == hasFn:
 				if i == 0 {
-					span.Annotate(nil, "HasFn")
+					span.AddEvent("HasFn")
 				}
 				// We figure out if need to filter on bases of lang attribute or not.
 				// If we don't need to do so, we can just check if the posting list
@@ -900,7 +902,7 @@ func (qs *queryState) handleUidPostings(
 				}
 			case srcFn.fnType == uidInFn:
 				if i == 0 {
-					span.Annotate(nil, "UidInFn")
+					span.AddEvent("UidInFn")
 				}
 				reqList := &pb.List{Uids: srcFn.uidsPresent}
 				topts := posting.ListOptions{
@@ -919,7 +921,7 @@ func (qs *queryState) handleUidPostings(
 				}
 			case q.FacetParam != nil || facetsTree != nil:
 				if i == 0 {
-					span.Annotate(nil, "default with facets")
+					span.AddEvent("default with facets")
 				}
 				uidList, fcsList, err := retrieveUidsAndFacets(args, pl, facetsTree, opts)
 				if err != nil {
@@ -931,7 +933,7 @@ func (qs *queryState) handleUidPostings(
 				}
 			default:
 				if i == 0 {
-					span.Annotate(nil, "default no facets")
+					span.AddEvent("default no facets")
 				}
 				uidList, err := pl.Uids(opts)
 				if err != nil {
@@ -969,7 +971,8 @@ func (qs *queryState) handleUidPostings(
 	for _, list := range out.UidMatrix {
 		total += len(list.Uids)
 	}
-	span.Annotatef(nil, "Total number of elements in matrix: %d", total)
+	span.AddEvent("Matrix elements count", trace.WithAttributes(
+		attribute.Int("total", total)))
 	return nil
 }
 
@@ -982,26 +985,28 @@ const (
 
 // processTask processes the query, accumulates and returns the result.
 func processTask(ctx context.Context, q *pb.Query, gid uint32) (*pb.Result, error) {
-	ctx, span := otrace.StartSpan(ctx, "processTask."+q.Attr)
+	ctx, span := otel.Tracer("").Start(ctx, "processTask."+q.Attr)
 	defer span.End()
 
 	stop := x.SpanTimer(span, "processTask"+q.Attr)
 	defer stop()
 
-	span.Annotatef(nil, "Waiting for startTs: %d at node: %d, gid: %d",
-		q.ReadTs, groups().Node.Id, gid)
+	span.SetAttributes(
+		attribute.String("startTs", fmt.Sprintf("%d", q.ReadTs)),
+		attribute.String("node", fmt.Sprintf("%d", groups().Node.Id)),
+		attribute.String("gid", fmt.Sprintf("%d", gid)))
 	if err := posting.Oracle().WaitForTs(ctx, q.ReadTs); err != nil {
 		return nil, err
 	}
-	if span != nil {
-		maxAssigned := posting.Oracle().MaxAssigned()
-		span.Annotatef(nil, "Done waiting for maxAssigned. Attr: %q ReadTs: %d Max: %d",
-			q.Attr, q.ReadTs, maxAssigned)
-	}
+	maxAssigned := posting.Oracle().MaxAssigned()
+	span.AddEvent("Done waiting for maxAssigned", trace.WithAttributes(
+		attribute.String("attr", q.Attr),
+		attribute.String("readTs", fmt.Sprintf("%d", q.ReadTs)),
+		attribute.String("max", fmt.Sprintf("%d", maxAssigned))))
 	if err := groups().ChecksumsMatch(ctx); err != nil {
 		return nil, err
 	}
-	span.Annotatef(nil, "Done waiting for checksum match")
+	span.AddEvent("Done waiting for checksum match")
 
 	// If a group stops serving tablet and it gets partitioned away from group
 	// zero, then it wouldn't know that this group is no longer serving this
@@ -1042,7 +1047,7 @@ type queryState struct {
 func (qs *queryState) helpProcessTask(ctx context.Context, q *pb.Query, gid uint32) (
 	*pb.Result, error) {
 
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	out := new(pb.Result)
 	attr := q.Attr
 
@@ -1102,40 +1107,40 @@ func (qs *queryState) helpProcessTask(ctx context.Context, q *pb.Query, gid uint
 		return nil, err
 	}
 	if needsValPostings {
-		span.Annotate(nil, "handleValuePostings")
+		span.AddEvent("handleValuePostings")
 		if err := qs.handleValuePostings(ctx, args); err != nil {
 			return nil, err
 		}
 	} else {
-		span.Annotate(nil, "handleUidPostings")
+		span.AddEvent("handleUidPostings")
 		if err = qs.handleUidPostings(ctx, args, opts); err != nil {
 			return nil, err
 		}
 	}
 
 	if srcFn.fnType == hasFn && srcFn.isFuncAtRoot {
-		span.Annotate(nil, "handleHasFunction")
+		span.AddEvent("handleHasFunction")
 		if err := qs.handleHasFunction(ctx, q, out, srcFn); err != nil {
 			return nil, err
 		}
 	}
 
 	if srcFn.fnType == compareScalarFn && srcFn.isFuncAtRoot {
-		span.Annotate(nil, "handleCompareScalarFunction")
+		span.AddEvent("handleCompareScalarFunction")
 		if err := qs.handleCompareScalarFunction(ctx, args); err != nil {
 			return nil, err
 		}
 	}
 
 	if srcFn.fnType == regexFn {
-		span.Annotate(nil, "handleRegexFunction")
+		span.AddEvent("handleRegexFunction")
 		if err := qs.handleRegexFunction(ctx, args); err != nil {
 			return nil, err
 		}
 	}
 
 	if srcFn.fnType == matchFn {
-		span.Annotate(nil, "handleMatchFunction")
+		span.AddEvent("handleMatchFunction")
 		if err := qs.handleMatchFunction(ctx, args); err != nil {
 			return nil, err
 		}
@@ -1144,7 +1149,7 @@ func (qs *queryState) helpProcessTask(ctx context.Context, q *pb.Query, gid uint
 	// We fetch the actual value for the uids, compare them to the value in the
 	// request and filter the uids only if the tokenizer IsLossy.
 	if srcFn.fnType == compareAttrFn && len(srcFn.tokens) > 0 {
-		span.Annotate(nil, "handleCompareFunction")
+		span.AddEvent("handleCompareFunction")
 		if err := qs.handleCompareFunction(ctx, args); err != nil {
 			return nil, err
 		}
@@ -1152,7 +1157,7 @@ func (qs *queryState) helpProcessTask(ctx context.Context, q *pb.Query, gid uint
 
 	// If geo filter, do value check for correctness.
 	if srcFn.geoQuery != nil {
-		span.Annotate(nil, "handleGeoFunction")
+		span.AddEvent("handleGeoFunction")
 		if err := qs.filterGeoFunction(ctx, args); err != nil {
 			return nil, err
 		}
@@ -1161,7 +1166,7 @@ func (qs *queryState) helpProcessTask(ctx context.Context, q *pb.Query, gid uint
 	// For string matching functions, check the language. We are not checking here
 	// for hasFn as filtering for it has already been done in handleHasFunction.
 	if srcFn.fnType != hasFn && needsStringFiltering(srcFn, q.Langs, attr) {
-		span.Annotate(nil, "filterStringFunction")
+		span.AddEvent("filterStringFunction")
 		if err := qs.filterStringFunction(args); err != nil {
 			return nil, err
 		}
@@ -1207,16 +1212,20 @@ func (qs *queryState) handleCompareScalarFunction(ctx context.Context, arg funcA
 }
 
 func (qs *queryState) handleRegexFunction(ctx context.Context, arg funcArgs) error {
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "handleRegexFunction")
 	defer stop()
 	if span != nil {
-		span.Annotatef(nil, "Number of uids: %d. args.srcFn: %+v", arg.srcFn.n, arg.srcFn)
+		span.AddEvent("Processing UIDs", trace.WithAttributes(
+			attribute.Int64("uid_count", int64(arg.srcFn.n)),
+			attribute.String("srcFn", fmt.Sprintf("%+v", arg.srcFn))))
 	}
 
 	attr := arg.q.Attr
 	typ, err := schema.State().TypeOf(attr)
-	span.Annotatef(nil, "Attr: %s. Type: %s", attr, typ.Name())
+	span.AddEvent("Attribute information", trace.WithAttributes(
+		attribute.String("attr", attr),
+		attribute.String("type", typ.Name())))
 	if err != nil || !typ.IsScalar() {
 		return errors.Errorf("Attribute not scalar: %s %v", x.ParseAttr(attr), typ)
 	}
@@ -1224,8 +1233,9 @@ func (qs *queryState) handleRegexFunction(ctx context.Context, arg funcArgs) err
 		return errors.Errorf("Got non-string type. Regex match is allowed only on string type.")
 	}
 	useIndex := schema.State().HasTokenizer(ctx, tok.IdentTrigram, attr)
-	span.Annotatef(nil, "Trigram index found: %t, func at root: %t",
-		useIndex, arg.srcFn.isFuncAtRoot)
+	span.AddEvent("Trigram index information", trace.WithAttributes(
+		attribute.Bool("trigram_index_found", useIndex),
+		attribute.Bool("func_at_root", arg.srcFn.isFuncAtRoot)))
 
 	query := cindex.RegexpQuery(arg.srcFn.regex.Syntax)
 	empty := pb.List{}
@@ -1266,7 +1276,10 @@ func (qs *queryState) handleRegexFunction(ctx context.Context, arg funcArgs) err
 	isList := schema.State().IsList(attr)
 	lang := langForFunc(arg.q.Langs)
 
-	span.Annotatef(nil, "Total uids: %d, list: %t lang: %v", len(uids.Uids), isList, lang)
+	span.AddEvent("Result UID information", trace.WithAttributes(
+		attribute.Int("uid_count", len(uids.Uids)),
+		attribute.Bool("is_list", isList),
+		attribute.String("lang", lang)))
 
 	filtered := &pb.List{}
 	for _, uid := range uids.Uids {
@@ -1317,15 +1330,17 @@ func (qs *queryState) handleRegexFunction(ctx context.Context, arg funcArgs) err
 }
 
 func (qs *queryState) handleCompareFunction(ctx context.Context, arg funcArgs) error {
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "handleCompareFunction")
 	defer stop()
-	if span != nil {
-		span.Annotatef(nil, "Number of uids: %d. args.srcFn: %+v", arg.srcFn.n, arg.srcFn)
-	}
+	span.AddEvent("Processing UIDs", trace.WithAttributes(
+		attribute.Int64("uid_count", int64(arg.srcFn.n)),
+		attribute.String("srcFn", fmt.Sprintf("%+v", arg.srcFn))))
 
 	attr := arg.q.Attr
-	span.Annotatef(nil, "Attr: %s. Fname: %s", attr, arg.srcFn.fname)
+	span.AddEvent("Function information", trace.WithAttributes(
+		attribute.String("attr", attr),
+		attribute.String("fname", arg.srcFn.fname)))
 	tokenizer, err := pickTokenizer(ctx, attr, arg.srcFn.fname)
 	if err != nil {
 		return err
@@ -1333,7 +1348,9 @@ func (qs *queryState) handleCompareFunction(ctx context.Context, arg funcArgs) e
 
 	// Only if the tokenizer that we used IsLossy
 	// then we need to fetch and compare the actual values.
-	span.Annotatef(nil, "Tokenizer: %s, Lossy: %t", tokenizer.Name(), tokenizer.IsLossy())
+	span.AddEvent("Tokenizer details", trace.WithAttributes(
+		attribute.String("tokenizer", tokenizer.Name()),
+		attribute.Bool("is_lossy", tokenizer.IsLossy())))
 
 	if !tokenizer.IsLossy() {
 		return nil
@@ -1472,16 +1489,19 @@ func (qs *queryState) handleCompareFunction(ctx context.Context, arg funcArgs) e
 }
 
 func (qs *queryState) handleMatchFunction(ctx context.Context, arg funcArgs) error {
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "handleMatchFunction")
 	defer stop()
-	if span != nil {
-		span.Annotatef(nil, "Number of uids: %d. args.srcFn: %+v", arg.srcFn.n, arg.srcFn)
-	}
+	span.AddEvent("Processing UIDs", trace.WithAttributes(
+		attribute.Int64("uid_count", int64(arg.srcFn.n)),
+		attribute.String("srcFn", fmt.Sprintf("%+v", arg.srcFn))))
 
 	attr := arg.q.Attr
 	typ := arg.srcFn.atype
-	span.Annotatef(nil, "Attr: %s. Type: %s", attr, typ.Name())
+
+	span.AddEvent("Attribute information", trace.WithAttributes(
+		attribute.String("attr", attr),
+		attribute.String("type", typ.Name())))
 	var uids *pb.List
 	switch {
 	case !typ.IsScalar():
@@ -1509,7 +1529,10 @@ func (qs *queryState) handleMatchFunction(ctx context.Context, arg funcArgs) err
 
 	isList := schema.State().IsList(attr)
 	lang := langForFunc(arg.q.Langs)
-	span.Annotatef(nil, "Total uids: %d, list: %t lang: %v", len(uids.Uids), isList, lang)
+	span.AddEvent("Result UID information", trace.WithAttributes(
+		attribute.Int("uid_count", len(uids.Uids)),
+		attribute.Bool("is_list", isList),
+		attribute.String("lang", lang)))
 	arg.out.UidMatrix = append(arg.out.UidMatrix, uids)
 
 	matchQuery := strings.Join(arg.srcFn.tokens, "")
@@ -1563,17 +1586,17 @@ func (qs *queryState) handleMatchFunction(ctx context.Context, arg funcArgs) err
 }
 
 func (qs *queryState) filterGeoFunction(ctx context.Context, arg funcArgs) error {
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "filterGeoFunction")
 	defer stop()
 
 	attr := arg.q.Attr
 	uids := algo.MergeSorted(arg.out.UidMatrix)
 	numGo, width := x.DivideAndRule(len(uids.Uids))
-	if span != nil && numGo > 1 {
-		span.Annotatef(nil, "Number of uids: %d. NumGo: %d. Width: %d\n",
-			len(uids.Uids), numGo, width)
-	}
+	span.AddEvent("Parallel processing details", trace.WithAttributes(
+		attribute.Int("uid_count", len(uids.Uids)),
+		attribute.Int("num_go", numGo),
+		attribute.Int("width", width)))
 
 	filtered := make([]*pb.List, numGo)
 	filter := func(idx, start, end int) error {
@@ -1621,9 +1644,8 @@ func (qs *queryState) filterGeoFunction(ctx context.Context, arg funcArgs) error
 	for _, out := range filtered {
 		final.Uids = append(final.Uids, out.Uids...)
 	}
-	if span != nil && numGo > 1 {
-		span.Annotatef(nil, "Total uids after filtering geo: %d", len(final.Uids))
-	}
+	span.AddEvent("Geo filtering result", trace.WithAttributes(
+		attribute.Int("uid_count", len(final.Uids))))
 	for i := range arg.out.UidMatrix {
 		algo.IntersectWith(arg.out.UidMatrix[i], final, arg.out.UidMatrix[i])
 	}
@@ -1797,6 +1819,56 @@ func langForFunc(langs []string) string {
 	return langs[0]
 }
 
+func checkUidZero(uids []uint64) bool {
+	for _, uid := range uids {
+		if uid == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func planForEqFilter(fc *functionContext, pred string, uidlist []uint64) {
+	if checkUidZero(uidlist) {
+		// We have a uid which has 0 in it. Mostly it would happen when there is only 0. But any one item
+		// being 0 could cause the query planner to fail. In case of 0 being present, we neeed to query the
+		// index itself.
+		fc.n = len(fc.tokens)
+		return
+	}
+
+	if uint64(len(uidlist)) < Config.TypeFilterUidLimit {
+		fc.tokens = fc.tokens[:0]
+		fc.n = len(uidlist)
+		return
+	}
+
+	estimatedCount := uint64(0)
+	gotEstimate := false
+	for _, eqToken := range fc.tokens {
+		count := posting.GetStatsHolder().ProcessEqPredicate(pred, []byte(eqToken))
+		if count != math.MaxUint64 && count != 0 {
+			estimatedCount += count
+			gotEstimate = true
+		} else {
+			break
+		}
+	}
+
+	if gotEstimate && estimatedCount == 0 {
+		gotEstimate = false
+	}
+
+	// TODO make a different config
+	if gotEstimate && uint64(len(uidlist)) < estimatedCount/Config.TypeFilterUidLimit {
+		fc.tokens = fc.tokens[:0]
+		fc.n = len(uidlist)
+		return
+	}
+
+	fc.n = len(fc.tokens)
+}
+
 func parseSrcFn(ctx context.Context, q *pb.Query) (*functionContext, error) {
 	fnType, f := parseFuncType(q.SrcFunc)
 	attr := q.Attr
@@ -1840,6 +1912,14 @@ func parseSrcFn(ctx context.Context, q *pb.Query) (*functionContext, error) {
 			}
 		}
 
+		generateIneqTokens := true
+		if fc.fname != eq && q.UidList != nil && uint64(len(q.UidList.Uids)) < Config.TypeFilterUidLimit {
+			if !checkUidZero(q.UidList.Uids) {
+				fc.n = len(q.UidList.Uids)
+				generateIneqTokens = false
+			}
+		}
+
 		var tokens []string
 		var ineqValues []types.Val
 		// eq can have multiple args.
@@ -1875,6 +1955,9 @@ func parseSrcFn(ctx context.Context, q *pb.Query) (*functionContext, error) {
 				lang = q.Langs[0]
 			}
 
+			if !generateIneqTokens {
+				continue
+			}
 			// Get tokens ge/le ineqValueToken.
 			if tokens, fc.ineqValueToken, err = getInequalityTokens(ctx, q.ReadTs, attr, f, lang,
 				ineqValues); err != nil {
@@ -1886,13 +1969,8 @@ func parseSrcFn(ctx context.Context, q *pb.Query) (*functionContext, error) {
 			fc.tokens = append(fc.tokens, tokens...)
 		}
 
-		checkUidEmpty := func(uids []uint64) bool {
-			for _, i := range uids {
-				if i == 0 {
-					return false
-				}
-			}
-			return true
+		if !generateIneqTokens {
+			return fc, nil
 		}
 
 		// In case of non-indexed predicate, there won't be any tokens. We will fetch value
@@ -1908,10 +1986,10 @@ func parseSrcFn(ctx context.Context, q *pb.Query) (*functionContext, error) {
 		case q.UidList != nil && len(fc.tokens) > len(q.UidList.Uids) && fc.fname != eq:
 			fc.tokens = fc.tokens[:0]
 			fc.n = len(q.UidList.Uids)
-		case q.UidList != nil && fc.fname == eq && strings.HasSuffix(attr, "dgraph.type") &&
-			int64(len(q.UidList.Uids)) < Config.TypeFilterUidLimit && checkUidEmpty(q.UidList.Uids):
-			fc.tokens = fc.tokens[:0]
-			fc.n = len(q.UidList.Uids)
+		case q.UidList != nil && fc.fname == eq:
+			if len(fc.tokens) > 0 {
+				planForEqFilter(fc, attr, q.UidList.Uids)
+			}
 		default:
 			fc.n = len(fc.tokens)
 		}
@@ -2080,7 +2158,7 @@ func interpretVFloatOrUid(val string) ([]float32, uint64, error) {
 
 // ServeTask is used to respond to a query.
 func (w *grpcWorker) ServeTask(ctx context.Context, q *pb.Query) (*pb.Result, error) {
-	ctx, span := otrace.StartSpan(ctx, "worker.ServeTask")
+	ctx, span := otel.Tracer("").Start(ctx, "worker.ServeTask")
 	defer span.End()
 
 	if ctx.Err() != nil {
@@ -2107,7 +2185,10 @@ func (w *grpcWorker) ServeTask(ctx context.Context, q *pb.Query) (*pb.Result, er
 	if q.UidList != nil {
 		numUids = len(q.UidList.Uids)
 	}
-	span.Annotatef(nil, "Attribute: %q NumUids: %v groupId: %v ServeTask", q.Attr, numUids, gid)
+	span.AddEvent("ServeTask details", trace.WithAttributes(
+		attribute.String("attr", q.Attr),
+		attribute.Int("num_uids", numUids),
+		attribute.Int64("group_id", int64(gid))))
 
 	if !groups().ServesGroup(gid) {
 		return nil, errors.Errorf(
@@ -2444,7 +2525,7 @@ func (qs *queryState) evaluate(cp countParams, out *pb.Result) error {
 
 func (qs *queryState) handleHasFunction(ctx context.Context, q *pb.Query, out *pb.Result,
 	srcFn *functionContext) error {
-	span := otrace.FromContext(ctx)
+	span := trace.SpanFromContext(ctx)
 	stop := x.SpanTimer(span, "handleHasFunction")
 	defer stop()
 	if glog.V(3) {
@@ -2584,9 +2665,8 @@ loop:
 			}
 		}
 	}
-	if span != nil {
-		span.Annotatef(nil, "handleHasFunction found %d uids", len(result.Uids))
-	}
+	span.AddEvent("handleHasFunction result", trace.WithAttributes(
+		attribute.Int("uid_count", len(result.Uids))))
 	out.UidMatrix = append(out.UidMatrix, result)
 	return nil
 }

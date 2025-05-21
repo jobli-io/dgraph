@@ -1,17 +1,6 @@
 /*
- * Copyright 2016-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package posting
@@ -33,19 +22,19 @@ import (
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
 	ostats "go.opencensus.io/stats"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	bpb "github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/tok"
-	"github.com/dgraph-io/dgraph/v24/tok/hnsw"
-	"github.com/dgraph-io/dgraph/v24/types"
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/tok"
+	"github.com/hypermodeinc/dgraph/v25/tok/hnsw"
+	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var emptyCountParams countParams
@@ -262,13 +251,17 @@ func (txn *Txn) addReverseMutationHelper(ctx context.Context, plist *List,
 			return emptyCountParams, errors.Wrapf(ErrTsTooOld, "Adding reverse mutation helper count")
 		}
 	}
+
 	if !(hasCountIndex && !shouldAddCountEdge(found, edge)) {
 		if err := plist.addMutationInternal(ctx, txn, edge); err != nil {
 			return emptyCountParams, err
 		}
 	}
+
 	if hasCountIndex {
-		countAfter = countAfterMutation(countBefore, found, edge.Op)
+		pk, _ := x.Parse(plist.key)
+		shouldCountOneUid := !schema.State().IsList(edge.Attr) && !pk.IsReverse()
+		countAfter = countAfterMutation(countBefore, found, edge.Op, shouldCountOneUid)
 		return countParams{
 			attr:        edge.Attr,
 			countBefore: countBefore,
@@ -475,7 +468,21 @@ func (txn *Txn) updateCount(ctx context.Context, params countParams) error {
 	return nil
 }
 
-func countAfterMutation(countBefore int, found bool, op pb.DirectedEdge_Op) int {
+// Gives the count of the posting after the mutation has finished. Currently we use this to figure after the mutation
+// what is the count. For non scalar predicate, we need to use found and the operation that the user did to figure out
+// if the new node was inserted or not. However, for single uid predicates this information is not useful. For scalar
+// predicate, delete only works if the value was found. Set would just result in 1 alaways.
+func countAfterMutation(countBefore int, found bool, op pb.DirectedEdge_Op, shouldCountOneUid bool) int {
+	if shouldCountOneUid {
+		if op == pb.DirectedEdge_SET {
+			return 1
+		} else if op == pb.DirectedEdge_DEL && found {
+			return 0
+		} else {
+			return countBefore
+		}
+	}
+
 	if !found && op != pb.DirectedEdge_DEL {
 		return countBefore + 1
 	} else if found && op == pb.DirectedEdge_DEL {
@@ -495,9 +502,8 @@ func (txn *Txn) addMutationHelper(ctx context.Context, l *List, doUpdateIndex bo
 	defer l.Unlock()
 
 	if dur := time.Since(t1); dur > time.Millisecond {
-		span := otrace.FromContext(ctx)
-		span.Annotatef([]otrace.Attribute{otrace.BoolAttribute("slow-lock", true)},
-			"Acquired lock %v %v %v", dur, t.Attr, t.Entity)
+		span := trace.SpanFromContext(ctx)
+		span.AddEvent(fmt.Sprintf("Acquired lock %v %v %v", dur, t.Attr, t.Entity))
 	}
 
 	getUID := func(t *pb.DirectedEdge) uint64 {
@@ -516,7 +522,8 @@ func (txn *Txn) addMutationHelper(ctx context.Context, l *List, doUpdateIndex bo
 	var found bool
 	var err error
 
-	delNonListPredicate := !schema.State().IsList(t.Attr) &&
+	isScalarPredicate := !schema.State().IsList(t.Attr)
+	delNonListPredicate := isScalarPredicate &&
 		t.Op == pb.DirectedEdge_DEL && string(t.Value) != x.Star
 
 	switch {
@@ -560,7 +567,9 @@ func (txn *Txn) addMutationHelper(ctx context.Context, l *List, doUpdateIndex bo
 	}
 
 	if hasCountIndex {
-		countAfter = countAfterMutation(countBefore, found, t.Op)
+		pk, _ := x.Parse(l.key)
+		shouldCountOneUid := isScalarPredicate && !pk.IsReverse()
+		countAfter = countAfterMutation(countBefore, found, t.Op, shouldCountOneUid)
 		return val, found, countParams{
 			attr:        t.Attr,
 			countBefore: countBefore,
@@ -672,6 +681,7 @@ type rebuilder struct {
 }
 
 func (r *rebuilder) RunWithoutTemp(ctx context.Context) error {
+	ResetCache()
 	stream := pstore.NewStreamAt(r.startTs)
 	stream.LogPrefix = fmt.Sprintf("Rebuilding index for predicate %s (1/2):", r.attr)
 	stream.Prefix = r.prefix
@@ -1011,6 +1021,7 @@ func (r *rebuilder) Run(ctx context.Context) error {
 			return nil, err
 		}
 
+		memoryLayer.del(key)
 		return &bpb.KVList{Kv: kvs}, nil
 	}
 	tmpStream.Send = func(buf *z.Buffer) error {
@@ -1802,6 +1813,12 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 func DeleteAll() error {
 	ResetCache()
 	return pstore.DropAll()
+}
+
+func DeleteAllForNs(ns uint64) error {
+	ResetCache()
+	schema.State().DeletePredsForNs(ns)
+	return DeleteData(ns)
 }
 
 // DeleteData deletes all data for the namespace but leaves types and schema intact.

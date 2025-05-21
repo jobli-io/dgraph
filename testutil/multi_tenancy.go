@@ -1,17 +1,6 @@
 /*
- * Copyright 2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package testutil
@@ -28,9 +17,9 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type Rule struct {
@@ -89,7 +78,7 @@ func ResetPassword(t *testing.T, token *HttpToken, userID, newPass string, nsID 
 	resp := MakeRequest(t, token, params)
 
 	if len(resp.Errors) > 0 {
-		return "", errors.Errorf(resp.Errors.Error())
+		return "", errors.Errorf("%v", resp.Errors.Error())
 	}
 
 	var result struct {
@@ -127,7 +116,7 @@ func CreateNamespaceWithRetry(t *testing.T, token *HttpToken) (uint64, error) {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			return 0, errors.Errorf(resp.Errors.Error())
+			return 0, errors.Errorf("%v", resp.Errors.Error())
 		}
 		break
 	}
@@ -161,7 +150,7 @@ func DeleteNamespace(t *testing.T, token *HttpToken, nsID uint64) error {
 	}
 	resp := MakeRequest(t, token, params)
 	if len(resp.Errors) > 0 {
-		return errors.Errorf(resp.Errors.Error())
+		return errors.Errorf("%v", resp.Errors.Error())
 	}
 	var result struct {
 		DeleteNamespace struct {

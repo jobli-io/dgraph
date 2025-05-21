@@ -1,53 +1,37 @@
 /*
- * Copyright 2017-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package zero
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"math"
-	"strings"
+	"net/http"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
-	otrace "go.opencensus.io/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/dgraph-io/dgo/v240/protos/api"
-	"github.com/dgraph-io/dgraph/v24/conn"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/telemetry"
-	"github.com/dgraph-io/dgraph/v24/x"
+	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
 	emptyConnectionState pb.ConnectionState
 	errServerShutDown    = errors.New("Server is being shut down")
 )
-
-type license struct {
-	User     string    `json:"user"`
-	MaxNodes uint64    `json:"max_nodes"`
-	Expiry   time.Time `json:"expiry"`
-}
 
 // Server implements the zero server.
 type Server struct {
@@ -115,34 +99,41 @@ func (s *Server) Init() {
 }
 
 func (s *Server) periodicallyPostTelemetry() {
-	glog.V(2).Infof("Starting telemetry data collection for zero...")
-	start := time.Now()
+	const scarfBaseUrlFmt = "https://events.hypermode.com/dgraph-deployments/%v/%v/%v/%v/%v"
 
-	ticker := time.NewTicker(time.Minute * 10)
-	defer ticker.Stop()
+	// sleep so that a leader is elected by this time
+	time.Sleep(time.Minute)
+
+	glog.Infof("Starting telemetry data collection for zero...")
 
 	var lastPostedAt time.Time
-	for range ticker.C {
+	for ; true; <-time.Tick(time.Hour * 6) {
 		if !s.Node.AmLeader() {
 			continue
 		}
-		if time.Since(lastPostedAt) < time.Hour {
-			continue
-		}
-		ms := s.membershipState()
-		t := telemetry.NewZero(ms)
-		if t == nil {
-			continue
-		}
-		t.SinceHours = int(time.Since(start).Hours())
-		glog.V(2).Infof("Posting Telemetry data: %+v", t)
 
-		err := t.Post()
-		if err == nil {
-			lastPostedAt = time.Now()
-		} else {
-			glog.V(2).Infof("Telemetry couldn't be posted. Error: %v", err)
+		if time.Since(lastPostedAt) < time.Hour*24 {
+			continue
 		}
+
+		ms := s.membershipState()
+		var numAlphas, numTablets int
+		for _, g := range ms.GetGroups() {
+			numAlphas += len(g.GetMembers())
+			numTablets += len(g.GetTablets())
+		}
+
+		url := fmt.Sprintf(scarfBaseUrlFmt, x.Version(),
+			runtime.GOOS, numAlphas, len(ms.GetZeros()), numTablets)
+		glog.Infof("Posting Telemetry data to [%v]", url)
+
+		resp, err := http.Get(url)
+		if err != nil {
+			glog.Infof("Telemetry couldn't be posted. Error: %v", err)
+			continue
+		}
+		_ = resp.Body.Close()
+		lastPostedAt = time.Now()
 	}
 }
 
@@ -412,7 +403,7 @@ func (s *Server) createProposals(dst *pb.Group) ([]*pb.ZeroProposal, error) {
 }
 
 func (s *Server) Inform(ctx context.Context, req *pb.TabletRequest) (*pb.TabletResponse, error) {
-	ctx, span := otrace.StartSpan(ctx, "Zero.Inform")
+	ctx, span := otel.Tracer("").Start(ctx, "Zero.Inform")
 	defer span.End()
 	if req == nil || len(req.Tablets) == 0 {
 		return nil, errors.Errorf("Tablets are empty in %+v", req)
@@ -426,7 +417,7 @@ func (s *Server) Inform(ctx context.Context, req *pb.TabletRequest) (*pb.TabletR
 	unknownTablets := make([]*pb.Tablet, 0)
 	for _, t := range req.Tablets {
 		tab := s.ServingTablet(t.Predicate)
-		span.Annotatef(nil, "Tablet for %s: %+v", t.Predicate, tab)
+		span.SetAttributes(attribute.String("tablet_predicate", t.Predicate))
 		switch {
 		case tab != nil && !t.Force:
 			tablets = append(tablets, t)
@@ -460,14 +451,14 @@ func (s *Server) Inform(ctx context.Context, req *pb.TabletRequest) (*pb.TabletR
 	}
 
 	if err := s.Node.proposeAndWait(ctx, &proposal); err != nil && err != errTabletAlreadyServed {
-		span.Annotatef(nil, "While proposing tablet: %v", err)
+		span.AddEvent(fmt.Sprintf("Error proposing tablet: %+v. Error: %v", &proposal, err))
 		return nil, err
 	}
 
 	for _, t := range unknownTablets {
 		tab := s.ServingTablet(t.Predicate)
 		x.AssertTrue(tab != nil)
-		span.Annotatef(nil, "Now serving tablet for %s: %+v", t.Predicate, tab)
+		span.AddEvent(fmt.Sprintf("Tablet served: %+v", tab))
 		tablets = append(tablets, tab)
 	}
 
@@ -520,12 +511,6 @@ func (s *Server) Connect(ctx context.Context,
 	ms, err := s.latestMembershipState(ctx)
 	if err != nil {
 		return nil, err
-	}
-
-	if m.Learner && !ms.License.GetEnabled() {
-		// Update the "ShouldCrash" function in x/x.go if you change the error message here.
-		return nil, errors.New("ENTERPRISE_ONLY_LEARNER - Missing or expired Enterpise License. " +
-			"Cannot add Learner Node.")
 	}
 
 	if m.ClusterInfoOnly {
@@ -662,12 +647,6 @@ func (s *Server) Connect(ctx context.Context,
 		}, nil
 	}
 
-	maxNodes := s.state.GetLicense().GetMaxNodes()
-	if s.state.GetLicense().GetEnabled() && uint64(numberOfNodes) >= maxNodes {
-		return nil, errors.Errorf("ENTERPRISE_LIMIT_REACHED: You are already using the maximum "+
-			"number of nodes: [%v] permitted for your enterprise license.", maxNodes)
-	}
-
 	if err := s.Node.proposeAndWait(ctx, proposal); err != nil {
 		return &emptyConnectionState, err
 	}
@@ -687,7 +666,7 @@ func (s *Server) DeleteNamespace(ctx context.Context, in *pb.DeleteNsRequest) (*
 // ShouldServe returns the tablet serving the predicate passed in the request.
 func (s *Server) ShouldServe(
 	ctx context.Context, tablet *pb.Tablet) (resp *pb.Tablet, err error) {
-	ctx, span := otrace.StartSpan(ctx, "Zero.ShouldServe")
+	ctx, span := otel.Tracer("").Start(ctx, "Zero.ShouldServe")
 	defer span.End()
 
 	if tablet.Predicate == "" {
@@ -699,7 +678,7 @@ func (s *Server) ShouldServe(
 
 	// Check who is serving this tablet.
 	tab := s.ServingTablet(tablet.Predicate)
-	span.Annotatef(nil, "Tablet for %s: %+v", tablet.Predicate, tab)
+	span.SetAttributes(attribute.String("tablet_predicate", tablet.Predicate))
 	if tab != nil && !tablet.Force {
 		// Someone is serving this tablet. Could be the caller as well.
 		// The caller should compare the returned group against the group it holds to check who's
@@ -727,12 +706,12 @@ func (s *Server) ShouldServe(
 	}
 	proposal.Tablet = tablet
 	if err := s.Node.proposeAndWait(ctx, &proposal); err != nil && err != errTabletAlreadyServed {
-		span.Annotatef(nil, "While proposing tablet: %v", err)
+		span.AddEvent(fmt.Sprintf("Error proposing tablet: %+v. Error: %v", &proposal, err))
 		return tablet, err
 	}
 	tab = s.ServingTablet(tablet.Predicate)
 	x.AssertTrue(tab != nil)
-	span.Annotatef(nil, "Now serving tablet for %s: %+v", tablet.Predicate, tab)
+	span.SetAttributes(attribute.String("tablet_predicate_served", tablet.Predicate))
 	return tab, nil
 }
 
@@ -880,37 +859,4 @@ func (s *Server) latestMembershipState(ctx context.Context) (*pb.MembershipState
 		return &pb.MembershipState{}, nil
 	}
 	return ms, nil
-}
-
-func (s *Server) ApplyLicense(ctx context.Context, req *pb.ApplyLicenseRequest) (*pb.Status,
-	error) {
-	var l license
-	signedData := bytes.NewReader(req.License)
-	if err := verifySignature(signedData, strings.NewReader(publicKey), &l); err != nil {
-		return nil, errors.Wrapf(err, "while extracting enterprise details from the license")
-	}
-
-	numNodes := len(s.state.GetZeros())
-	for _, group := range s.state.GetGroups() {
-		numNodes += len(group.GetMembers())
-	}
-	if uint64(numNodes) > l.MaxNodes {
-		return nil, errors.Errorf("Your license only allows [%v] (Alpha + Zero) nodes. "+
-			"You have: [%v].", l.MaxNodes, numNodes)
-	}
-
-	proposal := &pb.ZeroProposal{
-		License: &pb.License{
-			User:     l.User,
-			MaxNodes: l.MaxNodes,
-			ExpiryTs: l.Expiry.Unix(),
-		},
-	}
-
-	err := s.Node.proposeAndWait(ctx, proposal)
-	if err != nil {
-		return nil, errors.Wrapf(err, "while proposing enterprise license state to cluster")
-	}
-	glog.Infof("Enterprise license proposed to the cluster %+v", proposal)
-	return &pb.Status{}, nil
 }

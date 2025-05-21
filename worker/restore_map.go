@@ -1,14 +1,6 @@
-//go:build !oss
-// +build !oss
-
 /*
- * Copyright 2021 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Dgraph Community License (the "License"); you
- * may not use this file except in compliance with the License. You
- * may obtain a copy of the License at
- *
- *     https://github.com/dgraph-io/dgraph/blob/main/licenses/DCL.txt
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package worker
@@ -34,22 +26,21 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/golang/glog"
-	"github.com/golang/snappy"
+	"github.com/klauspost/compress/s2"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 
 	bpb "github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/badger/v4/y"
-	"github.com/dgraph-io/dgraph/v24/codec"
-	"github.com/dgraph-io/dgraph/v24/ee"
-	"github.com/dgraph-io/dgraph/v24/ee/enc"
-	"github.com/dgraph-io/dgraph/v24/posting"
-	"github.com/dgraph-io/dgraph/v24/protos/pb"
-	"github.com/dgraph-io/dgraph/v24/schema"
-	"github.com/dgraph-io/dgraph/v24/tok/hnsw"
-	"github.com/dgraph-io/dgraph/v24/x"
 	"github.com/dgraph-io/ristretto/v2/z"
+	"github.com/hypermodeinc/dgraph/v25/codec"
+	"github.com/hypermodeinc/dgraph/v25/enc"
+	"github.com/hypermodeinc/dgraph/v25/posting"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/hypermodeinc/dgraph/v25/schema"
+	"github.com/hypermodeinc/dgraph/v25/tok/hnsw"
+	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type backupReader struct {
@@ -98,7 +89,7 @@ func (br *backupReader) WithEncryption(encKey x.Sensitive) *backupReader {
 func (br *backupReader) WithCompression(comp string) *backupReader {
 	switch comp {
 	case "snappy":
-		br.r = snappy.NewReader(br.r)
+		br.r = s2.NewReader(br.r)
 	case "gzip", "":
 		r, err := gzip.NewReader(br.r)
 		br.setErr(err)
@@ -220,7 +211,7 @@ func (m *mapper) writeToDisk(buf *z.Buffer) error {
 	var lenBuf [4]byte
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(headerBuf)))
 
-	w := snappy.NewBufferedWriter(f)
+	w := s2.NewWriter(f)
 	x.Check2(w.Write(lenBuf[:]))
 	x.Check2(w.Write(headerBuf))
 	x.Check(err)
@@ -433,9 +424,9 @@ func (m *mapper) processReqCh(ctx context.Context) error {
 				if err := proto.Unmarshal(kv.Value, &update); err != nil {
 					return err
 				}
-				update.TypeName = x.GalaxyAttr(update.TypeName)
+				update.TypeName = x.AttrInRootNamespace(update.TypeName)
 				for _, sch := range update.Fields {
-					sch.Predicate = x.GalaxyAttr(sch.Predicate)
+					sch.Predicate = x.AttrInRootNamespace(sch.Predicate)
 				}
 				kv.Value, err = proto.Marshal(&update)
 				return err
@@ -770,7 +761,7 @@ func RunMapper(req *pb.RestoreRequest, mapDir string) (*mapResult, error) {
 	if err != nil {
 		return nil, errors.Wrapf(err, "unable to get encryption config")
 	}
-	keys, err := ee.GetKeys(cfg)
+	keys, err := x.GetEncAclKeys(cfg)
 	if err != nil {
 		return nil, errors.Wrapf(err, "unable to get encryption keys")
 	}

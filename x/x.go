@@ -1,17 +1,6 @@
 /*
- * Copyright 2015-2023 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package x
@@ -38,7 +27,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/dustin/go-humanize"
@@ -46,7 +34,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	"go.opencensus.io/plugin/ocgrpc"
-	"go.opencensus.io/trace"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -61,15 +50,13 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	bo "github.com/dgraph-io/badger/v4/options"
 	badgerpb "github.com/dgraph-io/badger/v4/pb"
-	"github.com/dgraph-io/dgo/v240"
-	"github.com/dgraph-io/dgo/v240/protos/api"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/ristretto/v2/z"
 )
 
 // Error constants representing different types of errors.
 var (
-	// ErrNotSupported is thrown when an enterprise feature is requested in the open source version.
-	ErrNotSupported = errors.Errorf("Feature available only in Dgraph Enterprise Edition")
 	// ErrNoJwt is returned when JWT is not present in the context.
 	ErrNoJwt = errors.New("no accessJwt available")
 	// ErrorInvalidLogin is returned when username or password is incorrect in login
@@ -125,8 +112,8 @@ const (
 
 	// GrootId is the ID of the admin user for ACLs.
 	GrootId = "groot"
-	// GuardiansId is the ID of the admin group for ACLs.
-	GuardiansId = "guardians"
+	// SuperAdminId is the ID of the admin group for ACLs.
+	SuperAdminId = "guardians"
 
 	// GroupIdFileName is the name of the file storing the ID of the group to which
 	// the data in a postings directory belongs. This ID is used to join the proper
@@ -150,15 +137,15 @@ var (
 	regExpHostName = regexp.MustCompile(ValidHostnameRegex)
 	// Nilbyte is a nil byte slice. Used
 	Nilbyte []byte
-	// GuardiansUid is a map from namespace to the Uid of guardians group node.
-	GuardiansUid = &sync.Map{}
+	// SuperAdminUid is a map from namespace to the Uid of superadmin group node.
+	SuperAdminUid = &sync.Map{}
 	// GrootUid is a map from namespace to the Uid of groot user node.
 	GrootUid = &sync.Map{}
 )
 
 func init() {
-	GuardiansUid.Store(GalaxyNamespace, 0)
-	GrootUid.Store(GalaxyNamespace, 0)
+	SuperAdminUid.Store(RootNamespace, 0)
+	GrootUid.Store(RootNamespace, 0)
 }
 
 // ShouldCrash returns true if the error should cause the process to crash.
@@ -169,9 +156,7 @@ func ShouldCrash(err error) bool {
 	errStr := status.Convert(err).Message()
 	return strings.Contains(errStr, "REUSE_RAFTID") ||
 		strings.Contains(errStr, "REUSE_ADDR") ||
-		strings.Contains(errStr, "NO_ADDR") ||
-		strings.Contains(errStr, "ENTERPRISE_LIMIT_REACHED") ||
-		strings.Contains(errStr, "ENTERPRISE_ONLY_LEARNER")
+		strings.Contains(errStr, "NO_ADDR")
 }
 
 // WhiteSpace Replacer removes spaces and tabs from a string.
@@ -283,7 +268,7 @@ func ExtractNamespace(ctx context.Context) (uint64, error) {
 	return namespace, nil
 }
 
-func IsGalaxyOperation(ctx context.Context) bool {
+func IsRootNsOperation(ctx context.Context) bool {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return false
@@ -444,7 +429,7 @@ func ParseRequest(w http.ResponseWriter, r *http.Request, data interface{}) bool
 // it attaches the galaxy namespace.
 func AttachJWTNamespace(ctx context.Context) context.Context {
 	if !WorkerConfig.AclEnabled {
-		return AttachNamespace(ctx, GalaxyNamespace)
+		return AttachNamespace(ctx, RootNamespace)
 	}
 
 	ns, err := ExtractNamespaceFrom(ctx)
@@ -473,7 +458,7 @@ func AttachNamespace(ctx context.Context, namespace uint64) context.Context {
 // the context.
 func AttachJWTNamespaceOutgoing(ctx context.Context) (context.Context, error) {
 	if !WorkerConfig.AclEnabled {
-		return AttachNamespaceOutgoing(ctx, GalaxyNamespace), nil
+		return AttachNamespaceOutgoing(ctx, RootNamespace), nil
 	}
 	ns, err := ExtractNamespaceFrom(ctx)
 	if err != nil {
@@ -493,8 +478,8 @@ func AttachNamespaceOutgoing(ctx context.Context, namespace uint64) context.Cont
 	return metadata.NewOutgoingContext(ctx, md)
 }
 
-// AttachGalaxyOperation specifies in the context that it will be used for doing a galaxy operation.
-func AttachGalaxyOperation(ctx context.Context, ns uint64) context.Context {
+// AttachRootNsOperation specifies in the context that it will be used for doing a Root Namespace operation.
+func AttachRootNsOperation(ctx context.Context, ns uint64) context.Context {
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if !ok {
 		md = metadata.New(nil)
@@ -950,8 +935,7 @@ func SetupConnection(
 
 	dialOpts = append(dialOpts,
 		grpc.WithStatsHandler(&ocgrpc.ClientHandler{}),
-		grpc.WithDefaultCallOptions(callOpts...),
-		grpc.WithBlock())
+		grpc.WithDefaultCallOptions(callOpts...))
 
 	if tlsCfg != nil {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
@@ -959,10 +943,7 @@ func SetupConnection(
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	return grpc.DialContext(ctx, host, dialOpts...)
+	return grpc.NewClient(host, dialOpts...)
 }
 
 // Diff computes the difference between the keys of the two given maps.
@@ -985,22 +966,50 @@ func Diff(dst map[string]struct{}, src map[string]struct{}) ([]string, []string)
 }
 
 // SpanTimer returns a function used to record the duration of the given span.
-func SpanTimer(span *trace.Span, name string) func() {
-	if span == nil {
-		return func() {}
-	}
-	uniq := int64(rand.Int31()) //nolint:gosec // unique id for tracing does not require cryptographic precision
-	attrs := []trace.Attribute{
-		trace.Int64Attribute("funcId", uniq),
-		trace.StringAttribute("funcName", name),
-	}
-	span.Annotate(attrs, "Start.")
-	start := time.Now()
+// It supports both OpenCensus and OpenTelemetry spans
+func SpanTimer(spanInterface interface{}, name string) func() {
+	// OpenCensus span case
+	if span, ok := spanInterface.(*trace.Span); ok && span != nil {
+		uniq := int64(rand.Int31()) //nolint:gosec // unique id for tracing does not require cryptographic precision
+		attrs := trace.WithAttributes(
+			attribute.Int64("funcId", uniq),
+			attribute.String("funcName", name),
+		)
+		(*span).AddEvent("Start", attrs)
+		start := time.Now()
 
-	return func() {
-		span.Annotatef(attrs, "End. Took %s", time.Since(start))
-		// TODO: We can look into doing a latency record here.
+		return func() {
+			(*span).AddEvent("End", trace.WithAttributes(
+				attribute.Int64("funcId", uniq),
+				attribute.String("funcName", name),
+				attribute.String("duration", time.Since(start).String()),
+			))
+			// TODO: We can look into doing a latency record here.
+		}
 	}
+
+	// OpenTelemetry span case
+	if span, ok := spanInterface.(trace.Span); ok {
+		uniq := int64(rand.Int31()) //nolint:gosec // unique id for tracing does not require cryptographic precision
+		attrs := trace.WithAttributes(
+			attribute.Int64("funcId", uniq),
+			attribute.String("funcName", name),
+		)
+		span.AddEvent("Start", attrs)
+		start := time.Now()
+
+		return func() {
+			span.AddEvent("End", trace.WithAttributes(
+				attribute.Int64("funcId", uniq),
+				attribute.String("funcName", name),
+				attribute.String("duration", time.Since(start).String()),
+			))
+			// TODO: We can look into doing a latency record here.
+		}
+	}
+
+	// Fall back for nil or unknown span type
+	return func() {}
 }
 
 // CloseFunc needs to be called to close all the client connections.
@@ -1117,7 +1126,7 @@ func AskUserPassword(userid string, pwdType string, times int) (string, error) {
 	AssertTrue(pwdType == "Current" || pwdType == "New")
 	// ask for the user's password
 	fmt.Printf("%s password for %v:", pwdType, userid)
-	pd, err := term.ReadPassword(syscall.Stdin)
+	pd, err := term.ReadPassword(int(os.Stdin.Fd()))
 	if err != nil {
 		return "", errors.Wrapf(err, "while reading password")
 	}
@@ -1126,7 +1135,7 @@ func AskUserPassword(userid string, pwdType string, times int) (string, error) {
 
 	if times == 2 {
 		fmt.Printf("Retype %s password for %v:", strings.ToLower(pwdType), userid)
-		pd2, err := term.ReadPassword(syscall.Stdin)
+		pd2, err := term.ReadPassword(int(os.Stdin.Fd()))
 		if err != nil {
 			return "", errors.Wrapf(err, "while reading password")
 		}
@@ -1160,9 +1169,9 @@ func GetPassAndLogin(dg *dgo.Dgraph, opt *CredOpt) error {
 	return nil
 }
 
-func IsGuardian(groups []string) bool {
+func IsSuperAdmin(groups []string) bool {
 	for _, group := range groups {
-		if group == GuardiansId {
+		if group == SuperAdminId {
 			return true
 		}
 	}

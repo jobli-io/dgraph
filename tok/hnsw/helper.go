@@ -1,19 +1,6 @@
 /*
- * Copyright 2016-2024 Dgraph Labs, Inc. and Contributors
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * Co-authored by: jairad26@gmail.com, sunil@hypermode.com, bill@hypdermode.com
+ * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 package hnsw
@@ -31,9 +18,8 @@ import (
 	"strings"
 	"unsafe"
 
-	c "github.com/dgraph-io/dgraph/v24/tok/constraints"
-	"github.com/dgraph-io/dgraph/v24/tok/index"
-	"github.com/getsentry/sentry-go"
+	c "github.com/hypermodeinc/dgraph/v25/tok/constraints"
+	"github.com/hypermodeinc/dgraph/v25/tok/index"
 	"github.com/pkg/errors"
 	"github.com/viterin/vek"
 	"github.com/viterin/vek/vek32"
@@ -249,7 +235,7 @@ type TxnCache struct {
 	startTs uint64
 }
 
-func (tc *TxnCache) Get(key []byte) (rval index.Value, rerr error) {
+func (tc *TxnCache) Get(key []byte) (rval []byte, rerr error) {
 	return tc.txn.Get(key)
 }
 
@@ -278,7 +264,7 @@ func (qc *QueryCache) Find(prefix []byte, filter func([]byte) bool) (uint64, err
 	return qc.cache.Find(prefix, filter)
 }
 
-func (qc *QueryCache) Get(key []byte) (rval index.Value, rerr error) {
+func (qc *QueryCache) Get(key []byte) (rval []byte, rerr error) {
 	return qc.cache.Get(key)
 }
 
@@ -295,7 +281,7 @@ func NewQueryCache(cache index.LocalCache, readTs uint64) *QueryCache {
 
 // getDataFromKeyWithCacheType(keyString, uid, c) looks up data in c
 // associated with keyString and uid.
-func getDataFromKeyWithCacheType(keyString string, uid uint64, c index.CacheType) (index.Value, error) {
+func getDataFromKeyWithCacheType(keyString string, uid uint64, c index.CacheType) ([]byte, error) {
 	key := DataKey(keyString, uid)
 	data, err := c.Get(key)
 	if err != nil {
@@ -326,7 +312,7 @@ func populateEdgeDataFromKeyWithCacheType(
 	if data == nil {
 		return false, nil
 	}
-	err = decodeUint64MatrixUnsafe(data.([]byte), edgeData)
+	err = decodeUint64MatrixUnsafe(data, edgeData)
 	return true, err
 }
 
@@ -368,6 +354,8 @@ func getInsertLayer(maxLevels int) int {
 	return level
 }
 
+var emptyVec = []byte{}
+
 // adds the data corresponding to a uid to the given vec variable in the form of []T
 // this does not allocate memory for vec, so it must be allocated before calling this function
 func (ph *persistentHNSW[T]) getVecFromUid(uid uint64, c index.CacheType, vec *[]T) error {
@@ -375,16 +363,16 @@ func (ph *persistentHNSW[T]) getVecFromUid(uid uint64, c index.CacheType, vec *[
 	if err != nil {
 		if errors.Is(err, errFetchingPostingList) {
 			// no vector. Return empty array of floats
-			index.BytesAsFloatArray([]byte{}, vec, ph.floatBits)
+			index.BytesAsFloatArray(emptyVec, vec, ph.floatBits)
 			return fmt.Errorf("%w; %w", errNilVector, err)
 		}
 		return err
 	}
 	if data != nil {
-		index.BytesAsFloatArray(data.([]byte), vec, ph.floatBits)
+		index.BytesAsFloatArray(data, vec, ph.floatBits)
 		return nil
 	} else {
-		index.BytesAsFloatArray([]byte{}, vec, ph.floatBits)
+		index.BytesAsFloatArray(emptyVec, vec, ph.floatBits)
 		return errNilVector
 	}
 }
@@ -419,7 +407,7 @@ func (ph *persistentHNSW[T]) createEntryAndStartNodes(
 		return create_edges(inUuid)
 	}
 
-	entry := BytesToUint64(data.([]byte)) // convert entry Uuid returned from Get to uint64
+	entry := BytesToUint64(data) // convert entry Uuid returned from Get to uint64
 	err := ph.getVecFromUid(entry, c, vec)
 	if err != nil || len(*vec) == 0 {
 		// The entry vector has been deleted. We have to create a new entry vector.
@@ -609,7 +597,7 @@ func (ph *persistentHNSW[T]) addNeighbors(ctx context.Context, tc *TxnCache,
 			allLayerEdges = allLayerNeighbors
 		} else {
 			// all edges of nearest neighbor
-			err := decodeUint64MatrixUnsafe(data.([]byte), &allLayerEdges)
+			err := decodeUint64MatrixUnsafe(data, &allLayerEdges)
 			if err != nil {
 				return nil, err
 			}
@@ -671,7 +659,7 @@ func (ph *persistentHNSW[T]) removeDeadNodes(nnEdges []uint64, tc *TxnCache) ([]
 
 		var deadNodes []uint64
 		if data != nil { // if dead nodes exist, convert to []uint64
-			deadNodes, err = ParseEdges(string(data.([]byte)))
+			deadNodes, err = ParseEdges(string(data))
 			if err != nil {
 				return []uint64{}, err
 			}
@@ -791,14 +779,6 @@ func strToUint(s string) uint64 {
 func Check(err error) {
 	if err != nil {
 		err = errors.Wrap(err, "")
-		CaptureSentryException(err)
 		log.Fatalf("%+v", err)
-	}
-}
-
-// CaptureSentryException sends the error report to Sentry.
-func CaptureSentryException(err error) {
-	if err != nil {
-		sentry.CaptureException(err)
 	}
 }
