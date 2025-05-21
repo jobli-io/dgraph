@@ -1487,12 +1487,12 @@ func defaultDirectiveValidation(sch *ast.Schema,
 			"Type %s; Field %s: cannot use @default directive on a @remote type",
 			typ.Name, field.Name)}
 	}
-	if !isScalar(field.Type.Name()) && sch.Types[field.Type.Name()].Kind != ast.Enum {
-		return []*gqlerror.Error{gqlerror.ErrorPosf(
-			dir.Position,
-			"Type %s; Field %s: cannot use @default directive on field with non-scalar type %s",
-			typ.Name, field.Name, field.Type.Name())}
-	}
+	// if !isScalar(field.Type.Name()) && sch.Types[field.Type.Name()].Kind != ast.Enum {
+	// 	return []*gqlerror.Error{gqlerror.ErrorPosf(
+	// 		dir.Position,
+	// 		"Type %s; Field %s: cannot use @default directive on field with non-scalar type %s",
+	// 		typ.Name, field.Name, field.Type.Name())}
+	// }
 	if field.Type.Elem != nil {
 		return []*gqlerror.Error{gqlerror.ErrorPosf(
 			dir.Position,
@@ -1560,13 +1560,14 @@ func defaultDirectiveValidation(sch *ast.Schema,
 			env := map[string]interface{}{
 				"uuid":   uuid.NewString,
 				"parent": map[string]interface{}{},
+				"auth":   map[string]interface{}{},
 			}
 			_, err := expr.Compile(exp, expr.Env(env))
 			if err != nil {
 				return []*gqlerror.Error{gqlerror.ErrorPosf(
 					dir.Position,
-					"Type %s; Field %s: @default directive provides extr \"%s\" which cannot be compiled",
-					typ.Name, field.Name, exp)}
+					"Type %s; Field %s: @default directive provides extr \"%s\" which cannot be compiled: %s",
+					typ.Name, field.Name, exp, err.Error())}
 			}
 		}
 	}

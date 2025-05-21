@@ -291,7 +291,7 @@ type FieldDefinition interface {
 	HasEmbeddingDirective() bool
 	EmbeddingSearchMetric() string
 	HasInterfaceArg() bool
-	GetDefaultValue(action string, parent map[string]interface{}) interface{}
+	GetDefaultValue(action string, parent map[string]interface{}, auth map[string]interface{}) interface{}
 	Inverse() FieldDefinition
 	WithMemberType(string) FieldDefinition
 	// TODO - It might be possible to get rid of ForwardEdge and just use Inverse() always.
@@ -2342,14 +2342,14 @@ func (fd *fieldDefinition) IsID() bool {
 	return isID(fd.fieldDef)
 }
 
-func (fd *fieldDefinition) GetDefaultValue(action string, parent map[string]interface{}) interface{} {
+func (fd *fieldDefinition) GetDefaultValue(action string, parent map[string]interface{}, auth map[string]interface{}) interface{} {
 	if fd.fieldDef == nil {
 		return nil
 	}
-	return getDefaultValue(fd.fieldDef, action, parent)
+	return getDefaultValue(fd.inSchema.schema, fd.fieldDef, action, parent, auth)
 }
 
-func getDefaultValue(fd *ast.FieldDefinition, action string, parent map[string]interface{}) interface{} {
+func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, parent map[string]interface{}, auth map[string]interface{}) interface{} {
 	dir := fd.Directives.ForName(defaultDirective)
 	if dir == nil {
 		return nil
@@ -2359,6 +2359,8 @@ func getDefaultValue(fd *ast.FieldDefinition, action string, parent map[string]i
 		return nil
 	}
 
+	var defaultValue interface{}
+
 	if value := arg.Value.Children.ForName("value"); value != nil {
 		if value.Raw == "$now" {
 			if flag.Lookup("test.v") == nil {
@@ -2367,13 +2369,13 @@ func getDefaultValue(fd *ast.FieldDefinition, action string, parent map[string]i
 				return "2000-01-01T00:00:00.00Z"
 			}
 		}
-		return value.Raw
-	}
+		defaultValue = value.Raw
 
-	if exp := arg.Value.Children.ForName("expr"); exp != nil {
+	} else if exp := arg.Value.Children.ForName("expr"); exp != nil {
 		env := map[string]interface{}{
 			"uuid":   uuid.NewString,
 			"parent": parent,
+			"auth":   auth,
 		}
 		program, err := expr.Compile(exp.Raw, expr.Env(env))
 		if err != nil {
@@ -2383,10 +2385,23 @@ func getDefaultValue(fd *ast.FieldDefinition, action string, parent map[string]i
 		if err != nil {
 			return nil
 		}
-		return expResult
+		defaultValue = expResult
 	}
 
-	return nil
+	// parse value for non-scalar fields
+	if !isScalar(fd.Type.Name()) && sch.Types[fd.Type.Name()].Kind != ast.Enum {
+		m := map[string]interface{}{}
+		b, err := json.Marshal(defaultValue)
+		if err != nil {
+			return nil
+		}
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil
+		}
+		defaultValue = m
+	}
+
+	return defaultValue
 }
 
 func (fd *fieldDefinition) HasIDDirective() bool {

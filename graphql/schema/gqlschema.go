@@ -2533,7 +2533,7 @@ func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
 
 		// if the field has a @default(add) value it is optional in add input
 		var field = createField(schema, fld)
-		if getDefaultValue(fld, "add", nil) != nil {
+		if getDefaultValue(schema, fld, "add", nil, nil) != nil {
 			field.Type.NonNull = false
 		}
 

@@ -79,6 +79,7 @@ image-local local-image:
 	@mkdir -p linux
 	@mv ./dgraph/dgraph ./linux/dgraph
 	@docker build -f contrib/Dockerfile -t dgraph/dgraph:local .
+	# @docker build -f contrib/Dockerfile -t dgraph/dgraph:local . --platform linux/amd64
 	@rm -r linux
 
 .PHONY: docker-image
