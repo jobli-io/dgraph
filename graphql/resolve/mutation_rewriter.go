@@ -1634,9 +1634,8 @@ func rewriteObject(
 	}
 
 	// Now we know whether this is a new node or not, we can set @default(add/update) fields
-	for _, field := range typ.Fields() {
-		var pred = field.DgraphPredicate()
-		if newObj[pred] != nil {
+	for _, field := range typ.FieldsInDefaultValueEvaluationOrder(action) {
+		if obj[field.Name()] != nil {
 			continue
 		}
 
@@ -1716,7 +1715,7 @@ func rewriteObject(
 				obj[field.Name()] = v
 	
 			} else {
-				newObj[pred] = value
+				obj[field.Name()] = value
 			}
 		}
 	}

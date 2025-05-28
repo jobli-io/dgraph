@@ -239,6 +239,7 @@ type Query interface {
 type Type interface {
 	Field(name string) FieldDefinition
 	Fields() []FieldDefinition
+	FieldsInDefaultValueEvaluationOrder(action string) []FieldDefinition
 	IDField() FieldDefinition
 	XIDFields() []FieldDefinition
 	InterfaceImplHasAuthRules() bool
@@ -2315,6 +2316,34 @@ func (t *astType) Fields() []FieldDefinition {
 	return result
 }
 
+// Sort the fields by their default evaluation order.
+// This is useful for managing dependent fields while evaluating the default expressions. 
+func (t *astType) FieldsInDefaultValueEvaluationOrder(action string) []FieldDefinition {
+	var defs []*fieldDefinition
+
+	for _, fld := range t.inSchema.schema.Types[t.Name()].Fields {
+		defs = append(defs,
+			&fieldDefinition{
+				fieldDef:        fld,
+				inSchema:        t.inSchema,
+				dgraphPredicate: t.dgraphPredicate,
+				parentType:      t,
+			})
+	}
+
+	// It returns true if the element at index i should come before the element at index j.
+	sort.Slice(defs, func(i, j int) bool {
+		return defs[i].getDefaultValueEvaluationOrder(action) < defs[j].getDefaultValueEvaluationOrder(action)
+	})
+
+	var result []FieldDefinition
+	for _, d := range defs {
+		result = append(result, d)
+	}
+
+	return result
+}
+
 func (fd *fieldDefinition) Name() string {
 	return fd.fieldDef.Name
 }
@@ -2329,6 +2358,29 @@ func (fd *fieldDefinition) DgraphPredicate() string {
 
 func (fd *fieldDefinition) IsID() bool {
 	return isID(fd.fieldDef)
+}
+
+func (fd *fieldDefinition) getDefaultValueEvaluationOrder(action string) int {
+	if fd.fieldDef == nil {
+		return -1
+	}
+
+	dir := fd.fieldDef.Directives.ForName(defaultDirective)
+	if dir == nil {
+		return -1
+	}
+	arg := dir.Arguments.ForName(action)
+	if arg == nil {
+		return -1
+	}
+
+	value := arg.Value.Children.ForName("evaluationOrder"); 
+	if value == nil {
+		return -1
+	}
+
+	evaluationOrder, _ := strconv.Atoi(value.Raw)
+	return evaluationOrder
 }
 
 func (fd *fieldDefinition) GetDefaultValue(action string, parent map[string]interface{}, auth map[string]interface{}) interface{} {
