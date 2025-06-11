@@ -1540,6 +1540,7 @@ func defaultDirectiveValidation(sch *ast.Schema,
 			exp := v.Raw
 			env := map[string]interface{}{
 				"uuid":   uuid.NewString,
+				"hash":   hash,
 				"parent": map[string]interface{}{},
 				"auth":   map[string]interface{}{},
 			}

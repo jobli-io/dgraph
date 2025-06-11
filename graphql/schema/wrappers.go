@@ -7,6 +7,8 @@ package schema
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -2415,6 +2417,7 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, pa
 	} else if exp := arg.Value.Children.ForName("expr"); exp != nil {
 		env := map[string]interface{}{
 			"uuid":   uuid.NewString,
+			"hash":   hash,
 			"parent": parent,
 			"auth":   auth,
 		}
@@ -2443,6 +2446,11 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, pa
 	}
 
 	return defaultValue
+}
+
+func hash(input string) string {
+	hash := sha256.Sum256([]byte(input))
+	return  hex.EncodeToString(hash[:])
 }
 
 func (fd *fieldDefinition) HasIDDirective() bool {

@@ -1647,13 +1647,15 @@ func rewriteObject(
 		var value = field.GetDefaultValue(action, obj, authVars) // TODO: handle errors from expression
 
 		if value != nil{
+			obj[field.Name()] = value
+
 			// update idExistence for nodes with default xid
 			// ...
 			
 			// update idExistence for default node
 			if v, ok := value.(map[string]interface{}); ok {
-				fieldQueries, fieldTypes, err := existenceQueries(ctx, typ.Field(field.Name()).Type(), field, varGen, v, xidMetadata)
-				retErrors = append(retErrors, err...)
+				fieldQueries, fieldTypes, _ := existenceQueries(ctx, typ.Field(field.Name()).Type(), field, varGen, v, xidMetadata)
+				// retErrors = append(retErrors, err...)
 				// Execute queries and parse its result into a map
 				qry := dgraph.AsString(fieldQueries)
 				req := &dgoapi.Request{Query: qry}
@@ -1711,11 +1713,6 @@ func rewriteObject(
 						}
 					}
 				}
-	
-				obj[field.Name()] = v
-	
-			} else {
-				obj[field.Name()] = value
 			}
 		}
 	}
