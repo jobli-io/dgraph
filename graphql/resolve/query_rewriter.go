@@ -1288,6 +1288,11 @@ func (authRw *authRewriter) rewriteRuleNode(
 			Child: filts,
 		}
 	case len(rn.Or) > 0:
+		// First, check if any of the children are statically Positive.
+		// If so, this OR condition is already satisfied and needs no filter.
+		if rn.EvaluateStatic(authRw.authVariables) == schema.Positive {
+			return nil, nil
+		}
 		qrys, filts := nodeList(typ, rn.Or)
 		if len(filts) == 0 {
 			return qrys, nil
