@@ -1120,10 +1120,25 @@ func (authRw *authRewriter) addAuthQueries(
 		return dgQuery
 	}
 
-	if rbacEval != schema.Uncertain {
-		fldAuthQueries = nil
-		filter = nil
+	// If static evaluation already determined the result is Positive,
+	// no dynamic auth queries or scaffolding are needed. Return the original query.
+	// This prevents the creation of unused DQL variables.
+	if rbacEval == schema.Positive {
+		return dgQuery
 	}
+
+	// The original code handled this partially, but continued execution.
+	// We are replacing it with a definitive early exit.
+	if rbacEval == schema.Negative {
+		// This should theoretically be handled by the caller, but as a safeguard.
+		dgQuery[0].Attr = dgQuery[0].Attr + "()"
+		// We can return an empty query, but the original dgQuery already has a `()`
+		// suffix, so we can return that.
+		return dgQuery
+	}
+
+	// If we've made it this far, it means rbacEval was Uncertain and we have dynamic auth 
+	// rules to apply. Now, and only now, do we build the varQry and rootQry DQL variables.
 
 	// build a query like
 	//   Todo1 as var(func: ... ) @filter(...)
@@ -2018,8 +2033,11 @@ func buildFilter(typ schema.Type,
 				ands = append(ands, ft)
 				varQry = append(varQry, qs...)
 			case []interface{}:
-				for _, obj := range v {
-					ft, qs := buildFilter(typ, obj.(map[string]interface{}), auth, qn)
+				for i, obj := range v {
+					// Create a unique query name for each element in the array by appending its index.
+					// This ensures that nested filters generate unique DQL variables.
+					childQueryName := fmt.Sprintf("%s_%d", qn, i)
+					ft, qs := buildFilter(typ, obj.(map[string]interface{}), auth, childQueryName)
 					ands = append(ands, ft)
 					varQry = append(varQry, qs...)
 				}
@@ -2041,8 +2059,11 @@ func buildFilter(typ schema.Type,
 				varQry = append(varQry, qs...)
 			case []interface{}:
 				ors := make([]*dql.FilterTree, 0, len(v))
-				for _, obj := range v {
-					ft, qs := buildFilter(typ, obj.(map[string]interface{}), auth, qn)
+				for i, obj := range v {
+					// Create a unique query name for each element in the array by appending its index.
+					// This ensures that nested filters generate unique DQL variables.
+					childQueryName := fmt.Sprintf("%s_%d", qn, i)
+					ft, qs := buildFilter(typ, obj.(map[string]interface{}), auth, childQueryName)
 					ors = append(ors, ft)
 					varQry = append(varQry, qs...)
 				}
