@@ -521,7 +521,7 @@ func flatPopulateInserts(insertArr []insertToPersistentFlatStorageTest, flatPh *
 }
 
 func RunFlatSearchTests(t *testing.T, test searchPersistentFlatStorageTest, flatPh *persistentHNSW[float64]) {
-	nns, err := flatPh.Search(context.TODO(), test.qc, test.query, test.maxResults, index.AcceptAll[float64])
+	nns, err := flatPh.Search(context.TODO(), test.qc, test.query, test.maxResults, 0, index.AcceptAll[float64])
 	if err != nil && test.expectedErr != nil {
 		if err.Error() != test.expectedErr.Error() {
 			t.Errorf("Output %q not equal to expected %q", err.Error(), test.expectedErr.Error())

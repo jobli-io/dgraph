@@ -7,26 +7,33 @@ package schema
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
+	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/expr-lang/expr"
-	"github.com/google/uuid"
-	"github.com/pkg/errors"
-
 	"github.com/dgraph-io/gqlparser/v2/ast"
 	"github.com/dgraph-io/gqlparser/v2/parser"
+	"github.com/expr-lang/expr" // For expression evaluation
+	"github.com/go-playground/validator/v10"
+	"github.com/google/uuid"
 	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
 	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/mitchellh/mapstructure"
+	"github.com/pkg/errors"
+	"github.com/sashabaranov/go-openai"
+	"google.golang.org/genai"
 )
 
 // Wrap the github.com/dgraph-io/gqlparser/ast defintions so that the bulk of the GraphQL
@@ -103,6 +110,7 @@ const (
 	SimilarByArgName                           = "by"
 	SimilarTopKArgName                         = "topK"
 	SimilarVectorArgName                       = "vector"
+	SimilarTextArgName                         = "text"
 	EmbeddingEnumSuffix                        = "Embedding"
 	SimilarQueryPrefix                         = "querySimilar"
 	SimilarByIdQuerySuffix                     = "ById"
@@ -242,6 +250,7 @@ type Type interface {
 	Field(name string) FieldDefinition
 	Fields() []FieldDefinition
 	FieldsInDefaultValueEvaluationOrder(action string) []FieldDefinition
+	GetOldValueFieldsForQuery() map[string]string
 	IDField() FieldDefinition
 	XIDFields() []FieldDefinition
 	InterfaceImplHasAuthRules() bool
@@ -280,10 +289,14 @@ type FieldDefinition interface {
 	IsExternal() bool
 	HasIDDirective() bool
 	HasSearchDirective() bool
+	HasOldValueDirective() bool
 	HasEmbeddingDirective() bool
+	HasEmbeddingProvider() bool
 	EmbeddingSearchMetric() string
 	HasInterfaceArg() bool
-	GetDefaultValue(action string, parent map[string]interface{}, auth map[string]interface{}) interface{}
+	GetDefaultValue(action string, parentTypeName string, parent map[string]interface{}, auth map[string]interface{}, oldValue map[string]interface{}, removeValue map[string]interface{}) (interface{}, error)
+	ValidateValue(action string, parentTypeName string, parent map[string]interface{}, auth map[string]interface{}, oldValue map[string]interface{}, removeValue map[string]interface{}) []error
+	GenerateEmbedding(textToEmbed string) ([]float32, error)
 	Inverse() FieldDefinition
 	WithMemberType(string) FieldDefinition
 	// TODO - It might be possible to get rid of ForwardEdge and just use Inverse() always.
@@ -2293,9 +2306,16 @@ func (t *astType) IsAggregateResult() bool {
 }
 
 func (t *astType) Field(name string) FieldDefinition {
+	def := t.inSchema.schema.Types[t.Name()]
+	if def == nil {
+		return nil
+	}
+	fieldDef := def.Fields.ForName(name)
+	if fieldDef == nil {
+		return nil
+	}
 	return &fieldDefinition{
-		// this ForName lookup is a loop in the underlying schema :-(
-		fieldDef:        t.inSchema.schema.Types[t.Name()].Fields.ForName(name),
+		fieldDef:        fieldDef,
 		inSchema:        t.inSchema,
 		dgraphPredicate: t.dgraphPredicate,
 		parentType:      t,
@@ -2319,7 +2339,7 @@ func (t *astType) Fields() []FieldDefinition {
 }
 
 // Sort the fields by their default evaluation order.
-// This is useful for managing dependent fields while evaluating the default expressions. 
+// This is useful for managing dependent fields while evaluating the default expressions.
 func (t *astType) FieldsInDefaultValueEvaluationOrder(action string) []FieldDefinition {
 	var defs []*fieldDefinition
 
@@ -2344,6 +2364,25 @@ func (t *astType) FieldsInDefaultValueEvaluationOrder(action string) []FieldDefi
 	}
 
 	return result
+}
+
+// Type: Add a helper to collect all fields marked @oldValue
+// This recursively finds all fields of the type that are marked @oldValue.
+// It returns a map of GraphQLFieldName -> DgraphPredicate.
+// This is crucial for building the DQL query and for `expr` context.
+func (t *astType) GetOldValueFieldsForQuery() map[string]string {
+	oldValueFields := make(map[string]string)
+	for _, field := range t.Fields() {
+		// Only direct fields marked with @oldValue
+		if field.HasOldValueDirective() {
+			oldValueFields[field.Name()] = field.DgraphPredicate()
+		}
+		// If nested objects also need their fields, then recurse.
+		// For simplicity, we'll assume @oldValue is only on scalar fields or direct links for now.
+		// Handling nested objects marked @oldValue (e.g. `user: User @oldValue { email @oldValue }`)
+		// would make the DQL generation more complex (nested queries).
+	}
+	return oldValueFields
 }
 
 func (fd *fieldDefinition) Name() string {
@@ -2376,7 +2415,7 @@ func (fd *fieldDefinition) getDefaultValueEvaluationOrder(action string) int {
 		return -1
 	}
 
-	value := arg.Value.Children.ForName("evaluationOrder"); 
+	value := arg.Value.Children.ForName("evaluationOrder")
 	if value == nil {
 		return -1
 	}
@@ -2385,21 +2424,33 @@ func (fd *fieldDefinition) getDefaultValueEvaluationOrder(action string) int {
 	return evaluationOrder
 }
 
-func (fd *fieldDefinition) GetDefaultValue(action string, parent map[string]interface{}, auth map[string]interface{}) interface{} {
+func (fd *fieldDefinition) GetDefaultValue(
+	action string,
+	parentTypeName string,
+	parent map[string]interface{},
+	auth map[string]interface{},
+	oldValue map[string]interface{},
+	removeValue map[string]interface{}) (interface{}, error) {
 	if fd.fieldDef == nil {
-		return nil
+		return nil, nil
 	}
-	return getDefaultValue(fd.inSchema.schema, fd.fieldDef, action, parent, auth)
+	return getDefaultValue(fd.inSchema.schema, fd.fieldDef, action, parentTypeName, parent, auth, oldValue, removeValue)
 }
 
-func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, parent map[string]interface{}, auth map[string]interface{}) interface{} {
+func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
+	action string,
+	parentTypeName string,
+	parent map[string]interface{},
+	auth map[string]interface{},
+	oldValue map[string]interface{},
+	removeValue map[string]interface{}) (interface{}, error) {
 	dir := fd.Directives.ForName(defaultDirective)
 	if dir == nil {
-		return nil
+		return nil, nil
 	}
 	arg := dir.Arguments.ForName(action)
 	if arg == nil {
-		return nil
+		return nil, nil
 	}
 
 	var defaultValue interface{}
@@ -2407,50 +2458,539 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, pa
 	if value := arg.Value.Children.ForName("value"); value != nil {
 		if value.Raw == "$now" {
 			if flag.Lookup("test.v") == nil {
-				return time.Now().Format(time.RFC3339)
+				return time.Now().Format(time.RFC3339), nil
 			} else {
-				return "2000-01-01T00:00:00.00Z"
+				return "2000-01-01T00:00:00.00Z", nil
 			}
 		}
 		defaultValue = value.Raw
 
 	} else if exp := arg.Value.Children.ForName("expr"); exp != nil {
-		env := map[string]interface{}{
-			"uuid":   uuid.NewString,
-			"sha256":   hashSHA256,
-			"parent": parent,
-			"auth":   auth,
-		}
-		program, err := expr.Compile(exp.Raw, expr.Env(env))
+		env := NewExprEvaluationContext(parentTypeName, parent, oldValue, removeValue, auth, action)
+		program, err := expr.Compile(exp.Raw, expr.Env(env.As()))
 		if err != nil {
-			return nil
+			return nil, &CompileError{Err: errors.Wrapf(err, "field %s expression compilation failed for default value", fd.Name)}
 		}
-		expResult, err := expr.Run(program, env)
+		expResult, err := expr.Run(program, env.As())
 		if err != nil {
-			return nil
+			return nil, errors.Wrapf(err, "field %s expression evaluation failed for default value", fd.Name)
 		}
 		defaultValue = expResult
 	}
 
 	// parse value for non-scalar fields
-	if !isScalar(fd.Type.Name()) && sch.Types[fd.Type.Name()].Kind != ast.Enum {
-		m := map[string]interface{}{}
-		b, err := json.Marshal(defaultValue)
-		if err != nil {
-			return nil
+	if !isScalar(fd.Type.Name()) && sch.Types[fd.Type.Name()].Kind != ast.Enum && defaultValue != nil {
+		switch defaultValue := defaultValue.(type) {
+		case map[string]interface{}, []interface{}:
+		default:
+			return nil, errors.Errorf("non-scalar field %s failed to parse default value: %v", fd.Name, defaultValue)
 		}
-		if err := json.Unmarshal(b, &m); err != nil {
-			return nil
-		}
-		defaultValue = m
 	}
 
-	return defaultValue
+	return defaultValue, nil
 }
 
 func hashSHA256(input string) string {
 	hash := sha256.Sum256([]byte(input))
-	return  hex.EncodeToString(hash[:])
+	return hex.EncodeToString(hash[:])
+}
+
+// GenerateEmbedding creates an embedding vector for the given text using the specified provider and model.
+//
+// It abstracts the process of calling different embedding APIs.
+//
+// Parameters:
+//
+//	provider: The service provider (e.g., OpenAIProvider, GeminiProvider).
+//	modelName: The specific model identifier for the chosen provider (e.g., "text-embedding-ada-002").
+//	textToEmbed: The input text to be vectorized.
+//
+// Returns:
+//
+//	A slice of float32 representing the embedding vector.
+//	An error if the provider is unsupported, the API call fails, or data is malformed.
+//
+// Note: This function assumes necessary API keys are set as environment variables
+// (e.g., OPENAI_API_KEY, GOOGLE_API_KEY). Specific environment variables depend on
+// the provider's SDK.
+func generateEmbedding(provider string, modelName string, textToEmbed string, parameters map[string]any) ([]float32, error) {
+	// Use a context with a timeout to prevent long-running requests.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel() // Ensure context resources are released.
+
+	switch provider {
+	case "openai":
+		return generateOpenAIEmbedding(ctx, modelName, textToEmbed, parameters)
+	case "gemini":
+		return generateGeminiEmbedding(ctx, modelName, textToEmbed, parameters)
+	default:
+		return nil, fmt.Errorf("unsupported embedding provider: '%s'", provider)
+	}
+}
+
+// --- Provider-Specific Implementations ---
+
+// generateOpenAIEmbedding generates an embedding vector for the provided text using an OpenAI model.
+// It handles the OpenAI API interaction.
+func generateOpenAIEmbedding(ctx context.Context, modelName string, textToEmbed string, parameters map[string]any) ([]float32, error) {
+	// Initialize OpenAI client. It's best to manage client lifecycle (e.g.,
+	// initialize once and pass it around) in a larger application.
+	// For this example, we re-initialize it.
+	client := openai.NewClient(os.Getenv("OPENAI_API_KEY"))
+
+	resp, err := client.CreateEmbeddings(ctx, openai.EmbeddingRequest{
+		Model:     openai.EmbeddingModel(modelName),
+		Input:     []string{textToEmbed}, // API expects a slice of strings.
+		ExtraBody: parameters,
+	})
+	if err != nil {
+		// Include model name in error for better debugging.
+		return nil, fmt.Errorf("OpenAI embedding API error for model '%s': %w", modelName, err)
+	}
+
+	// Ensure we received data before accessing it.
+	if len(resp.Data) == 0 {
+		return nil, fmt.Errorf("OpenAI API returned no embedding data for model '%s'", modelName)
+	}
+
+	// Extract the embedding vector. The API returns a slice of embeddings,
+	// one for each string in the input slice. Since we have one input string,
+	// we take the first element.
+	return resp.Data[0].Embedding, nil
+}
+
+// generateGeminiEmbedding generates an embedding vector for the provided text using a Google Gemini embedding model.
+// It authenticates using either an API key (GOOGLE_API_KEY) or Application Default Credentials (ADC)
+// for Vertex AI (GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION).
+func generateGeminiEmbedding(ctx context.Context, modelName string, textToEmbed string, parameters map[string]any) ([]float32, error) {
+	// Initialize the Gemini client.
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
+	}
+
+	// Decode any additional parameters for the embedding request.
+	config := &genai.EmbedContentConfig{}
+	mapstructure.Decode(parameters, config)
+
+	// Generate the embedding for the given text.
+	resp, err := client.Models.EmbedContent(ctx, modelName, genai.Text(textToEmbed), config)
+	if err != nil {
+		return nil, fmt.Errorf("gemini embedding generation failed for model '%s': %w", modelName, err)
+	}
+
+	// Extract the embedding vector from the response.
+	if resp != nil && len(resp.Embeddings) > 0 && resp.Embeddings[0] != nil {
+		return resp.Embeddings[0].Values, nil
+	}
+
+	return nil, fmt.Errorf("gemini embedding response was nil or empty for model '%s'", modelName)
+}
+
+func (fd *fieldDefinition) GenerateEmbedding(textToEmbed string) ([]float32, error) {
+	if fd.fieldDef == nil {
+		return nil, nil
+	}
+	return generateFieldEmbedding(fd.fieldDef, textToEmbed)
+}
+
+func generateFieldEmbedding(fd *ast.FieldDefinition, textToEmbed string) ([]float32, error) {
+	dir := fd.Directives.ForName(embeddingDirective)
+	if dir == nil {
+		return nil, nil
+	}
+
+	providerArg := dir.Arguments.ForName("provider")
+	if providerArg == nil {
+		return nil, nil
+	}
+	modelArg := dir.Arguments.ForName("model")
+	if modelArg == nil {
+		return nil, nil
+	}
+
+	provider, err := strconv.Unquote(providerArg.Value.Raw)
+	if err != nil {
+		provider = providerArg.Value.Raw
+	}
+	model, err := strconv.Unquote(modelArg.Value.Raw)
+	if err != nil {
+		model = modelArg.Value.Raw
+	}
+
+	parametersArg := dir.Arguments.ForName("parameters")
+	var parameters map[string]interface{}
+	if parametersArg != nil {
+		if err := json.Unmarshal([]byte(parametersArg.Value.Raw), &parameters); err != nil {
+			return nil, err
+		}
+	}
+
+	return generateEmbedding(provider, model, textToEmbed, parameters)
+}
+
+func (fd *fieldDefinition) ValidateValue(
+	action string,
+	parentTypeName string,
+	parent map[string]interface{},
+	auth map[string]interface{},
+	oldValue map[string]interface{},
+	removeValue map[string]interface{}) []error {
+	if fd.fieldDef == nil {
+		return nil
+	}
+	return validateValue(fd.inSchema.schema, fd.fieldDef, action, parentTypeName, parent, auth, oldValue, removeValue)
+}
+
+// The environment for the 'expr' evaluation. This map makes various contexts
+// and utility functions available within the validation expression.
+//
+// Available variables include:
+//   - `value`: The value of the specific field being validated. For example, when validating
+//     `User.email`, `value` refers to the email string being provided.
+//   - `input`: The partial object containing the fields explicitly provided by the client
+//     in the primary mutation argument. `input` reflects the data provided
+//     for the current operation (e.g., `input.name` for an update, or `input.email`
+//     even if `email` is the field `value` is referencing).
+//   - `before`: The full state of the object as it exists in the database *before* this
+//     mutation is applied. Use `before.fieldName` to access its old value.
+//   - `after`: The hypothetical state of the object *if* this mutation were to succeed.
+//     This is a combined view, merging `before`, and `input`.
+//     operations. Use `after.fieldName` to see the final value.
+//   - `new`: The hypothetical state of the object *if* this mutation were to succeed.
+//     This is a combined view, merging `before`, and `input`.
+//     operations. Use `new.fieldName` to see the final value that has changed.
+//   - `auth`: The authentication context (e.g., JWT claims) of the user making the request.
+//     Access claims like `auth.sub`, `auth.email`, or `auth.roles`.
+//   - `action`: The type of mutation being performed (`ADD` or `UPDATE`).
+//   - `remove`: A representation of fields or relationships explicitly marked for removal
+//     in the current mutation. The exact structure depends on how your GraphQL
+//     schema handles removals (e.g., `remove.tags` for removing tags from a list).
+//   - `uuid()`: A function that generates a new UUID string.
+//   - `sha256(s)`: A function that computes the SHA256 hash of a given string.
+type exprEvaluationContext map[string]interface{}
+
+func NewExprEvaluationContext(
+	typename string,
+	input map[string]interface{},
+	before map[string]interface{},
+	remove map[string]interface{},
+	auth map[string]interface{},
+	action string) exprEvaluationContext {
+
+	after := map[string]interface{}{}
+	maps.Copy(after, before)
+	maps.Copy(after, input)
+
+	new, _ := diffMapInterface(before, input)
+
+	return exprEvaluationContext{
+		"__typename": typename,
+		"input":      input,
+		"before":     before,
+		"after":      after,
+		"new":        new,
+		"remove":     remove,
+		"auth":       auth,
+		"action":     action,
+		"uuid":       uuid.NewString,
+		"sha256":     hashSHA256,
+		"generateEmbedding": func(provider string, modelName string, textToEmbed string, parameters map[string]any) (vector []float32) {
+			vector, _ = generateEmbedding(provider, modelName, textToEmbed, parameters)
+			return
+		},
+		"diffMap":              diffMapInterface,
+		"mapStringWithoutKeys": mapStringWithoutKeys,
+	}
+}
+
+// mapWithoutKeys returns a new map with the specified keys removed.
+// It accepts keys as a variadic list of strings (e.g., "key1", "key2", ...).
+// The original map is not modified.
+func mapStringWithoutKeys(originalMap map[string]interface{}, keysToRemove []interface{}) map[string]interface{} {
+	// 1. Create a set for efficient lookup of keys to remove.
+	// Inside the function, `keysToRemove` is treated as a slice: []string
+	keysToRemoveSet := make(map[string]struct{}, len(keysToRemove))
+	for _, key := range keysToRemove {
+		if k, ok := key.(string); ok {
+			keysToRemoveSet[k] = struct{}{}
+		}
+	}
+
+	// 2. Create a new map to store the result.
+	newMap := make(map[string]interface{}, len(originalMap))
+
+	// 3. Iterate over the original map.
+	for key, value := range originalMap {
+		// 4. If the key is NOT in the removal set, add it to the new map.
+		if _, found := keysToRemoveSet[key]; !found {
+			newMap[key] = value
+		}
+	}
+	return newMap
+}
+
+// DiffMapInterface computes the differences between two map[string]interface{} objects.
+// It returns a map containing only the keys that have changed in 'updateMap'.
+// The values in the returned map are the new values from 'updateMap'.
+func diffMapInterface(obj1, obj2 map[string]interface{}) (map[string]interface{}, error) {
+	diffMap := make(map[string]interface{})
+
+	// Handle nil inputs gracefully
+	if obj1 == nil && obj2 == nil {
+		return diffMap, nil // Both are nil, no diff
+	}
+	if obj1 == nil {
+		// If obj1 is nil, all entries in obj2 are considered "new".
+		// Use maps.Clone for a safe copy (Go 1.21+).
+		// For older Go versions, a manual copy is needed.
+		return maps.Clone(obj2), nil
+	}
+	if obj2 == nil {
+		// If obj2 is nil, no values have changed in the update object.
+		return diffMap, nil
+	}
+
+	// Get all unique keys. Using maps.Keys is cleaner in Go 1.21+.
+	keys1 := maps.Keys(obj1)
+	keys2 := maps.Keys(obj2)
+
+	// Combine and find unique keys.
+	uniqueKeysSet := make(map[string]struct{})
+	for k := range keys1 {
+		uniqueKeysSet[k] = struct{}{}
+	}
+	for k := range keys2 {
+		uniqueKeysSet[k] = struct{}{}
+	}
+
+	// Collect sorted unique keys.
+	sortedKeys := make([]string, 0, len(uniqueKeysSet))
+	for k := range uniqueKeysSet {
+		sortedKeys = append(sortedKeys, k)
+	}
+	sort.Strings(sortedKeys) // Ensure consistent order
+
+	// Compare values for each key
+	for _, key := range sortedKeys {
+		val1, ok1 := obj1[key]
+		val2, ok2 := obj2[key]
+
+		if ok1 && ok2 {
+			// Key exists in both maps, compare values
+
+			// Try to recursively diff if both values are maps
+			nestedMap1, isMap1 := val1.(map[string]interface{})
+			nestedMap2, isMap2 := val2.(map[string]interface{})
+
+			if isMap1 && isMap2 {
+				// Both are maps, recurse
+				nestedDiff, err := diffMapInterface(nestedMap1, nestedMap2)
+				if err != nil {
+					return nil, fmt.Errorf("error diffing nested map key '%s': %w", key, err)
+				}
+				if len(nestedDiff) > 0 {
+					// If there are differences in the nested map, add them with a prefix.
+					// Iterate over nestedDiff and add to diffMap.
+					for subKey, subVal := range nestedDiff {
+						diffMap[key+"."+subKey] = subVal
+					}
+				}
+			} else if !reflect.DeepEqual(val1, val2) {
+				// Not both maps, or one is a map and the other isn't.
+				// Compare them directly. If different, add the new value from obj2.
+				diffMap[key] = val2
+			}
+		} else if ok2 {
+			// Key exists only in obj2 (added field)
+			diffMap[key] = val2
+		}
+		// If key exists only in obj1 (removed field), we do not add it to diffMap
+		// as we are only interested in changes in obj2.
+	}
+
+	return diffMap, nil
+}
+
+func (e exprEvaluationContext) WithValueField(fld string) exprEvaluationContext {
+	after := e["after"].(map[string]interface{})
+	e["value"] = after[fld]
+	return e
+}
+
+func (e exprEvaluationContext) Value() interface{} {
+	return e["value"]
+}
+
+func (e exprEvaluationContext) As() map[string]interface{} {
+	return map[string]interface{}(e)
+}
+
+// PanicWrappedError is a custom error type used to wrap errors that originated from a panic
+// within a deeper function call, helping to differentiate them from regular errors.
+type CompileError struct {
+	Err error // The original error that was wrapped, typically from a recovered panic.
+}
+
+// Error implements the error interface.
+func (pwe *CompileError) Error() string {
+	if pwe.Err != nil {
+		return pwe.Err.Error()
+	}
+	return "compile error"
+}
+
+// Unwrap allows using errors.Is and errors.As with the wrapped error, to get to the original error.
+func (pwe *CompileError) Unwrap() error {
+	return pwe.Err
+}
+
+// validateExpr is the custom `go-playground/validator` function for the "expr" tag.
+// It is registered dynamically within ValidateValue.
+//
+// fl: `FieldLevel` provides access to the field's value being validated (`fl.Field().Interface()`)
+//
+//	and other field-related metadata.
+//
+// It evaluates the `exprString` from the `exprValidationContext` using the provided environment.
+// Returns `true` if the expression evaluates to a truthy value (e.g., boolean true, non-zero number, non-empty string).
+// Returns `false` if the expression evaluates to a falsy value (e.g., boolean false, 0, empty string, nil).
+// Designed to cause a panic if expression compilation or evaluation results in a critical error,
+// which is then caught by the `ValidateValue`'s defer function.
+func (eec exprEvaluationContext) validateExpr(exprString string) func(fl validator.FieldLevel) bool {
+	return func(fl validator.FieldLevel) bool {
+		// Compile the expression. If this fails, it indicates a syntactically invalid expression
+		// in the schema (a developer error), which should ideally be caught at schema definition time.
+		// We panic to ensure this error is propagated and caught by ValidateValue's defer.
+		program, err := expr.Compile(exprString, expr.Env(eec.As()))
+		if err != nil {
+			panic(fmt.Errorf("expression compilation failed for field '%s' with rule '%s': %w", fl.FieldName(), exprString, err))
+		}
+
+		// Run the compiled expression.
+		expResult, err := expr.Run(program, eec.As())
+		if err != nil {
+			panic(fmt.Errorf("expression execution failed for field '%s' with rule '%s': %w", fl.FieldName(), exprString, err))
+		}
+
+		// Interpret the expression result as a boolean for validation purposes.
+		// `expr` uses truthiness rules: `true` for non-zero numbers, non-empty strings, non-nil values;
+		// `false` for zero, empty strings, nil. If the expression explicitly returns a bool, use it.
+		if b, ok := expResult.(bool); ok {
+			return b
+		}
+		// For other types, apply common truthiness rules:
+		// A nil result is falsy.
+		if expResult == nil {
+			return false
+		}
+		// All other non-nil, non-explicitly-false values are considered truthy.
+		return true
+	}
+}
+
+// ValidateValue checks if a specific field's value within a parent object
+// conforms to its @validate directive from a GraphQL schema.
+//
+// It supports both standard `go-playground/validator` rules (via 'rule' argument)
+// and custom `expr` rules (via 'expr' argument).
+// It safely handles syntactically invalid validation rules or expressions by catching panics
+// from the `go-playground/validator` library or from `expr` evaluation failures.
+//
+// sch: The parsed GraphQL schema.
+// fd: The FieldDefinition of the field to validate, defining its name and directives.
+// parent: The map containing the full input data for the parent object. This is passed as context
+//
+//	to 'expr' evaluations.
+//
+// auth: Auth context, also passed as context for 'expr' evaluations.
+//
+// Returns `nil` if validation succeeds or if no '@validate' directive is present on the field.
+// Returns a slice of `error` if validation fails. Errors originating from panics are wrapped in `PanicWrappedError`.
+func validateValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, parentTypeName string, parent map[string]interface{}, auth map[string]interface{}, oldValue map[string]interface{}, removeValue map[string]interface{}) (errs []error) {
+	// 1. Retrieve the @validate directive from the field definition.
+	dir := fd.Directives.ForName(validateDirective)
+	if dir == nil {
+		// No @validate directive is present on this field, so no validation is required.
+		return nil
+	}
+
+	var validationTags []string
+	var reason string
+
+	if reasonArg := dir.Arguments.ForName("reason"); reasonArg != nil {
+		if reasonArg.Value.Kind != ast.StringValue && reasonArg.Value.Kind != ast.BlockValue {
+			return []error{errors.Errorf("reason argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, reasonArg.Value.Kind)}
+		}
+		reason = reasonArg.Value.Raw
+	}
+
+	if ruleArg := dir.Arguments.ForName("rule"); ruleArg != nil {
+		if ruleArg.Value.Kind != ast.StringValue && ruleArg.Value.Kind != ast.BlockValue {
+			return []error{errors.Errorf("rule argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, ruleArg.Value.Kind)}
+		}
+		if ruleArg.Value.Raw != "" {
+			validationTags = append(validationTags, ruleArg.Value.Raw)
+		}
+	}
+
+	// Initialize validator here, before potential early returns based on validationTags
+	validate := validator.New(validator.WithRequiredStructEnabled())
+	// Initialize the expr evaluation context
+	eev := NewExprEvaluationContext(parentTypeName, parent, oldValue, removeValue, auth, action).
+		WithValueField(fd.Name)
+
+	// Process 'expr' argument only if the field value is not nil.
+	// If 'value' is nil, 'expr' validation will be skipped.
+	if eev.Value() != nil {
+		if exArg := dir.Arguments.ForName("expr"); exArg != nil {
+			if exArg.Value.Kind != ast.StringValue && exArg.Value.Kind != ast.BlockValue {
+				return []error{errors.Errorf("expr argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, exArg.Value.Kind)}
+			}
+			if exArg.Value.Raw != "" {
+				validationTags = append(validationTags, "expr")
+
+				// Only register the custom validator if the 'expr' tag was actually added.
+				// This 'evc' variable is correctly scoped to this 'if' block.
+				validate.RegisterValidation("expr", eev.validateExpr(exArg.Value.Raw), true)
+			}
+		}
+	}
+
+	// After processing 'rule' and potentially 'expr' to populate validationTags,
+	// if no tags were added, then no validation is required for this field.
+	if len(validationTags) == 0 {
+		return nil
+	}
+
+	ruleString := strings.Join(validationTags, ",")
+
+	// Set up the deferred function to catch panics and wrap them in PanicWrappedError.
+	defer func() {
+		if r := recover(); r != nil {
+			panicMsg := fmt.Errorf("validation for field '%s' with rule '%s' caused a panic: %v", fd.Name, ruleString, r)
+			// Assign a slice containing the PanicWrappedError to the named return `errs`.
+			errs = []error{&CompileError{Err: panicMsg}}
+		}
+	}()
+
+	validationErr := validate.Var(eev.Value(), ruleString)
+
+	if validationErr != nil {
+		// `validationErr` will be of type `validator.ValidationErrors` if rules failed.
+		// Iterate through them and format, appending to the `errs` slice.
+		for _, e := range validationErr.(validator.ValidationErrors) {
+			formattedError := errors.Errorf("Field %s failed validation on %s", fd.Name, e.ActualTag())
+			if reason != "" {
+				formattedError = errors.Errorf("%s: Reason: %s", formattedError.Error(), reason)
+			}
+			errs = append(errs, formattedError)
+		}
+	}
+
+	// Returns nil if `errs` is empty (no validation failures and no panics).
+	// Otherwise, returns the collected slice of errors.
+	return errs
 }
 
 func (fd *fieldDefinition) HasIDDirective() bool {
@@ -2470,6 +3010,15 @@ func (fd *fieldDefinition) HasEmbeddingDirective() bool {
 		return false
 	}
 	return hasEmbeddingDirective(fd.fieldDef)
+}
+
+func (fd *fieldDefinition) HasEmbeddingProvider() bool {
+	dir := fd.fieldDef.Directives.ForName("embedding")
+	if dir == nil {
+		return false
+	}
+	arg := dir.Arguments.ForName("provider")
+	return arg != nil
 }
 
 func (fd *fieldDefinition) EmbeddingSearchMetric() string {
@@ -2574,7 +3123,22 @@ func hasDefault(fd *ast.FieldDefinition) bool {
 	return fd.Directives.ForName(defaultDirective) != nil
 }
 
+func (fd *fieldDefinition) HasOldValueDirective() bool {
+	if fd.fieldDef == nil {
+		return false
+	}
+	return hasOldValueDirective(fd.fieldDef)
+}
+
+func hasOldValueDirective(fd *ast.FieldDefinition) bool {
+	id := fd.Directives.ForName(oldValueDirective)
+	return id != nil
+}
+
 func (fd *fieldDefinition) Type() Type {
+	if fd.fieldDef == nil {
+		return nil
+	}
 	return &astType{
 		typ:             fd.fieldDef.Type,
 		inSchema:        fd.inSchema,

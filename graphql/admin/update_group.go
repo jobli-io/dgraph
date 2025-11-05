@@ -167,6 +167,17 @@ func (urw *updateGroupRewriter) MutatedRootUIDs(
 	return ((*resolve.UpdateRewriter)(urw)).MutatedRootUIDs(mutation, assigned, result)
 }
 
+// SetOldValue adds old value to Rewriter
+func (urw *updateGroupRewriter) SetOldValue(
+	key string,
+	value map[string]interface{}) {
+	if urw == nil || urw.XidMetadata == nil {
+		return
+	}
+	urw.XidMetadata.SetOldValue(key, value)
+	return
+}
+
 // addAclRuleQuery adds a *dql.GraphQuery to upsertQuery.Children to query a rule inside a group
 // based on its predicate value.
 func addAclRuleQuery(upsertQuery []*dql.GraphQuery, predicate, variable string) {

@@ -39,6 +39,8 @@ const (
 	lambdaDirective         = "lambda"
 	lambdaOnMutateDirective = "lambdaOnMutate"
 	defaultDirective        = "default"
+	validateDirective       = "validate"
+	oldValueDirective       = "oldValue"
 
 	generateDirective       = "generate"
 	generateQueryArg        = "query"
@@ -273,10 +275,12 @@ input GenerateMutationParams {
 	directiveDefs = `
 directive @hasInverse(field: String!) on FIELD_DEFINITION
 directive @search(by: [String!]) on FIELD_DEFINITION
-directive @embedding on FIELD_DEFINITION
+directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
+directive @validate(rule: String, expr: String, reason: String) on FIELD_DEFINITION
+directive @oldValue on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @auth(
@@ -306,10 +310,12 @@ directive @generate(
 	apolloSupportedDirectiveDefs = `
 directive @hasInverse(field: String!) on FIELD_DEFINITION
 directive @search(by: [String!]) on FIELD_DEFINITION
-directive @embedding on FIELD_DEFINITION
+directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
+directive @validate(rule: String, expr: String, reason: String) on FIELD_DEFINITION
+directive @oldValue on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @remote on OBJECT | INTERFACE | UNION | INPUT_OBJECT | ENUM
@@ -385,6 +391,18 @@ input StringExactFilter {
 input StringHashFilter {
 	eq: String
 	in: [String]
+}
+
+input SimilarToVector {
+	vector: [Float!]!
+	topK: Int
+	distance: Float
+}
+
+input SimilarToText {
+	text: String!
+	topK: Int
+	distance: Float
 }
 `
 
@@ -575,6 +593,8 @@ var directiveValidators = map[string]directiveValidator{
 	deprecatedDirective:     ValidatorNoOp,
 	lambdaDirective:         lambdaDirectiveValidation,
 	defaultDirective:        defaultDirectiveValidation,
+	validateDirective:       validateDirectiveValidation,
+	oldValueDirective:       oldValueDirectiveValidation,
 	lambdaOnMutateDirective: ValidatorNoOp,
 	generateDirective:       ValidatorNoOp,
 	apolloKeyDirective:      ValidatorNoOp,
@@ -1581,6 +1601,87 @@ func addFilterType(schema *ast.Schema, defn *ast.Definition, providesTypeMap map
 			continue
 		}
 
+		if hasEmbeddingDirective(fld) {
+			embeddingFilterName := defn.Name + "_" + fld.Name + "EmbeddingFilter"
+			embeddingFilter := &ast.Definition{
+				Kind: ast.InputObject,
+				Name: embeddingFilterName,
+			}
+			embeddingFilter.Fields = append(embeddingFilter.Fields,
+				&ast.FieldDefinition{
+					Name: "similarToVector",
+					Type: &ast.Type{
+						NamedType: "SimilarToVector",
+					},
+				})
+
+			if fld.Directives.ForName(embeddingDirective).Arguments.ForName("provider") != nil {
+				embeddingFilter.Fields = append(embeddingFilter.Fields,
+					&ast.FieldDefinition{
+						Name: "similarToText",
+						Type: &ast.Type{
+							NamedType: "SimilarToText",
+						},
+					})
+			}
+
+			{
+				similarToIdFilterName := defn.Name + "_" + "SimilarToIdFilter"
+
+				embeddingFilter.Fields = append(embeddingFilter.Fields,
+					&ast.FieldDefinition{
+						Name: "similarToId",
+						Type: &ast.Type{
+							NamedType: similarToIdFilterName,
+						},
+					})
+
+				similarToIdFilter := &ast.Definition{
+					Kind: ast.InputObject,
+					Name: similarToIdFilterName,
+				}
+
+				similarToIdFilter.Fields = append(similarToIdFilter.Fields,
+					&ast.FieldDefinition{
+						Name: "topK",
+						Type: &ast.Type{
+							NamedType: "Int",
+						},
+					})
+
+				similarToIdFilter.Fields = append(similarToIdFilter.Fields,
+					&ast.FieldDefinition{
+						Name:        "distance",
+						Description: "Distance threshold",
+						Type: &ast.Type{
+							NamedType: "Float",
+						},
+					})
+
+				for _, idfld := range getIDField(defn, nil) {
+					idfld.Type.NonNull = false
+					similarToIdFilter.Fields = append(similarToIdFilter.Fields, idfld)
+				}
+
+				for _, xidfld := range getXIDField(defn, nil) {
+					xidfld.Type.NonNull = false
+					similarToIdFilter.Fields = append(similarToIdFilter.Fields, xidfld)
+				}
+
+				schema.Types[similarToIdFilterName] = similarToIdFilter
+			}
+
+			schema.Types[embeddingFilterName] = embeddingFilter
+			filter.Fields = append(filter.Fields,
+				&ast.FieldDefinition{
+					Name: fld.Name,
+					Type: &ast.Type{
+						NamedType: embeddingFilterName,
+					},
+				})
+			continue
+		}
+
 		filterTypes := getFilterTypes(schema, fld, filterName)
 		if len(filterTypes) > 0 {
 			filterName := strings.Join(filterTypes, "_")
@@ -2080,13 +2181,34 @@ func addSimilarByEmbeddingQuery(schema *ast.Schema, defn *ast.Definition) {
 
 	// Accept an array of floats as the search vector
 	qry.Arguments = append(qry.Arguments, &ast.ArgumentDefinition{
-		Name: SimilarVectorArgName,
+		Name:        SimilarVectorArgName,
+		Description: "Search vector",
 		Type: &ast.Type{
 			Elem: &ast.Type{
 				NamedType: "Float",
 				NonNull:   true,
 			},
-			NonNull: true,
+			NonNull: false,
+		},
+	})
+
+	// Accept a string for generating embedding
+	qry.Arguments = append(qry.Arguments, &ast.ArgumentDefinition{
+		Name:        SimilarTextArgName,
+		Description: "Search text",
+		Type: &ast.Type{
+			NamedType: "String",
+			NonNull:   false,
+		},
+	})
+
+	// Accept a float as the distance threshold
+	qry.Arguments = append(qry.Arguments, &ast.ArgumentDefinition{
+		Name:        "distance",
+		Description: "Distance threshold",
+		Type: &ast.Type{
+			NamedType: "Float",
+			NonNull:   false,
 		},
 	})
 	addFilterArgument(schema, qry)
@@ -2521,8 +2643,9 @@ func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
 		}
 
 		// if the field has a @default(add) value it is optional in add input
+		// an error value also indicates that the default value is provided but might encounter a runtime error.
 		var field = createField(schema, fld)
-		if getDefaultValue(schema, fld, "add", nil, nil) != nil {
+		if value, err := getDefaultValue(schema, fld, "add", defn.Name, nil, nil, nil, nil); err != nil || value != nil {
 			field.Type.NonNull = false
 		}
 

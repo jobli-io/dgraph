@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/dgraph-io/gqlparser/v2/ast"
 	"github.com/dgraph-io/gqlparser/v2/gqlerror"
@@ -152,6 +153,9 @@ func intRangeCheck(observers *validator.Events, addError validator.AddErrFunc) {
 			if value.Kind == ast.NullValue {
 				return
 			}
+			if value.Kind == ast.FloatValue {
+				value.Raw = strings.Split(value.Raw, ".")[0]
+			}
 			_, err := strconv.ParseInt(value.Raw, 10, 32)
 			if err != nil {
 				if errors.Is(err, strconv.ErrRange) {
@@ -162,7 +166,10 @@ func intRangeCheck(observers *validator.Events, addError validator.AddErrFunc) {
 				}
 			}
 		case "Int64":
-			if value.Kind == ast.IntValue || value.Kind == ast.StringValue {
+			if value.Kind == ast.IntValue || value.Kind == ast.StringValue || value.Kind == ast.FloatValue {
+				if value.Kind == ast.FloatValue {
+					value.Raw = strings.Split(value.Raw, ".")[0]
+				}
 				_, err := strconv.ParseInt(value.Raw, 10, 64)
 				if err != nil {
 					if errors.Is(err, strconv.ErrRange) {

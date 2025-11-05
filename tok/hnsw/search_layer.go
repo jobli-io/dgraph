@@ -61,7 +61,7 @@ func (slr *searchLayerResult[T]) addPathNode(
 		slr.neighbors = slr.neighbors[:effectiveMaxLen]
 	}
 
-	if slr.neighbors[0].index == n.index {
+	if len(slr.neighbors) > 0 && slr.neighbors[0].index == n.index {
 		slr.path = append(slr.path, slr.neighbors[0].index)
 	}
 }
@@ -90,6 +90,10 @@ func (slr *searchLayerResult[T]) lastNeighborScore() T {
 // panics if there is no such element.
 func (slr *searchLayerResult[T]) bestNeighbor() minPersistentHeapElement[T] {
 	return slr.neighbors[0]
+}
+
+func (slr *searchLayerResult[T]) hasNeighbors() bool {
+	return len(slr.neighbors) > 0
 }
 
 func (slr *searchLayerResult[T]) indexVisited(n uint64) bool {

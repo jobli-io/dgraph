@@ -3871,7 +3871,6 @@ valid_schemas:
         A
       }
 
-<<<<<<< HEAD
   -
     name: "Correct search on object type"
     input: |
@@ -3904,11 +3903,7 @@ valid_schemas:
         x5: X @search
       }
 
-  -
-    name: "dgraph directive with correct reverse field works"
-=======
   - name: dgraph directive with correct reverse field works
->>>>>>> main
     input: |
       type X {
         id: ID!

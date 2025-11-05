@@ -177,7 +177,7 @@ func (ph *persistentHNSW[T]) searchPersistentLayer(
 	//create set using map to append to on future visited nodes
 	for candidateHeap.Len() != 0 {
 		currCandidate := candidateHeap.Pop().(minPersistentHeapElement[T])
-		if r.numNeighbors() < expectedNeighbors &&
+		if r.hasNeighbors() && r.numNeighbors() < expectedNeighbors &&
 			ph.simType.isBetterScore(r.lastNeighborScore(), currCandidate.value) {
 			// If the "worst score" in our neighbors list is deemed to have
 			// a better score than the current candidate -- and if we have at
@@ -229,7 +229,7 @@ func (ph *persistentHNSW[T]) searchPersistentLayer(
 			// be filtered out, we ignore M elements in the numNeighbors
 			// check! In this way, we can make sure to allow in up to
 			// expectedNeighbors "unfiltered" elements.
-			if r.numNeighbors() < expectedNeighbors || ph.simType.isBetterScore(currDist, r.lastNeighborScore()) {
+			if !r.hasNeighbors() || r.numNeighbors() < expectedNeighbors || ph.simType.isBetterScore(currDist, r.lastNeighborScore()) {
 				if candidateHeap.Len() > expectedNeighbors {
 					candidateHeap.PopLast()
 				}
@@ -249,15 +249,15 @@ func (ph *persistentHNSW[T]) searchPersistentLayer(
 // Search searches the hnsw graph for the nearest neighbors of the query vector
 // and returns the traversal path and the nearest neighbors
 func (ph *persistentHNSW[T]) Search(ctx context.Context, c index.CacheType, query []T,
-	maxResults int, filter index.SearchFilter[T]) (nnUids []uint64, err error) {
-	r, err := ph.SearchWithPath(ctx, c, query, maxResults, filter)
+	maxResults int, maxDistance T, filter index.SearchFilter[T]) (nnUids []uint64, err error) {
+	r, err := ph.SearchWithPath(ctx, c, query, maxResults, maxDistance, filter)
 	return r.Neighbors, err
 }
 
 // SearchWithUid searches the hnsw graph for the nearest neighbors of the query uid
 // and returns the traversal path and the nearest neighbors
 func (ph *persistentHNSW[T]) SearchWithUid(_ context.Context, c index.CacheType, queryUid uint64,
-	maxResults int, filter index.SearchFilter[T]) (nnUids []uint64, err error) {
+	maxResults int, maxDistance T, filter index.SearchFilter[T]) (nnUids []uint64, err error) {
 	var queryVec []T
 	err = ph.getVecFromUid(queryUid, c, &queryVec)
 	if err != nil {
@@ -271,6 +271,11 @@ func (ph *persistentHNSW[T]) SearchWithUid(_ context.Context, c index.CacheType,
 	if len(queryVec) == 0 {
 		// No vector. return empty result
 		return []uint64{}, nil
+	}
+
+	if maxDistance > 0 {
+		// Wrap filter in distance filter
+		filter = index.MakeDistanceFilter(maxDistance, filter, ph.simType.distanceScore, ph.floatBits)
 	}
 
 	shouldFilterOutQueryVec := !filter(queryVec, queryVec, queryUid)
@@ -341,10 +346,14 @@ func (ph *persistentHNSW[T]) SearchWithPath(
 	ctx context.Context,
 	c index.CacheType,
 	query []T,
-	maxResults int,
+	maxResults int, maxDistance T,
 	filter index.SearchFilter[T]) (r *index.SearchPathResult, err error) {
 	start := time.Now().UnixMilli()
 	r = index.NewSearchPathResult()
+
+	if maxDistance > 0 {
+		filter = index.MakeDistanceFilter(maxDistance, filter, ph.simType.distanceScore, ph.floatBits)
+	}
 
 	// 0-profile_vector_entry
 	var startVec []T
@@ -366,6 +375,10 @@ func (ph *persistentHNSW[T]) SearchWithPath(
 			return ph.emptyFinalResultWithError(err)
 		}
 		layerResult.updateFinalMetrics(r)
+		if !layerResult.hasNeighbors() {
+			// All results were filtered out, so we can't continue.
+			return r, nil
+		}
 		entry = layerResult.bestNeighbor().index
 
 		layerResult.updateFinalPath(r)
@@ -440,6 +453,10 @@ func (ph *persistentHNSW[T]) insertHelper(ctx context.Context, tc *TxnCache,
 		if err != nil {
 			return []minPersistentHeapElement[T]{}, []*index.KeyValue{}, err
 		}
+		if !layerResult.hasNeighbors() {
+			// All results were filtered out, so we can't continue.
+			break
+		}
 		entry = layerResult.bestNeighbor().index
 	}
 
@@ -463,6 +480,10 @@ func (ph *persistentHNSW[T]) insertHelper(ctx context.Context, tc *TxnCache,
 			return []minPersistentHeapElement[T]{}, []*index.KeyValue{}, layerErr
 		}
 
+		if !layerResult.hasNeighbors() {
+			// All results were filtered out, so we can't continue.
+			break
+		}
 		entry = layerResult.bestNeighbor().index
 
 		nns := layerResult.neighbors

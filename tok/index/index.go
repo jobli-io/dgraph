@@ -71,6 +71,22 @@ func AcceptAll[T c.Float](_, _ []T, _ uint64) bool { return true }
 // AcceptNone implements SearchFilter by way of rejecting all results.
 func AcceptNone[T c.Float](_, _ []T, _ uint64) bool { return false }
 
+// makeDistanceFilter creates a new SearchFilter that combines a distance check
+// with an existing filter.
+func MakeDistanceFilter[T c.Float](maxDistance T, existingFilter SearchFilter[T],
+	distanceScore func(a, b []T, bit int) (T, error), floatBits int) SearchFilter[T] {
+	return func(query, resultVal []T, resultUID uint64) bool {
+		dist, err := distanceScore(query, resultVal, floatBits)
+		if err != nil {
+			return false
+		}
+		if maxDistance > 0 && dist > T(maxDistance) {
+			return false
+		}
+		return existingFilter(query, resultVal, resultUID)
+	}
+}
+
 // OptionalIndexSupport defines abilities that might not be universally
 // supported by all VectorIndex types. A VectorIndex will technically
 // define the functions required by OptionalIndexSupport, but may do so
@@ -85,7 +101,7 @@ type OptionalIndexSupport[T c.Float] interface {
 		ctx context.Context,
 		c CacheType,
 		query []T,
-		maxResults int,
+		maxResults int, maxDistance T,
 		filter SearchFilter[T]) (*SearchPathResult, error)
 }
 
@@ -100,7 +116,7 @@ type VectorIndex[T c.Float] interface {
 	// being filtered. In other words, we only count those results that had not
 	// been filtered out.
 	Search(ctx context.Context, c CacheType, query []T,
-		maxResults int,
+		maxResults int, maxDistance T,
 		filter SearchFilter[T]) ([]uint64, error)
 
 	// SearchWithUid will find the uids for a given set of vectors based on the
@@ -110,7 +126,7 @@ type VectorIndex[T c.Float] interface {
 	// being filtered. In other words, we only count those results that had not
 	// been filtered out.
 	SearchWithUid(ctx context.Context, c CacheType, queryUid uint64,
-		maxResults int,
+		maxResults int, maxDistance T,
 		filter SearchFilter[T]) ([]uint64, error)
 
 	// Insert will add a vector and uuid into the existing VectorIndex. If

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/golang/glog"
 	"github.com/pkg/errors"
 
 	"github.com/hypermodeinc/dgraph/v25/dql"
@@ -810,10 +811,42 @@ func rewriteAsSimilarByEmbeddingQuery(
 	similarBy := query.ArgValue(schema.SimilarByArgName).(string)
 	pred := typ.DgraphPredicate(similarBy)
 	topK := query.ArgValue(schema.SimilarTopKArgName)
-	vec := query.ArgValue(schema.SimilarVectorArgName).([]interface{})
-	vecStr, _ := json.Marshal(vec)
+	distanceArg := query.ArgValue("distance")
+	var distanceThreshold float32
+	if distanceArg != nil {
+		var err error
+		dist, err := strconv.ParseFloat(fmt.Sprintf("%v", distanceArg), 32)
+		if err == nil {
+			distanceThreshold = float32(dist)
+		}
+	}
 
 	similarByField := typ.Field(similarBy)
+	var vecStr []byte
+	if similarByField.HasEmbeddingProvider() {
+		// Text input, need to generate embedding
+		text, ok := query.ArgValue(schema.SimilarTextArgName).(string)
+		if !ok {
+			// This should not happen if validation is correct.
+			return []*dql.GraphQuery{}
+		}
+		embedding, err := similarByField.GenerateEmbedding(text)
+		if err != nil {
+			// How to handle this error?
+			// For now, I will just log it and return an empty query.
+			glog.Errorf("Failed to generate embedding: %v", err)
+			return []*dql.GraphQuery{}
+		}
+		vecStr, _ = json.Marshal(embedding)
+	} else {
+		// Vector input
+		vecArg := query.ArgValue(schema.SimilarVectorArgName)
+		if vecArg != nil {
+			vec := vecArg.([]interface{})
+			vecStr, _ = json.Marshal(vec)
+		}
+	}
+
 	metric := similarByField.EmbeddingSearchMetric()
 	distanceFormula := "math(sqrt((v2 - $search_vector) dot (v2 - $search_vector)))" // default = euclidean
 
@@ -825,11 +858,10 @@ func rewriteAsSimilarByEmbeddingQuery(
 	}
 
 	// Save vectorString as a query variable, $search_vector
-	queryArgs := dgQuery[0].Args
-	if queryArgs == nil {
-		queryArgs = make(map[string]string)
+	if dgQuery[0].Args == nil {
+		dgQuery[0].Args = make(map[string]string)
 	}
-	queryArgs["$search_vector"] = " float32vector = \"" + string(vecStr) + "\""
+	dgQuery[0].Args["$search_vector"] = " float32vector = \"" + string(vecStr) + "\""
 	thisFilter := &dql.FilterTree{
 		Func: dgQuery[0].Func,
 	}
@@ -852,6 +884,9 @@ func rewriteAsSimilarByEmbeddingQuery(
 			},
 			{
 				Value: "$search_vector",
+			},
+			{
+				Value: fmt.Sprintf("%v", distanceThreshold),
 			},
 		},
 	}
@@ -1137,7 +1172,7 @@ func (authRw *authRewriter) addAuthQueries(
 		return dgQuery
 	}
 
-	// If we've made it this far, it means rbacEval was Uncertain and we have dynamic auth 
+	// If we've made it this far, it means rbacEval was Uncertain and we have dynamic auth
 	// rules to apply. Now, and only now, do we build the varQry and rootQry DQL variables.
 
 	// build a query like
@@ -2085,6 +2120,58 @@ func buildFilter(typ schema.Type,
 				})
 			varQry = append(varQry, qs...)
 		default:
+			fd := typ.Field(field)
+			if fd != nil && fd.HasEmbeddingDirective() {
+				embeddingFilter, ok := filter[field].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				fn, val := first(embeddingFilter)
+
+				var similarToFunc *dql.Function
+				var qs []*dql.GraphQuery
+				var err error
+
+				// qn is queryName + "_" + field, e.g. "queryPost_embedding"
+				similarVar := qn + "_similar"
+
+				switch fn {
+				case "similarToVector":
+					similarToFunc, qs = buildSimilarToVectorFilter(typ, fd, val.(map[string]interface{}))
+				case "similarToText":
+					similarToFunc, qs, err = buildSimilarToTextFilter(typ, fd, val.(map[string]interface{}))
+					if err != nil {
+						glog.Errorf("Error in buildSimilarToTextFilter: %v", err)
+						continue
+					}
+				case "similarToId":
+					similarToFunc, qs = buildSimilarToIdFilter(typ, fd, val.(map[string]interface{}), auth, qn)
+				}
+
+				if similarToFunc != nil {
+					similarQuery := &dql.GraphQuery{
+						Attr: "var",
+						Func: similarToFunc,
+						Children: []*dql.GraphQuery{{
+							Attr: "uid",
+							Var:  similarVar,
+						}},
+					}
+					qs = append(qs, similarQuery)
+
+					ands = append(ands, &dql.FilterTree{
+						Func: &dql.Function{
+							Name: "uid",
+							Args: []dql.Arg{{Value: similarVar}},
+						},
+					})
+				}
+
+				if len(qs) > 0 {
+					varQry = append(varQry, qs...)
+				}
+				continue
+			}
 			// Handle nested object filtering
 			//
 			// filter: { <nested-field>: { ... }, ... }
@@ -2094,7 +2181,6 @@ func buildFilter(typ schema.Type,
 			// 		nested_field_name as <inverse field>
 			// }
 			// root() @filter(var(nested_field_name))
-			fd := typ.Field(field)
 			if fd != nil && fd.HasSearchDirective() {
 
 				if inv := fd.Inverse(); inv != nil {
@@ -2463,4 +2549,162 @@ func first(aMap map[string]interface{}) (string, interface{}) {
 		return key, val
 	}
 	return "", nil
+}
+
+func buildSimilarToVectorFilter(
+	typ schema.Type,
+	field schema.FieldDefinition,
+	filter map[string]interface{},
+) (*dql.Function, []*dql.GraphQuery) {
+	topK, ok := filter["topK"]
+	if !ok {
+		return nil, nil
+	}
+	vector := filter["vector"]
+
+	maxDistance, ok := filter["distance"]
+	if !ok {
+		maxDistance = 0
+	}
+
+	vec, err := json.Marshal(vector)
+	if err != nil {
+		// should not happen with proper validation
+		return nil, nil
+	}
+
+	return &dql.Function{
+		Name: "similar_to",
+		Args: []dql.Arg{
+			{Value: field.DgraphPredicate()},
+			{Value: fmt.Sprintf("%v", topK)},
+			{Value: fmt.Sprintf("%q", string(vec))},
+			{Value: fmt.Sprintf("%v", maxDistance)},
+		},
+	}, nil
+}
+
+func buildSimilarToTextFilter(
+	typ schema.Type,
+	field schema.FieldDefinition,
+	filter map[string]interface{},
+) (*dql.Function, []*dql.GraphQuery, error) {
+	topK, ok := filter["topK"]
+	if !ok {
+		return nil, nil, errors.Errorf("topK not found in similarToText filter")
+	}
+	text, ok := filter["text"].(string)
+	if !ok {
+		return nil, nil, errors.Errorf("text not found in similarToText filter")
+	}
+
+	embedding, err := field.GenerateEmbedding(text)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "failed to generate embedding for text filter")
+	}
+
+	vec, err := json.Marshal(embedding)
+	if err != nil {
+		// This is an internal error, should not happen.
+		return nil, nil, errors.Wrapf(err, "failed to marshal generated embedding")
+	}
+
+	maxDistance, ok := filter["distance"]
+	if !ok {
+		maxDistance = 0
+	}
+
+	return &dql.Function{
+		Name: "similar_to",
+		Args: []dql.Arg{
+			{Value: field.DgraphPredicate()},
+			{Value: fmt.Sprintf("%v", topK)},
+			{Value: fmt.Sprintf("%q", string(vec))},
+			{Value: fmt.Sprintf("%v", maxDistance)},
+		},
+	}, nil, nil
+}
+
+func buildSimilarToIdFilter(
+	typ schema.Type,
+	field schema.FieldDefinition,
+	filter map[string]interface{},
+	auth *authRewriter,
+	queryName string,
+) (*dql.Function, []*dql.GraphQuery) {
+	topK, ok := filter["topK"]
+	if !ok {
+		// validation should catch this.
+		return nil, nil
+	}
+	maxDistance, ok := filter["distance"]
+	if !ok {
+		maxDistance = 0
+	}
+
+	vecVar := queryName + "_vec"
+
+	var idFilters []*dql.FilterTree
+	var idFunc *dql.Function
+
+	for key, val := range filter {
+		if key == "topK" {
+			continue
+		}
+
+		idField := typ.Field(key)
+		if idField == nil {
+			continue
+		}
+
+		if idField.IsID() && !idField.IsExternal() {
+			uid, err := strconv.ParseUint(val.(string), 0, 64)
+			if err == nil {
+				idFunc = &dql.Function{Name: "uid", UID: []uint64{uid}}
+			}
+		} else {
+			idFilters = append(idFilters, &dql.FilterTree{
+				Func: &dql.Function{
+					Name: "eq",
+					Args: []dql.Arg{
+						{Value: typ.DgraphPredicate(key)},
+						{Value: maybeQuoteArg("eq", val)},
+					},
+				},
+			})
+		}
+	}
+
+	var finalFilter *dql.FilterTree
+	if len(idFilters) > 1 {
+		finalFilter = &dql.FilterTree{Op: "and", Child: idFilters}
+	} else if len(idFilters) == 1 {
+		finalFilter = idFilters[0]
+	}
+
+	varQry := &dql.GraphQuery{
+		Attr:   "var",
+		Func:   idFunc,
+		Filter: finalFilter,
+		Children: []*dql.GraphQuery{{
+			Attr: field.DgraphPredicate(),
+			Var:  vecVar,
+		}},
+	}
+
+	if idFunc == nil {
+		varQry.Func = buildTypeFunc(typ.DgraphName())
+	}
+
+	similarToFunc := &dql.Function{
+		Name: "similar_to",
+		Args: []dql.Arg{
+			{Value: field.DgraphPredicate()},
+			{Value: fmt.Sprintf("%v", topK)},
+			{Value: fmt.Sprintf("val(%s)", vecVar)},
+			{Value: fmt.Sprintf("%v", maxDistance)},
+		},
+	}
+
+	return similarToFunc, []*dql.GraphQuery{varQry}
 }

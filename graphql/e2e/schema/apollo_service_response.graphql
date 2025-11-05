@@ -120,7 +120,8 @@ input CustomHTTP {
 
 input DgraphDefault {
 	value: String
-	expr: String 
+	expr: String
+	evaluationOrder: Int
 }
 
 type Point {
@@ -203,10 +204,12 @@ input GenerateMutationParams {
 
 directive @hasInverse(field: String!) on FIELD_DEFINITION
 directive @search(by: [String!]) on FIELD_DEFINITION
-directive @embedding on FIELD_DEFINITION
+directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
+directive @validate(rule: String, expr: String, reason: String) on FIELD_DEFINITION
+directive @oldValue on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @remote on OBJECT | INTERFACE | UNION | INPUT_OBJECT | ENUM

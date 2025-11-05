@@ -6,6 +6,7 @@
 package admin
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -150,7 +151,9 @@ func (gs *graphqlSubscription) Subscribe(
 	headerPayload, _ := ctx.Value("Header").(json.RawMessage)
 	if len(headerPayload) > 0 {
 		headers := make(map[string]interface{})
-		if err := json.Unmarshal(headerPayload, &headers); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(headerPayload))
+		decoder.UseNumber()
+		if err := decoder.Decode(&headers); err != nil {
 			return nil, err
 		}
 
@@ -172,6 +175,12 @@ func (gs *graphqlSubscription) Subscribe(
 				reqHeader.Set(k, httpHeaders.Get(k))
 			}
 		}
+	}
+
+	// Using a json.Decoder with UseNumber() ensures that numbers are not converted to float64.
+	// This is important for GraphQL variables, as it allows us to distinguish between Int and Float.
+	if variableValues != nil {
+		convertFloatToJsonNumber(variableValues)
 	}
 
 	req := &schema.Request{
@@ -215,6 +224,23 @@ func (gh *graphqlHandler) Handler() http.Handler {
 	return graphqlws.NewHandlerFunc(&graphqlSubscription{
 		graphqlHandler: gh,
 	}, gh)
+}
+
+func convertFloatToJsonNumber(vars map[string]interface{}) {
+	for k, v := range vars {
+		switch v := v.(type) {
+		case float64:
+			vars[k] = json.Number(strconv.FormatFloat(v, 'f', -1, 64))
+		case map[string]interface{}:
+			convertFloatToJsonNumber(v)
+		case []interface{}:
+			for _, e := range v {
+				if m, ok := e.(map[string]interface{}); ok {
+					convertFloatToJsonNumber(m)
+				}
+			}
+		}
+	}
 }
 
 // ServeHTTP handles GraphQL queries and mutations that get resolved

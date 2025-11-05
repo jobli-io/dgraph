@@ -352,6 +352,15 @@ func (qs *queryState) handleValuePostings(ctx context.Context, args funcArgs) er
 		if err != nil {
 			return fmt.Errorf("invalid value for number of neighbors: %s", q.SrcFunc.Args[0])
 		}
+
+		var maxDistance float64
+		if len(q.SrcFunc.Args) > 2 {
+			maxDistance, err = strconv.ParseFloat(q.SrcFunc.Args[2], 32)
+			if err != nil {
+				return fmt.Errorf("invalid value for max distance: %s", q.SrcFunc.Args[2])
+			}
+		}
+
 		cspec, err := pickFactoryCreateSpec(ctx, args.q.Attr)
 		if err != nil {
 			return err
@@ -368,10 +377,10 @@ func (qs *queryState) handleValuePostings(ctx context.Context, args funcArgs) er
 		var nnUids []uint64
 		if srcFn.vectorInfo != nil {
 			nnUids, err = indexer.Search(ctx, qc, srcFn.vectorInfo,
-				int(numNeighbors), index.AcceptAll[float32])
+				int(numNeighbors), float32(maxDistance), index.AcceptAll[float32])
 		} else {
 			nnUids, err = indexer.SearchWithUid(ctx, qc, srcFn.vectorUid,
-				int(numNeighbors), index.AcceptAll[float32])
+				int(numNeighbors), float32(maxDistance), index.AcceptAll[float32])
 		}
 
 		if err != nil && !strings.Contains(err.Error(), hnsw.EmptyHNSWTreeError+": "+badger.ErrKeyNotFound.Error()) {
@@ -2112,8 +2121,9 @@ func parseSrcFn(ctx context.Context, q *pb.Query) (*functionContext, error) {
 		}
 		checkRoot(q, fc)
 	case similarToFn:
-		if err = ensureArgsCount(q.SrcFunc, 2); err != nil {
-			return nil, err
+		if len(q.SrcFunc.Args) < 2 || len(q.SrcFunc.Args) > 3 {
+			return nil, errors.Errorf("Function 'similar_to' requires 2 or 3 arguments, but got %d (%v)",
+				len(q.SrcFunc.Args), q.SrcFunc.Args)
 		}
 		fc.vectorInfo, fc.vectorUid, err = interpretVFloatOrUid(q.SrcFunc.Args[1])
 		if err != nil {

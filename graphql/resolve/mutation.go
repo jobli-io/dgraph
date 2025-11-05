@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
@@ -112,6 +113,10 @@ type MutationRewriter interface {
 		mutation schema.Mutation,
 		assigned map[string]string,
 		result map[string]interface{}) []string
+	// MutatedRootUIDs returns a list of Root UIDs that were mutated as part of the mutation.
+	SetOldValue(
+		key string,
+		value map[string]interface{})
 }
 
 // A DgraphExecutor can execute a query/mutation and returns the request response and any errors.
@@ -206,6 +211,59 @@ func getNumUids(m schema.Mutation, a map[string]string, r map[string]interface{}
 		mutated := extractMutated(r, m.Name())
 		return len(mutated)
 	}
+}
+
+// idExistenceRes represents the idExistence query result object with known and arbitrary fields of oldValue
+type idExistenceRes struct {
+	Uid       string                 `json:"uid"`
+	Types     []string               `json:"dgraph.type"`
+	OldValues map[string]interface{} `json:"-"` // Use `json:"-"` to skip default unmarshaling for this field
+}
+
+// Custom UnmarshalJSON method for idExistence result
+func (r *idExistenceRes) UnmarshalJSON(data []byte) error {
+	// Step 1: Unmarshal the raw JSON into a temporary map[string]interface{}
+	// This will capture *all* fields from the JSON object.
+	var tempMap map[string]interface{}
+	if err := json.Unmarshal(data, &tempMap); err != nil {
+		return fmt.Errorf("failed to unmarshal Res into temp map: %w", err)
+	}
+
+	// Step 2: Extract known fields (Uid, Types) from the temporary map
+	// and delete them, so only arbitrary fields remain.
+
+	// Extract Uid
+	if uidVal, ok := tempMap["uid"]; ok {
+		if uidStr, isStr := uidVal.(string); isStr {
+			r.Uid = uidStr
+		} else {
+			// Handle case where Uid exists but is not a string (e.g., return error)
+			return fmt.Errorf("uid field is not a string, got %T", uidVal)
+		}
+	}
+	// Extract Types
+	if typesVal, ok := tempMap["dgraph.type"]; ok {
+		if typesSlice, isSlice := typesVal.([]interface{}); isSlice {
+			r.Types = make([]string, 0, len(typesSlice))
+			for i, item := range typesSlice {
+				if strItem, isStr := item.(string); isStr {
+					r.Types = append(r.Types, strItem)
+				} else {
+					// Handle case where an element in Types is not a string
+					return fmt.Errorf("element at index %d in Types is not a string, got %T", i, item)
+				}
+			}
+		} else {
+			// Handle case where Types exists but is not an array (e.g., return error)
+			return fmt.Errorf("types field is not an array, got %T", typesVal)
+		}
+		delete(tempMap, "dgraph.type") // Remove Types from tempMap
+	}
+
+	// Step 3: Assign the remaining fields in tempMap to ArbitraryFields
+	r.OldValues = tempMap
+
+	return nil
 }
 
 func (mr *dgraphResolver) rewriteAndExecute(
@@ -312,11 +370,7 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	// 			}
 	//		]
 	// }
-	type res struct {
-		Uid   string   `json:"uid"`
-		Types []string `json:"dgraph.type"`
-	}
-	queryResultMap := make(map[string][]res)
+	queryResultMap := make(map[string][]idExistenceRes)
 	if mutResp != nil {
 		err = json.Unmarshal(mutResp.Json, &queryResultMap)
 	}
@@ -342,21 +396,35 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	// qNameToUID map will be non-empty only in case of Add or Update Mutation.
 	qNameToUID := make(map[string]string)
 	for key, result := range queryResultMap {
-		count := 0
+		if key == UpdateMutationFilterVar {
+			continue
+		}
+		var matchedResults []idExistenceRes
 		typ := qNameToType[key]
 		for _, res := range result {
 			if x.HasString(res.Types, typ) {
-				qNameToUID[key] = res.Uid
-				count++
+				matchedResults = append(matchedResults, res)
 			}
 		}
-		if count > 1 {
+
+		if len(matchedResults) > 1 {
+			var uids []string
+			for _, res := range matchedResults {
+				uids = append(uids, res.Uid)
+			}
 			// Found multiple UIDs for query. This should ideally not happen.
 			// This indicates that there are multiple nodes with same XIDs / UIDs. Throw an error.
-			err = errors.New(fmt.Sprintf("Found multiple nodes with ID: %s", qNameToUID[key]))
+			err = errors.New(fmt.Sprintf("Found multiple nodes with UIDs: [%s]",
+				strings.Join(uids, ", ")))
 			gqlErr := schema.GQLWrapLocationf(
 				err, mutation.Location(), "mutation %s failed", mutation.Name())
 			return emptyResult(gqlErr), resolverFailed
+		}
+
+		if len(matchedResults) == 1 {
+			res := matchedResults[0]
+			qNameToUID[key] = res.Uid
+			mr.mutationRewriter.SetOldValue(key, res.OldValues)
 		}
 	}
 

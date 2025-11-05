@@ -29,6 +29,8 @@ const (
 	updateMutationCondition   = `gt(len(x), 0)`
 	defaultDirectiveUpdateAct = "update"
 	defaultDirectiveAddAct    = "add"
+	defaultDirectiveRemoveAct = "remove"
+	UpdateMutationFilterVar   = "xx"
 )
 
 // Enum passed on to rewriteObject function.
@@ -95,6 +97,8 @@ type xidMetadata struct {
 	seenAtTopLevel map[string]bool
 	// seenUIDs tells whether the UID is previously been seen during DFS traversal
 	seenUIDs map[string]bool
+	// variableOldValueMap stores the mapping of xidVariable -> the old object which contains that xid/id
+	variableOldValueMap map[string]map[string]interface{}
 }
 
 // A mutationBuilder can build a json mutation []byte from a mutationFragment
@@ -115,6 +119,16 @@ func NewVariableGenerator() *VariableGenerator {
 		counter:       0,
 		xidVarNameMap: make(map[string]string),
 	}
+}
+
+// SetOldValue adds old value to Rewriter
+func (xm *xidMetadata) SetOldValue(
+	key string,
+	value map[string]interface{}) {
+	if xm == nil || xm.variableOldValueMap == nil {
+		return
+	}
+	xm.variableOldValueMap[key] = value
 }
 
 // Next gets the Next variable name for the given type and xid.
@@ -192,9 +206,10 @@ func NewDeleteRewriter() MutationRewriter {
 // NewXidMetadata returns a new empty *xidMetadata for storing the metadata.
 func NewXidMetadata() *xidMetadata {
 	return &xidMetadata{
-		variableObjMap: make(map[string]map[string]interface{}),
-		seenAtTopLevel: make(map[string]bool),
-		seenUIDs:       make(map[string]bool),
+		variableObjMap:      make(map[string]map[string]interface{}),
+		seenAtTopLevel:      make(map[string]bool),
+		seenUIDs:            make(map[string]bool),
+		variableOldValueMap: make(map[string]map[string]interface{}),
 	}
 }
 
@@ -277,6 +292,22 @@ func (arw *AddRewriter) RewriteQueries(
 	var retTypes []string
 	var retErrors error
 
+	// // Check static auth rules: prevent unnecessary queries from being executed
+	// // when authorization fails, improving performance
+	// customClaims, err := m.GetAuthMeta().ExtractCustomClaims(ctx)
+	// if err != nil {
+	// 	return nil, nil, err
+	// }
+	// authRw := &authRewriter{
+	// 	authVariables: customClaims.AuthVariables,
+	// 	varGen:        arw.VarGen,
+	// 	selector:      addAuthSelector,
+	// }
+	// authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
+	// if authRw.evaluateStaticRules(mutatedType) == schema.Negative {
+	// 	return nil, nil, x.GqlErrorf("authorization failed for type %s", mutatedType.Name())
+	// }
+
 	for _, i := range val {
 		obj := i.(map[string]interface{})
 		queries, typs, errs := existenceQueries(ctx, mutatedType, nil, arw.VarGen, obj, arw.XidMetadata)
@@ -324,10 +355,44 @@ func (urw *UpdateRewriter) RewriteQueries(
 	inp := m.ArgValue(schema.InputArgName).(map[string]interface{})
 	setArg := inp["set"]
 	delArg := inp["remove"]
+	filterArg := inp["filter"]
 
 	var ret []*dql.GraphQuery
 	var retTypes []string
 	var retErrors error
+
+	// Write query for filter
+	if filterArg != nil {
+		obj := filterArg.(map[string]interface{})
+		if len(obj) != 0 {
+			dgQuery := &dql.GraphQuery{
+				Attr: UpdateMutationFilterVar,
+			}
+			dgQuery.Children = getFieldsForExistsQuery(mutatedType)
+			addTypeFunc(dgQuery, mutatedType.DgraphName())
+
+			customClaims, err := m.GetAuthMeta().ExtractCustomClaims(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			authRw := &authRewriter{
+				authVariables: customClaims.AuthVariables,
+				varGen:        urw.VarGen,
+				selector:      updateAuthSelector,
+				parentVarName: m.MutatedType().Name() + "Root",
+			}
+			authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
+
+			_, varQry := addFilter(dgQuery, mutatedType, obj, authRw, m.Alias())
+
+			ret = append(ret, dgQuery)
+			ret = append(ret, varQry...)
+			retTypes = append(retTypes, mutatedType.Name())
+			for range varQry {
+				retTypes = append(retTypes, mutatedType.Name())
+			}
+		}
+	}
 
 	// Write existence queries for set
 	if setArg != nil {
@@ -365,6 +430,36 @@ func (urw *UpdateRewriter) RewriteQueries(
 		}
 	}
 	return ret, retTypes, retErrors
+}
+
+// SetOldValue adds old value to Rewriter
+func (arw *AddRewriter) SetOldValue(
+	key string,
+	value map[string]interface{}) {
+	if arw == nil || arw.XidMetadata == nil {
+		return
+	}
+	arw.XidMetadata.SetOldValue(key, value)
+}
+
+// SetOldValue adds old value to Rewriter
+func (urw *UpdateRewriter) SetOldValue(
+	key string,
+	value map[string]interface{}) {
+	if urw == nil || urw.XidMetadata == nil {
+		return
+	}
+	urw.XidMetadata.SetOldValue(key, value)
+}
+
+// SetOldValue adds old value to Rewriter
+func (drw *deleteRewriter) SetOldValue(
+	key string,
+	value map[string]interface{}) {
+	if drw == nil || drw.XidMetadata == nil {
+		return
+	}
+	drw.XidMetadata.SetOldValue(key, value)
 }
 
 // Rewrite takes a GraphQL schema.Mutation add and builds a Dgraph upsert mutation.
@@ -465,6 +560,11 @@ func (arw *AddRewriter) Rewrite(
 		mutationType = AddWithUpsert
 	}
 
+	customClaims, err := m.GetAuthMeta().ExtractCustomClaims(ctx)
+	if err != nil {
+		return ret, err
+	}
+
 	for pos, i := range val {
 		obj := i.(map[string]interface{})
 		fragment, upsertVar, errs := rewriteObject(
@@ -477,6 +577,8 @@ func (arw *AddRewriter) Rewrite(
 			xidMetadata,
 			idExistence,
 			mutationType,
+			customClaims.AuthVariables,
+			nil,
 		)
 		if len(errs) > 0 {
 			var gqlErrors x.GqlErrorList
@@ -486,18 +588,11 @@ func (arw *AddRewriter) Rewrite(
 			retErrors = schema.AppendGQLErrs(retErrors, schema.GQLWrapf(gqlErrors,
 				"failed to rewrite mutation payload"))
 		}
-		// TODO: Do RBAC authorization along with RewriteQueries. This will save some time and queries need
-		// not be executed in case RBAC is Negative.
 		// upsertVar is non-empty in case this is an upsert Mutation and the XID at
 		// top level exists. upsertVar in this case contains variable name of the node
 		// which is going to be updated. Eg. State3 .
 		if upsertVar != "" {
 			// Add auth queries for upsert mutation.
-			customClaims, err := m.GetAuthMeta().ExtractCustomClaims(ctx)
-			if err != nil {
-				return ret, err
-			}
-
 			authRw := &authRewriter{
 				authVariables: customClaims.AuthVariables,
 				varGen:        varGen,
@@ -637,8 +732,13 @@ func (urw *UpdateRewriter) Rewrite(
 		return ret, nil
 	}
 
-	if setArg != nil {
-		if len(objSet) != 0 {
+	// In case @default directive is present for update mutation,
+	// we'll execute set operation also when delArg is set.
+	if setArg != nil || delArg != nil {
+		if objSet == nil {
+			objSet = make(map[string]interface{})
+		}
+		if len(objSet) != 0 || len(objDel) != 0 {
 			fragment, _, errs := rewriteObject(
 				ctx,
 				mutatedType,
@@ -649,6 +749,8 @@ func (urw *UpdateRewriter) Rewrite(
 				xidMetadata,
 				idExistence,
 				UpdateWithSet,
+				customClaims.AuthVariables,
+				objDel,
 			)
 			if len(errs) > 0 {
 				var gqlErrors x.GqlErrorList
@@ -677,6 +779,8 @@ func (urw *UpdateRewriter) Rewrite(
 				xidMetadata,
 				idExistence,
 				UpdateWithRemove,
+				customClaims.AuthVariables,
+				nil,
 			)
 			if len(errs) > 0 {
 				var gqlErrors x.GqlErrorList
@@ -969,10 +1073,11 @@ func RewriteUpsertQueryFromMutation(
 		}
 	}
 
-	// Add uid child to the upsert query, so that we can get the list of nodes upserted.
-	dgQuery[0].Children = append(dgQuery[0].Children, &dql.GraphQuery{
-		Attr: "uid",
-	})
+	// Add uid, dgraph.type and old value fields to the upsert query.
+	// uid is used to get the list of nodes upserted.
+	// dgraph.type is used for filtering.
+	// old values are returned to the user.
+	dgQuery[0].Children = append(dgQuery[0].Children, getFieldsForExistsQuery(m.MutatedType())...)
 
 	// TODO - Cache this instead of this being a loop to find the IDField.
 	// nodeID is contains upsertVar in case this is an upsert with Add Mutation.
@@ -1240,6 +1345,23 @@ func mutationFromFragment(
 
 }
 
+// --- New Helper for `checkXIDExistsQuery` and `checkUIDExistsQuery` ---
+// getFieldsForExistsQuery collects all fields marked @oldValue for a given type,
+// preparing them for inclusion in a DQL query as aliases.
+func getFieldsForExistsQuery(typ schema.Type) []*dql.GraphQuery {
+	var children []*dql.GraphQuery
+	children = append(children, &dql.GraphQuery{Attr: "uid"})         // Always fetch uid
+	children = append(children, &dql.GraphQuery{Attr: "dgraph.type"}) // Always fetch dgraph.type
+
+	oldValueFieldMap := typ.GetOldValueFieldsForQuery() // Use the new schema helper
+	for gqlName, dgraphPredicate := range oldValueFieldMap {
+		children = append(children, &dql.GraphQuery{
+			Attr: fmt.Sprintf("%s : %s", gqlName, dgraphPredicate), // Alias GraphQL name to Dgraph predicate
+		})
+	}
+	return children
+}
+
 func checkXIDExistsQuery(xidVariable, xidString, xidPredicate string, typ schema.Type,
 	interfaceType schema.Type) *dql.GraphQuery {
 	qry := &dql.GraphQuery{
@@ -1251,13 +1373,13 @@ func checkXIDExistsQuery(xidVariable, xidString, xidPredicate string, typ schema
 				{Value: maybeQuoteArg("eq", xidString)},
 			},
 		},
-		Children: []*dql.GraphQuery{{Attr: "uid"}, {Attr: "dgraph.type"}},
+		Children: getFieldsForExistsQuery(typ),
 	}
 
 	return qry
 }
 
-func checkUIDExistsQuery(val interface{}, variable string) (*dql.GraphQuery, error) {
+func checkUIDExistsQuery(val interface{}, variable string, typ schema.Type) (*dql.GraphQuery, error) {
 	uid, err := asUID(val)
 	if err != nil {
 		return nil, err
@@ -1266,7 +1388,7 @@ func checkUIDExistsQuery(val interface{}, variable string) (*dql.GraphQuery, err
 	query := &dql.GraphQuery{
 		Attr:     variable,
 		UID:      []uint64{uid},
-		Children: []*dql.GraphQuery{{Attr: "uid"}, {Attr: "dgraph.type"}},
+		Children: getFieldsForExistsQuery(typ),
 	}
 	addUIDFunc(query, []uint64{uid})
 	return query, nil
@@ -1345,7 +1467,9 @@ func rewriteObject(
 	obj map[string]interface{},
 	xidMetadata *xidMetadata,
 	idExistence map[string]string,
-	mutationType MutationType) (*mutationFragment, string, []error) {
+	mutationType MutationType,
+	authVariables map[string]interface{},
+	objDel map[string]interface{}) (*mutationFragment, string, []error) {
 
 	// There could be the following cases:
 	// 1. We need to create a new node.
@@ -1585,7 +1709,10 @@ func rewriteObject(
 	// This is not an XID reference. This is also not a UID reference.
 	// This is definitely a new node.
 	// Create new node
-	if variable == "" {
+	if variable == "" && mutationType == UpdateWithSet && atTopLevel {
+		// using the update filter mutation variable
+		variable = UpdateMutationFilterVar
+	} else if variable == "" {
 		// This will happen in case when this is a new node and does not contain XID.
 		variable = varGen.Next(typ, "", "", false)
 	}
@@ -1633,87 +1760,165 @@ func rewriteObject(
 		action = defaultDirectiveAddAct
 	}
 
+	// set action to remove
+	if mutationType == UpdateWithRemove {
+		action = defaultDirectiveRemoveAct
+	}
+
 	// Now we know whether this is a new node or not, we can set @default(add/update) fields
-	for _, field := range typ.FieldsInDefaultValueEvaluationOrder(action) {
-		if obj[field.Name()] != nil {
-			continue
-		}
+	// We don't want to set default value or validation during an update remove mutation.
+	if mutationType != UpdateWithRemove {
+		for _, field := range typ.FieldsInDefaultValueEvaluationOrder(action) {
+			if obj[field.Name()] != nil {
+				continue
+			}
 
-		// Extract auth variables
-		authVars := map[string]interface{}{}
-		if customClaims, _ := field.GetAuthMeta().ExtractCustomClaims(ctx); customClaims != nil {
-			authVars = customClaims.AuthVariables
-		}
-		var value = field.GetDefaultValue(action, obj, authVars) // TODO: handle errors from expression
+			oldValue := xidMetadata.variableOldValueMap[variable] // retrieve the old value
+			value, err := field.GetDefaultValue(action, typ.Name(), obj, authVariables, oldValue, objDel)
+			if err != nil {
+				retErrors = append(retErrors, errors.Errorf("Type %s; %s", typ.Name(), err.Error()))
+				continue
+			}
 
-		if value != nil{
-			obj[field.Name()] = value
+			if value != nil {
+				obj[field.Name()] = value
+				shouldReRun := false
 
-			// update idExistence for nodes with default xid
-			// ...
-			
-			// update idExistence for default node
-			if v, ok := value.(map[string]interface{}); ok {
-				fieldQueries, fieldTypes, _ := existenceQueries(ctx, typ.Field(field.Name()).Type(), field, varGen, v, xidMetadata)
-				// retErrors = append(retErrors, err...)
-				// Execute queries and parse its result into a map
-				qry := dgraph.AsString(fieldQueries)
-				req := &dgoapi.Request{Query: qry}
-	
-				if req.Query != "" {
-					// Executing and processing existence queries
-					mutResp, err := NewDgraphExecutor().Execute(ctx, req, nil)
-					if err != nil {
-						retErrors = append(retErrors, err)
-						continue
-					}
-	
-					type res struct {
-						Uid   string   `json:"uid"`
-						Types []string `json:"dgraph.type"`
-					}
-					queryResultMap := make(map[string][]res)
-					if mutResp != nil {
-						err = json.Unmarshal(mutResp.Json, &queryResultMap)
-					}
-					if err != nil {
-						retErrors = append(retErrors, err)
-						continue
-					}
-	
-					x.AssertTrue(len(fieldTypes) == len(fieldQueries))
-					// qNameToType map contains the mapping from the query name to type/interface the query response
-					// has to be filtered upon.
-					qNameToType := make(map[string]string)
-					for i, typ := range fieldTypes {
-						qNameToType[fieldQueries[i].Attr] = typ
-					}
-					// The above response is parsed into map[string]string as follows:
-					// {
-					// 		"Project_1" : "0x123",
-					// 		"Column_2" : "0x234"
-					// }
-					// As only Add and Update mutations generate queries using RewriteQueries,
-					// qNameToUID map will be non-empty only in case of Add or Update Mutation.
-					for key, result := range queryResultMap {
-						count := 0
-						typ := qNameToType[key]
-						for _, res := range result {
-							if x.HasString(res.Types, typ) {
-								idExistence[key] = res.Uid
-								count++
-							}
+				// update idExistence for default node
+				var fieldQueries []*dql.GraphQuery
+				var fieldTypes []string
+				if val, ok := value.([]interface{}); ok {
+					for _, i := range val {
+						obj := i.(map[string]interface{})
+						queries, typs, errs := existenceQueries(ctx, typ.Field(field.Name()).Type(), field, varGen, obj, xidMetadata)
+						if len(errs) > 0 {
+							// for _, err := range errs {
+							// 	retErrors = append(retErrors, errors.Wrapf(err, "failed to rewrite mutation payload for default value"))
+							// }
 						}
-						if count > 1 {
-							// Found multiple UIDs for query. This should ideally not happen.
-							// This indicates that there are multiple nodes with same XIDs / UIDs. Throw an error.
-							err = errors.New(fmt.Sprintf("Found multiple nodes with ID: %s", idExistence[key]))
-							retErrors = append(retErrors, err)
-							continue
+						fieldQueries = append(fieldQueries, queries...)
+						fieldTypes = append(fieldTypes, typs...)
+					}
+				} else if val, ok := value.(map[string]interface{}); ok {
+					queries, typs, errs := existenceQueries(ctx, typ.Field(field.Name()).Type(), field, varGen, val, xidMetadata)
+					if len(errs) > 0 {
+						// for _, err := range errs {
+						// 	retErrors = append(retErrors, errors.Wrapf(err, "failed to rewrite mutation payload for default value"))
+						// }
+					}
+					fieldQueries = append(fieldQueries, queries...)
+					fieldTypes = append(fieldTypes, typs...)
+
+				} else {
+					// update idExistence for nodes with default xid
+					for _, xid := range typ.XIDFields() {
+						if xid.Name() == field.Name() {
+							queries, typs, errs := existenceQueries(ctx, typ, field, varGen, obj, xidMetadata)
+							if len(errs) > 0 {
+								// for _, err := range errs {
+								// 	retErrors = append(retErrors, errors.Wrapf(err, "failed to rewrite mutation payload for default value"))
+								// }
+							}
+							fieldQueries = append(fieldQueries, queries...)
+							fieldTypes = append(fieldTypes, typs...)
+							break
 						}
 					}
 				}
+
+				// Execute existence queries
+				// todo: consider moving the execution of the existence queries to outside this loop.
+				if len(fieldQueries) > 0 {
+					// Execute queries and parse its result into a map
+					qry := dgraph.AsString(fieldQueries)
+					req := &dgoapi.Request{Query: qry}
+
+					if req.Query != "" {
+						// Executing and processing existence queries
+						mutResp, err := NewDgraphExecutor().Execute(ctx, req, nil)
+						if err != nil {
+							retErrors = append(retErrors, err)
+							continue
+						}
+
+						type res struct {
+							Uid   string   `json:"uid"`
+							Types []string `json:"dgraph.type"`
+						}
+						queryResultMap := make(map[string][]idExistenceRes)
+						if mutResp != nil {
+							err = json.Unmarshal(mutResp.Json, &queryResultMap)
+						}
+						if err != nil {
+							retErrors = append(retErrors, err)
+							continue
+						}
+
+						x.AssertTrue(len(fieldTypes) == len(fieldQueries))
+						// qNameToType map contains the mapping from the query name to type/interface the query response
+						// has to be filtered upon.
+						qNameToType := make(map[string]string)
+						for i, typ := range fieldTypes {
+							qNameToType[fieldQueries[i].Attr] = typ
+						}
+						// The above response is parsed into map[string]string as follows:
+						// {
+						// 		"Project_1" : "0x123",
+						// 		"Column_2" : "0x234"
+						// }
+						// As only Add and Update mutations generate queries using RewriteQueries,
+						// qNameToUID map will be non-empty only in case of Add or Update Mutation.
+						for key, result := range queryResultMap {
+							var matchedResults []idExistenceRes
+							typ := qNameToType[key]
+							for _, res := range result {
+								if x.HasString(res.Types, typ) {
+									matchedResults = append(matchedResults, res)
+								}
+							}
+
+							if len(matchedResults) > 1 {
+								var uids []string
+								for _, res := range matchedResults {
+									uids = append(uids, res.Uid)
+								}
+								// Found multiple UIDs for query. This should ideally not happen.
+								// This indicates that there are multiple nodes with same XIDs / UIDs. Throw an error.
+								err = errors.New(fmt.Sprintf("Found multiple nodes with UIDs: [%s]",
+									strings.Join(uids, ", ")))
+								retErrors = append(retErrors, err)
+								continue
+							}
+
+							if len(matchedResults) == 1 {
+								res := matchedResults[0]
+								idExistence[key] = res.Uid
+								xidMetadata.SetOldValue(key, res.OldValues)
+							}
+						}
+					}
+				}
+
+				if shouldReRun {
+					return rewriteObject(ctx, typ, srcField, srcUID, varGen, obj, xidMetadata, idExistence,
+						mutationType, authVariables, objDel)
+				}
 			}
+		}
+	}
+
+	// Execute input validation with @validate directive.
+	// At this point, default values for the object type has also been populated in obj.
+	// We can now validate the values before mutation.
+
+	// if err := typ.ValidateObject(obj, nil); err != nil {
+	// 	retErrors = append(retErrors, err)
+	// }
+	for _, field := range typ.Fields() {
+		// Extract auth variables
+		oldValue := xidMetadata.variableOldValueMap[variable] // retrieve the old value
+		for _, err := range field.ValidateValue(action, typ.Name(), obj, authVariables, oldValue, objDel) {
+			retErrors = append(retErrors, errors.Errorf("Type %s; %s", typ.Name(), err.Error()))
 		}
 	}
 
@@ -1748,6 +1953,9 @@ func rewriteObject(
 		val := obj[field]
 
 		fieldDef := typ.Field(field)
+		if fieldDef == nil {
+			continue
+		}
 		fieldName := typ.DgraphPredicate(field)
 
 		// This fixes mutation when dgraph predicate has special characters. PR #5526
@@ -1764,6 +1972,7 @@ func rewriteObject(
 		// TODO: Write a function for aggregating data of fragment from child nodes.
 		switch val := val.(type) {
 		case map[string]interface{}:
+
 			if fieldDef.Type().IsUnion() {
 				fieldMutationFragment, _, err := rewriteUnionField(
 					ctx,
@@ -1773,7 +1982,8 @@ func rewriteObject(
 					val,
 					xidMetadata,
 					idExistence,
-					mutationType)
+					mutationType,
+					authVariables)
 				if fieldMutationFragment != nil {
 					newObj[fieldName] = fieldMutationFragment.fragment
 					updateFromChildren(frag, fieldMutationFragment)
@@ -1795,7 +2005,9 @@ func rewriteObject(
 					val,
 					xidMetadata,
 					idExistence,
-					mutationType)
+					mutationType,
+					authVariables,
+					nil)
 				if fieldMutationFragment != nil {
 					newObj[fieldName] = fieldMutationFragment.fragment
 					updateFromChildren(frag, fieldMutationFragment)
@@ -1818,7 +2030,8 @@ func rewriteObject(
 							object,
 							xidMetadata,
 							idExistence,
-							mutationType)
+							mutationType,
+							authVariables)
 					} else if fieldDef.Type().IsGeo() {
 						fieldMutationFragment = newFragment(
 							map[string]interface{}{
@@ -1836,7 +2049,9 @@ func rewriteObject(
 							object,
 							xidMetadata,
 							idExistence,
-							mutationType)
+							mutationType,
+							authVariables,
+							nil)
 					}
 					if fieldMutationFragment != nil {
 						mutationFragments = append(mutationFragments, fieldMutationFragment.fragment)
@@ -1918,7 +2133,7 @@ func existenceQueries(
 				xidMetadata.seenUIDs[idVal.(string)] = true
 				variable := varGen.Next(typ, id.Name(), idVal.(string), false)
 
-				query, err := checkUIDExistsQuery(idVal, variable)
+				query, err := checkUIDExistsQuery(idVal, variable, typ)
 				if err != nil {
 					retErrors = append(retErrors, err)
 				}
@@ -2028,6 +2243,9 @@ func existenceQueries(
 		val := obj[field]
 
 		fieldDef := typ.Field(field)
+		if fieldDef == nil {
+			continue
+		}
 		fieldName := typ.DgraphPredicate(field)
 
 		// This fixes mutation when dgraph predicate has special characters. PR #5526
@@ -2137,7 +2355,8 @@ func rewriteUnionField(
 	obj map[string]interface{},
 	xidMetadata *xidMetadata,
 	existenceQueriesResult map[string]string,
-	mutationType MutationType) (*mutationFragment, string, []error) {
+	mutationType MutationType,
+	authVariables map[string]interface{}) (*mutationFragment, string, []error) {
 
 	var newtyp schema.Type
 	for memberRef, memberRefVal := range obj {
@@ -2147,7 +2366,7 @@ func rewriteUnionField(
 		newtyp = srcField.Type()
 		obj = memberRefVal.(map[string]interface{})
 	}
-	return rewriteObject(ctx, newtyp, srcField, srcUID, varGen, obj, xidMetadata, existenceQueriesResult, mutationType)
+	return rewriteObject(ctx, newtyp, srcField, srcUID, varGen, obj, xidMetadata, existenceQueriesResult, mutationType, authVariables, nil)
 }
 
 // rewriteGeoObject rewrites the given value correctly based on the underlying Geo type.

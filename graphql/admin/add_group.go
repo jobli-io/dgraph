@@ -72,6 +72,17 @@ func (mrw *addGroupRewriter) MutatedRootUIDs(
 	return ((*resolve.AddRewriter)(mrw)).MutatedRootUIDs(mutation, assigned, result)
 }
 
+// SetOldValue adds old value to Rewriter
+func (mrw *addGroupRewriter) SetOldValue(
+	key string,
+	value map[string]interface{}) {
+	if mrw == nil || mrw.XidMetadata == nil {
+		return
+	}
+	mrw.XidMetadata.SetOldValue(key, value)
+	return
+}
+
 // removeDuplicateRuleRef removes duplicate rules based on predicate value.
 // for duplicate rules, only the last rule with duplicate predicate name is preserved.
 func removeDuplicateRuleRef(rules []interface{}) ([]interface{}, x.GqlErrorList) {

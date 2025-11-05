@@ -6,19 +6,19 @@
 package schema
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dgraph-io/gqlparser/v2/ast"
 	"github.com/dgraph-io/gqlparser/v2/gqlerror"
 	"github.com/dgraph-io/gqlparser/v2/parser"
 	"github.com/dgraph-io/gqlparser/v2/validator"
-	"github.com/expr-lang/expr"
-	"github.com/google/uuid"
 	"github.com/hypermodeinc/dgraph/v25/x"
 	"gopkg.in/yaml.v3"
 )
@@ -1474,12 +1474,12 @@ func defaultDirectiveValidation(sch *ast.Schema,
 	// 		"Type %s; Field %s: cannot use @default directive on field with non-scalar type %s",
 	// 		typ.Name, field.Name, field.Type.Name())}
 	// }
-	if field.Type.Elem != nil {
-		return []*gqlerror.Error{gqlerror.ErrorPosf(
-			dir.Position,
-			"Type %s; Field %s: cannot use @default directive on field with list type [%s]",
-			typ.Name, field.Name, field.Type.Name())}
-	}
+	// if field.Type.Elem != nil {
+	// 	return []*gqlerror.Error{gqlerror.ErrorPosf(
+	// 		dir.Position,
+	// 		"Type %s; Field %s: cannot use @default directive on field with list type [%s]",
+	// 		typ.Name, field.Name, field.Type.Name())}
+	// }
 	// if field.Directives.ForName(idDirective) != nil {
 	// 	return []*gqlerror.Error{gqlerror.ErrorPosf(
 	// 		dir.Position,
@@ -1537,23 +1537,127 @@ func defaultDirectiveValidation(sch *ast.Schema,
 					typ.Name, field.Name, value, fieldType)}
 			}
 		} else if v := arg.Value.Children.ForName("expr"); v != nil {
-			exp := v.Raw
-			env := map[string]interface{}{
-				"uuid":   uuid.NewString,
-				"sha256":   hashSHA256,
-				"parent": map[string]interface{}{},
-				"auth":   map[string]interface{}{},
-			}
-			_, err := expr.Compile(exp, expr.Env(env))
+			exprString := v.Raw
+			_, err := getDefaultValue(sch, field, arg.Name, typ.Name, map[string]interface{}{}, nil, nil, nil)
 			if err != nil {
+				var ce *CompileError
+				if errors.As(err, &ce) {
+					return []*gqlerror.Error{gqlerror.ErrorPosf(
+						dir.Position,
+						"Type %s; Field %s: @default directive provides extr \"%s\" which cannot be compiled: %s",
+						typ.Name, field.Name, exprString, err.Error())}
+				}
+			}
+		} else if v := arg.Value.Children.ForName("evaluationOrder"); v != nil {
+			if _, err := strconv.ParseInt(v.Raw, 10, 64); err != nil {
 				return []*gqlerror.Error{gqlerror.ErrorPosf(
 					dir.Position,
-					"Type %s; Field %s: @default directive provides extr \"%s\" which cannot be compiled: %s",
-					typ.Name, field.Name, exp, err.Error())}
+					"Type %s; Field %s: @default directive provides a non-integer value \"%s\" for evaluationOrder",
+					typ.Name, field.Name, v.Raw)}
 			}
 		}
 	}
 	return nil
+}
+
+// validateDirectiveValidation prevents use of @validate on unsupported fields and validates the rule syntax.
+// It also ensures that the validation rules themselves (the `rule` string and `expr` expression)
+// are syntactically valid and do not cause panics when applied.
+func validateDirectiveValidation(sch *ast.Schema,
+	typ *ast.Definition,
+	field *ast.FieldDefinition,
+	dir *ast.Directive,
+	secrets map[string]x.Sensitive) gqlerror.List {
+
+	var combinedErrors gqlerror.List // Use a new slice to collect all gql errors
+
+	// --- Rule 1: Directive Placement Checks (remain the same) ---
+	if typ.Directives.ForName(remoteDirective) != nil {
+		combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(dir.Position, "Type %s; Field %s: cannot use @validate directive on a @remote type", typ.Name, field.Name))
+	}
+	if isID(field) {
+		combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(dir.Position, "Type %s; Field %s: cannot use @validate directive on field with type ID", typ.Name, field.Name))
+	}
+	if field.Directives.ForName(customDirective) != nil {
+		combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(dir.Position, "Type %s; Field %s: cannot use @validate directive on field with @custom directive", typ.Name, field.Name))
+	}
+	if field.Directives.ForName(lambdaDirective) != nil {
+		combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(dir.Position, "Type %s; Field %s: cannot use @validate directive on field with @lambda directive", typ.Name, field.Name))
+	}
+
+	// If any placement errors found, return them immediately before checking rules syntax.
+	if len(combinedErrors) > 0 {
+		return combinedErrors
+	}
+
+	// --- Rule 2: Validation Rule Syntax Check ---
+	// This function primarily checks the syntax of the 'rule' and 'expr' arguments by doing a dry run.
+	// It should only report errors that indicate a malformed rule definition, not a rule that simply fails a test value.
+
+	// A dummy value for the field, used to perform a "dry run" validation.
+	// This value is chosen to be a zero-value that `go-playground/validator` can process,
+	// allowing us to check the rule string's syntax without needing a real input.
+	var testValue interface{}
+	switch field.Type.Name() {
+	case "DateTime":
+		testValue = time.Now()
+	case "Int":
+		testValue = 0
+	case "Float":
+		testValue = 0.0
+	case "Boolean":
+		testValue = false
+	case "String":
+		testValue = ""
+	default:
+		if sch.Types[field.Type.Name()].Kind == ast.Enum {
+			testValue = ""
+		} else if !isScalar(field.Type.Name()) && sch.Types[field.Type.Name()].Kind != ast.Enum {
+			testValue = map[string]interface{}{}
+		} else {
+			// This case should ideally be caught by the `isScalar` check above.
+			combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @validate is not supported for field type %s",
+				typ.Name, field.Name, field.Type.Name()))
+			return combinedErrors
+		}
+	}
+
+	// Create a temporary parent map with the test value for `ValidateValue`.
+	// The `auth` context is `nil` as it's not relevant for schema validation.
+	parentForTest := map[string]interface{}{field.Name: testValue}
+	validationFailures := validateValue(sch, field, "add", typ.Name, parentForTest, nil, nil, nil)
+
+	for _, err := range validationFailures {
+		// Check if the error returned by ValidateValue is a PanicWrappedError.
+		// This specifically indicates a schema definition problem (malformed rule/expression).
+		var ce *CompileError
+		if errors.As(err, &ce) {
+			// This is an error that originated from a panic in ValidateValue (e.g., malformed expr syntax).
+			// This *is* a schema validation error.
+			combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: malformed validation rule or expression. Reason: %v",
+				typ.Name, field.Name, ce.Unwrap())) // Show the rule string & unwrapped error
+		}
+		// ELSE: If it's not a PanicWrappedError, it means it's a regular `go-playground/validator` error.
+		// This implies the validation rule was syntactically correct and applied, but our `testValue`
+		// simply failed that rule (e.g., `""` failing `required`).
+		// For schema definition validation, this is NOT an error. It proves the rule is functional.
+		// So, we do *not* add it to `combinedErrors`.
+	}
+
+	// Returns nil if no schema validation errors were found.
+	return combinedErrors
+}
+
+func oldValueDirectiveValidation(sch *ast.Schema, typ *ast.Definition,
+	field *ast.FieldDefinition, dir *ast.Directive,
+	secrets map[string]x.Sensitive) gqlerror.List {
+	var errs []*gqlerror.Error
+
+	return errs
 }
 
 func lambdaOnMutateValidation(sch *ast.Schema, typ *ast.Definition) gqlerror.List {
