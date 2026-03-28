@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/url"
@@ -250,7 +251,8 @@ type Type interface {
 	Field(name string) FieldDefinition
 	Fields() []FieldDefinition
 	FieldsInDefaultValueEvaluationOrder(action string) []FieldDefinition
-	GetOldValueFieldsForQuery() map[string]string
+	FieldsInTransformEvaluationOrder(action string) []FieldDefinition
+	GetOldValueFieldsForQuery() map[string]*OldValueSelection
 	IDField() FieldDefinition
 	XIDFields() []FieldDefinition
 	InterfaceImplHasAuthRules() bool
@@ -290,12 +292,14 @@ type FieldDefinition interface {
 	HasIDDirective() bool
 	HasSearchDirective() bool
 	HasOldValueDirective() bool
+	OldValueFields() []string
 	HasEmbeddingDirective() bool
 	HasEmbeddingProvider() bool
 	EmbeddingSearchMetric() string
 	HasInterfaceArg() bool
-	GetDefaultValue(action string, parentTypeName string, parent map[string]interface{}, auth map[string]interface{}, oldValue map[string]interface{}, removeValue map[string]interface{}) (interface{}, error)
-	ValidateValue(action string, parentTypeName string, parent map[string]interface{}, auth map[string]interface{}, oldValue map[string]interface{}, removeValue map[string]interface{}) []error
+	GetDefaultValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (interface{}, error)
+	ValidateValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) []error
+	TransformValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (interface{}, error)
 	GenerateEmbedding(textToEmbed string) ([]float32, error)
 	Inverse() FieldDefinition
 	WithMemberType(string) FieldDefinition
@@ -2366,23 +2370,105 @@ func (t *astType) FieldsInDefaultValueEvaluationOrder(action string) []FieldDefi
 	return result
 }
 
-// Type: Add a helper to collect all fields marked @oldValue
-// This recursively finds all fields of the type that are marked @oldValue.
-// It returns a map of GraphQLFieldName -> DgraphPredicate.
-// This is crucial for building the DQL query and for `expr` context.
-func (t *astType) GetOldValueFieldsForQuery() map[string]string {
-	oldValueFields := make(map[string]string)
-	for _, field := range t.Fields() {
-		// Only direct fields marked with @oldValue
-		if field.HasOldValueDirective() {
-			oldValueFields[field.Name()] = field.DgraphPredicate()
-		}
-		// If nested objects also need their fields, then recurse.
-		// For simplicity, we'll assume @oldValue is only on scalar fields or direct links for now.
-		// Handling nested objects marked @oldValue (e.g. `user: User @oldValue { email @oldValue }`)
-		// would make the DQL generation more complex (nested queries).
+// Sort the fields by their transform evaluation order.
+// This is useful for managing dependent fields while evaluating the transform expressions
+// (e.g. field B's transform reads the already-transformed value of field A).
+func (t *astType) FieldsInTransformEvaluationOrder(action string) []FieldDefinition {
+	var defs []*fieldDefinition
+
+	for _, fld := range t.inSchema.schema.Types[t.Name()].Fields {
+		defs = append(defs,
+			&fieldDefinition{
+				fieldDef:        fld,
+				inSchema:        t.inSchema,
+				dgraphPredicate: t.dgraphPredicate,
+				parentType:      t,
+			})
 	}
-	return oldValueFields
+
+	// It returns true if the element at index i should come before the element at index j.
+	sort.Slice(defs, func(i, j int) bool {
+		return defs[i].getTransformValueEvaluationOrder(action) < defs[j].getTransformValueEvaluationOrder(action)
+	})
+
+	var result []FieldDefinition
+	for _, d := range defs {
+		result = append(result, d)
+	}
+
+	return result
+}
+
+// OldValueSelection describes a field (and optionally its sub-fields) that must be
+// pre-fetched before a mutation to capture the "old value". SubFields is non-nil
+// when this is an edge field with a nested selection specified via the `fields`
+// argument of @oldValue.
+type OldValueSelection struct {
+	DgraphPredicate string
+	SubFields       map[string]*OldValueSelection
+}
+
+// GetOldValueFieldsForQuery returns a tree of OldValueSelection descriptors for
+// all fields on this type that carry @oldValue. Scalar fields produce a leaf
+// entry; edge fields with @oldValue(fields:[...]) produce a nested tree built
+// from the dot-separated path list via buildSelectionTree.
+func (t *astType) GetOldValueFieldsForQuery() map[string]*OldValueSelection {
+	result := make(map[string]*OldValueSelection)
+	for _, field := range t.Fields() {
+		if !field.HasOldValueDirective() {
+			continue
+		}
+		sel := &OldValueSelection{
+			DgraphPredicate: field.DgraphPredicate(),
+		}
+		paths := field.OldValueFields()
+		if len(paths) > 0 {
+			sel.SubFields = buildSelectionTree(field.Type(), paths)
+		}
+		result[field.Name()] = sel
+	}
+	return result
+}
+
+// buildSelectionTree converts a list of dot-separated field paths into a nested
+// OldValueSelection tree. For example, ["name", "address.city", "address.country.code"]
+// becomes {name:{pred}, address:{pred, SubFields:{city:{pred}, country:{pred, SubFields:{code:{pred}}}}}}
+func buildSelectionTree(t Type, paths []string) map[string]*OldValueSelection {
+	// Group paths by the first segment.
+	grouped := make(map[string][]string)
+	for _, p := range paths {
+		idx := strings.IndexByte(p, '.')
+		if idx < 0 {
+			// Leaf — no further nesting.
+			grouped[p] = append(grouped[p], "")
+		} else {
+			head, tail := p[:idx], p[idx+1:]
+			grouped[head] = append(grouped[head], tail)
+		}
+	}
+	result := make(map[string]*OldValueSelection, len(grouped))
+	for head, tails := range grouped {
+		fd := t.Field(head)
+		if fd == nil {
+			// Caught by validation — skip gracefully at runtime.
+			continue
+		}
+		sel := &OldValueSelection{
+			DgraphPredicate: fd.DgraphPredicate(),
+		}
+		// Collect non-empty tails to recurse.
+		var subPaths []string
+		for _, tail := range tails {
+			if tail != "" {
+				subPaths = append(subPaths, tail)
+			}
+		}
+		if len(subPaths) > 0 {
+			sel.SubFields = buildSelectionTree(fd.Type(), subPaths)
+		}
+		result[head] = sel
+	}
+	return result
 }
 
 func (fd *fieldDefinition) Name() string {
@@ -2410,25 +2496,58 @@ func (fd *fieldDefinition) getDefaultValueEvaluationOrder(action string) int {
 	if dir == nil {
 		return -1
 	}
-	arg := dir.Arguments.ForName(action)
-	if arg == nil {
+
+	// 1. Operation-specific evaluationOrder (inside add/update) takes highest precedence.
+	if arg := dir.Arguments.ForName(action); arg != nil {
+		if value := arg.Value.Children.ForName("evaluationOrder"); value != nil {
+			evaluationOrder, _ := strconv.Atoi(value.Raw)
+			return evaluationOrder
+		}
+	}
+
+	// 2. Root-level evaluationOrder applies to both add and update when no operation-specific value exists.
+	if rootOrder := dir.Arguments.ForName("evaluationOrder"); rootOrder != nil && rootOrder.Value.Raw != "" {
+		evaluationOrder, _ := strconv.Atoi(rootOrder.Value.Raw)
+		return evaluationOrder
+	}
+
+	// 3. No evaluationOrder specified; field sorts last.
+	return -1
+}
+
+func (fd *fieldDefinition) getTransformValueEvaluationOrder(action string) int {
+	if fd.fieldDef == nil {
 		return -1
 	}
 
-	value := arg.Value.Children.ForName("evaluationOrder")
-	if value == nil {
+	dir := fd.fieldDef.Directives.ForName(transformDirective)
+	if dir == nil {
 		return -1
 	}
 
-	evaluationOrder, _ := strconv.Atoi(value.Raw)
-	return evaluationOrder
+	// 1. Operation-specific evaluationOrder (inside add/update) takes highest precedence.
+	if arg := dir.Arguments.ForName(action); arg != nil {
+		if value := arg.Value.Children.ForName("evaluationOrder"); value != nil {
+			evaluationOrder, _ := strconv.Atoi(value.Raw)
+			return evaluationOrder
+		}
+	}
+
+	// 2. Root-level evaluationOrder applies to both add and update when no operation-specific value exists.
+	if rootOrder := dir.Arguments.ForName("evaluationOrder"); rootOrder != nil && rootOrder.Value.Raw != "" {
+		evaluationOrder, _ := strconv.Atoi(rootOrder.Value.Raw)
+		return evaluationOrder
+	}
+
+	// 3. No evaluationOrder specified; field sorts last.
+	return -1
 }
 
 func (fd *fieldDefinition) GetDefaultValue(
 	action string,
 	parentTypeName string,
 	parent map[string]interface{},
-	auth map[string]interface{},
+	auth AuthCtx,
 	oldValue map[string]interface{},
 	removeValue map[string]interface{}) (interface{}, error) {
 	if fd.fieldDef == nil {
@@ -2441,33 +2560,18 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 	action string,
 	parentTypeName string,
 	parent map[string]interface{},
-	auth map[string]interface{},
+	auth AuthCtx,
 	oldValue map[string]interface{},
 	removeValue map[string]interface{}) (interface{}, error) {
 	dir := fd.Directives.ForName(defaultDirective)
 	if dir == nil {
 		return nil, nil
 	}
-	arg := dir.Arguments.ForName(action)
-	if arg == nil {
-		return nil, nil
-	}
 
-	var defaultValue interface{}
-
-	if value := arg.Value.Children.ForName("value"); value != nil {
-		if value.Raw == "$now" {
-			if flag.Lookup("test.v") == nil {
-				return time.Now().Format(time.RFC3339), nil
-			} else {
-				return "2000-01-01T00:00:00.00Z", nil
-			}
-		}
-		defaultValue = value.Raw
-
-	} else if exp := arg.Value.Children.ForName("expr"); exp != nil {
+	// resolveDefaultExpr evaluates an expr string in the standard mutation context.
+	resolveExpr := func(exprRaw string) (interface{}, error) {
 		env := NewExprEvaluationContext(parentTypeName, parent, oldValue, removeValue, auth, action)
-		program, err := expr.Compile(exp.Raw, expr.Env(env.As()))
+		program, err := expr.Compile(exprRaw, expr.Env(env.As()))
 		if err != nil {
 			return nil, &CompileError{Err: errors.Wrapf(err, "field %s expression compilation failed for default value", fd.Name)}
 		}
@@ -2475,12 +2579,63 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 		if err != nil {
 			return nil, errors.Wrapf(err, "field %s expression evaluation failed for default value", fd.Name)
 		}
-		defaultValue = expResult
+		return expResult, nil
+	}
+
+	// resolveDefaultNow returns the current time (or a fixed value in tests) for $now.
+	resolveNow := func() interface{} {
+		if flag.Lookup("test.v") == nil {
+			return time.Now().Format(time.RFC3339)
+		}
+		return "2000-01-01T00:00:00.00Z"
+	}
+
+	var defaultValue interface{}
+	found := false
+
+	// 1. Operation-specific arg (add/update) takes highest precedence.
+	if arg := dir.Arguments.ForName(action); arg != nil {
+		if value := arg.Value.Children.ForName("value"); value != nil {
+			if value.Raw == "$now" {
+				return resolveNow(), nil
+			}
+			defaultValue = value.Raw
+			found = true
+		} else if exp := arg.Value.Children.ForName("expr"); exp != nil {
+			var err error
+			defaultValue, err = resolveExpr(exp.Raw)
+			if err != nil {
+				return nil, err
+			}
+			found = true
+		}
+	}
+
+	// 2. Root-level value/expr apply to both add and update when no operation-specific arg matched.
+	if !found {
+		if valueArg := dir.Arguments.ForName("value"); valueArg != nil && valueArg.Value.Raw != "" {
+			if valueArg.Value.Raw == "$now" {
+				return resolveNow(), nil
+			}
+			defaultValue = valueArg.Value.Raw
+			found = true
+		} else if exprArg := dir.Arguments.ForName("expr"); exprArg != nil && exprArg.Value.Raw != "" {
+			var err error
+			defaultValue, err = resolveExpr(exprArg.Value.Raw)
+			if err != nil {
+				return nil, err
+			}
+			found = true
+		}
+	}
+
+	if !found {
+		return nil, nil
 	}
 
 	// parse value for non-scalar fields
 	if !isScalar(fd.Type.Name()) && sch.Types[fd.Type.Name()].Kind != ast.Enum && defaultValue != nil {
-		switch defaultValue := defaultValue.(type) {
+		switch defaultValue.(type) {
 		case map[string]interface{}, []interface{}:
 		default:
 			return nil, errors.Errorf("non-scalar field %s failed to parse default value: %v", fd.Name, defaultValue)
@@ -2633,13 +2788,92 @@ func (fd *fieldDefinition) ValidateValue(
 	action string,
 	parentTypeName string,
 	parent map[string]interface{},
-	auth map[string]interface{},
+	auth AuthCtx,
 	oldValue map[string]interface{},
 	removeValue map[string]interface{}) []error {
 	if fd.fieldDef == nil {
 		return nil
 	}
 	return validateValue(fd.inSchema.schema, fd.fieldDef, action, parentTypeName, parent, auth, oldValue, removeValue)
+}
+
+func (fd *fieldDefinition) TransformValue(
+	action string,
+	parentTypeName string,
+	parent map[string]interface{},
+	auth AuthCtx,
+	oldValue map[string]interface{},
+	removeValue map[string]interface{}) (interface{}, error) {
+	if fd.fieldDef == nil {
+		return nil, nil
+	}
+	return transformValue(fd.inSchema.schema, fd.fieldDef, action, parentTypeName, parent, auth, oldValue, removeValue)
+}
+
+// transformValue evaluates the @transform directive for a field and returns the transformed value.
+// Resolution order (highest precedence first):
+//  1. Operation-specific expr inside add/update argument
+//  2. Top-level expr argument (applies to both add and update)
+//  3. nil if no applicable expr is found (field is left unchanged)
+//
+// The expr string receives the same evaluation environment as @default and @validate.
+func transformValue(
+	sch *ast.Schema,
+	fd *ast.FieldDefinition,
+	action string,
+	parentTypeName string,
+	parent map[string]interface{},
+	auth AuthCtx,
+	oldValue map[string]interface{},
+	removeValue map[string]interface{}) (interface{}, error) {
+	dir := fd.Directives.ForName(transformDirective)
+	if dir == nil {
+		return nil, nil
+	}
+
+	// Resolve the expr string: operation-specific takes precedence over top-level.
+	var exprStr string
+	if opArg := dir.Arguments.ForName(action); opArg != nil {
+		if exprVal := opArg.Value.Children.ForName("expr"); exprVal != nil && exprVal.Raw != "" {
+			exprStr = exprVal.Raw
+		}
+	}
+	if exprStr == "" {
+		if topExpr := dir.Arguments.ForName("expr"); topExpr != nil && topExpr.Value.Raw != "" {
+			exprStr = topExpr.Value.Raw
+		}
+	}
+	if exprStr == "" {
+		return nil, nil
+	}
+
+	return getTransformValue(sch, fd, action, parentTypeName, parent, auth, oldValue, removeValue, exprStr)
+}
+
+// getTransformValue compiles and evaluates a single CEL expression string in the standard
+// mutation evaluation context and returns the result. This is intentionally kept as a
+// separate function so that transformDirectiveValidation can call it for compile-time checks.
+func getTransformValue(
+	sch *ast.Schema,
+	fd *ast.FieldDefinition,
+	action string,
+	parentTypeName string,
+	parent map[string]interface{},
+	auth AuthCtx,
+	oldValue map[string]interface{},
+	removeValue map[string]interface{},
+	exprStr string) (interface{}, error) {
+	env := NewExprEvaluationContext(parentTypeName, parent, oldValue, removeValue, auth, action).
+		WithValueField(fd.Name)
+	program, err := expr.Compile(exprStr, expr.Env(env.As()))
+	if err != nil {
+		return nil, &CompileError{Err: errors.Wrapf(err, "field %s expression compilation failed for transform", fd.Name)}
+	}
+	result, err := expr.Run(program, env.As())
+	if err != nil {
+		return nil, errors.Wrapf(err, "field %s expression evaluation failed for transform", fd.Name)
+	}
+	return result, nil
 }
 
 // The environment for the 'expr' evaluation. This map makes various contexts
@@ -2670,12 +2904,67 @@ func (fd *fieldDefinition) ValidateValue(
 //   - `sha256(s)`: A function that computes the SHA256 hash of a given string.
 type exprEvaluationContext map[string]interface{}
 
+func callLambda(ns uint64, lambdaName string, payload map[string]interface{}, accessJWT string, authHeaderKey string, authHeaderValue string) (interface{}, error) {
+	lambdaURL := x.LambdaUrl(ns)
+	if lambdaURL == "" {
+		return nil, errors.Errorf("lambda-url not configured")
+	}
+
+	payload["resolver"] = lambdaName
+	payload["X-Dgraph-AccessToken"] = accessJWT
+	payload["authHeader"] = map[string]interface{}{
+		"key":   authHeaderKey,
+		"value": authHeaderValue,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to marshal payload for lambda %s", lambdaName)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, lambdaURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to create request for lambda %s", lambdaName)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to call lambda %s", lambdaName)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, errors.Errorf("lambda %s returned non-200 status: %s, body: %s", lambdaName, resp.Status, string(respBody))
+	}
+
+	var result interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, errors.Wrapf(err, "failed to unmarshal response from lambda %s", lambdaName)
+	}
+
+	return result, nil
+}
+
+type AuthCtx struct {
+	AuthVariables   map[string]interface{}
+	AccessJWT       string
+	AuthHeaderKey   string
+	AuthHeaderValue string
+	// RawInput holds the original user-provided mutation input fields before
+	// any @default expressions are evaluated. This is used to expose the
+	// true client input via `input` in @validate expressions.
+	RawInput map[string]interface{}
+}
+
 func NewExprEvaluationContext(
 	typename string,
 	input map[string]interface{},
 	before map[string]interface{},
 	remove map[string]interface{},
-	auth map[string]interface{},
+	auth AuthCtx,
 	action string) exprEvaluationContext {
 
 	after := map[string]interface{}{}
@@ -2684,14 +2973,24 @@ func NewExprEvaluationContext(
 
 	new, _ := diffMapInterface(before, input)
 
+	// rawInput holds the pre-default raw user input for use in @validate
+	// expressions (e.g. `rawInput?.search == nil`). Keep `input` pointing at
+	// the partially-defaulted parent map so that `after` is computed correctly
+	// and existing @default expressions that rely on `input` are unaffected.
+	rawInput := auth.RawInput
+	if rawInput == nil {
+		rawInput = input
+	}
+
 	return exprEvaluationContext{
 		"__typename": typename,
 		"input":      input,
+		"rawInput":   rawInput,
 		"before":     before,
 		"after":      after,
 		"new":        new,
 		"remove":     remove,
-		"auth":       auth,
+		"auth":       auth.AuthVariables,
 		"action":     action,
 		"uuid":       uuid.NewString,
 		"sha256":     hashSHA256,
@@ -2699,8 +2998,17 @@ func NewExprEvaluationContext(
 			vector, _ = generateEmbedding(provider, modelName, textToEmbed, parameters)
 			return
 		},
+		"callLambda": func(lambdaName string, payload map[string]interface{}) (interface{}, error) {
+			return callLambda(x.RootNamespace, lambdaName, payload, auth.AccessJWT, auth.AuthHeaderKey, auth.AuthHeaderValue)
+		},
 		"diffMap":              diffMapInterface,
 		"mapStringWithoutKeys": mapStringWithoutKeys,
+		// error() is registered with (interface{}, error) return so that expr.Run
+		// aborts immediately and the caller receives a proper Go error.
+		"error": func(v interface{}) (interface{}, error) {
+			b, _ := json.Marshal(v)
+			return nil, errors.New(string(b))
+		},
 	}
 }
 
@@ -2872,6 +3180,9 @@ func (eec exprEvaluationContext) validateExpr(exprString string) func(fl validat
 		if err != nil {
 			panic(fmt.Errorf("expression execution failed for field '%s' with rule '%s': %w", fl.FieldName(), exprString, err))
 		}
+		if err, ok := expResult.(error); ok {
+			panic(fmt.Errorf("expression execution failed: %w", err))
+		}
 
 		// Interpret the expression result as a boolean for validation purposes.
 		// `expr` uses truthiness rules: `true` for non-zero numbers, non-empty strings, non-nil values;
@@ -2907,7 +3218,7 @@ func (eec exprEvaluationContext) validateExpr(exprString string) func(fl validat
 //
 // Returns `nil` if validation succeeds or if no '@validate' directive is present on the field.
 // Returns a slice of `error` if validation fails. Errors originating from panics are wrapped in `PanicWrappedError`.
-func validateValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, parentTypeName string, parent map[string]interface{}, auth map[string]interface{}, oldValue map[string]interface{}, removeValue map[string]interface{}) (errs []error) {
+func validateValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (errs []error) {
 	// 1. Retrieve the @validate directive from the field definition.
 	dir := fd.Directives.ForName(validateDirective)
 	if dir == nil {
@@ -2918,19 +3229,34 @@ func validateValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, pare
 	var validationTags []string
 	var reason string
 
-	if reasonArg := dir.Arguments.ForName("reason"); reasonArg != nil {
-		if reasonArg.Value.Kind != ast.StringValue && reasonArg.Value.Kind != ast.BlockValue {
-			return []error{errors.Errorf("reason argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, reasonArg.Value.Kind)}
+	// Resolve reason, rule, and expr with operation-specific precedence:
+	// 1. operation-specific arg (add/update) takes precedence
+	// 2. root-level arg applies to both operations
+	resolveStringArg := func(name string) (string, ast.ValueKind, bool) {
+		if opArg := dir.Arguments.ForName(action); opArg != nil {
+			if child := opArg.Value.Children.ForName(name); child != nil && child.Raw != "" {
+				return child.Raw, child.Kind, true
+			}
 		}
-		reason = reasonArg.Value.Raw
+		if rootArg := dir.Arguments.ForName(name); rootArg != nil {
+			return rootArg.Value.Raw, rootArg.Value.Kind, true
+		}
+		return "", 0, false
 	}
 
-	if ruleArg := dir.Arguments.ForName("rule"); ruleArg != nil {
-		if ruleArg.Value.Kind != ast.StringValue && ruleArg.Value.Kind != ast.BlockValue {
-			return []error{errors.Errorf("rule argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, ruleArg.Value.Kind)}
+	if reasonRaw, reasonKind, ok := resolveStringArg("reason"); ok {
+		if reasonKind != ast.StringValue && reasonKind != ast.BlockValue && reasonKind != 0 {
+			return []error{errors.Errorf("reason argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, reasonKind)}
 		}
-		if ruleArg.Value.Raw != "" {
-			validationTags = append(validationTags, ruleArg.Value.Raw)
+		reason = reasonRaw
+	}
+
+	if ruleRaw, ruleKind, ok := resolveStringArg("rule"); ok {
+		if ruleKind != ast.StringValue && ruleKind != ast.BlockValue && ruleKind != 0 {
+			return []error{errors.Errorf("rule argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, ruleKind)}
+		}
+		if ruleRaw != "" {
+			validationTags = append(validationTags, ruleRaw)
 		}
 	}
 
@@ -2943,16 +3269,15 @@ func validateValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, pare
 	// Process 'expr' argument only if the field value is not nil.
 	// If 'value' is nil, 'expr' validation will be skipped.
 	if eev.Value() != nil {
-		if exArg := dir.Arguments.ForName("expr"); exArg != nil {
-			if exArg.Value.Kind != ast.StringValue && exArg.Value.Kind != ast.BlockValue {
-				return []error{errors.Errorf("expr argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, exArg.Value.Kind)}
+		if exprRaw, exprKind, ok := resolveStringArg("expr"); ok {
+			if exprKind != ast.StringValue && exprKind != ast.BlockValue && exprKind != 0 {
+				return []error{errors.Errorf("expr argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, exprKind)}
 			}
-			if exArg.Value.Raw != "" {
+			if exprRaw != "" {
 				validationTags = append(validationTags, "expr")
 
 				// Only register the custom validator if the 'expr' tag was actually added.
-				// This 'evc' variable is correctly scoped to this 'if' block.
-				validate.RegisterValidation("expr", eev.validateExpr(exArg.Value.Raw), true)
+				validate.RegisterValidation("expr", eev.validateExpr(exprRaw), true)
 			}
 		}
 	}
@@ -3133,6 +3458,27 @@ func (fd *fieldDefinition) HasOldValueDirective() bool {
 func hasOldValueDirective(fd *ast.FieldDefinition) bool {
 	id := fd.Directives.ForName(oldValueDirective)
 	return id != nil
+}
+
+// OldValueFields returns the list of dot-separated field paths declared in
+// the `fields` argument of @oldValue. Returns nil for the no-argument (scalar) form.
+func (fd *fieldDefinition) OldValueFields() []string {
+	if fd.fieldDef == nil {
+		return nil
+	}
+	dir := fd.fieldDef.Directives.ForName(oldValueDirective)
+	if dir == nil {
+		return nil
+	}
+	fieldsArg := dir.Arguments.ForName("fields")
+	if fieldsArg == nil {
+		return nil
+	}
+	var paths []string
+	for _, child := range fieldsArg.Value.Children {
+		paths = append(paths, child.Value.Raw)
+	}
+	return paths
 }
 
 func (fd *fieldDefinition) Type() Type {

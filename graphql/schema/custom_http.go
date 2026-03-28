@@ -168,6 +168,8 @@ func GetBodyForLambda(ctx context.Context, field Field, parents,
 	}
 	if args != nil {
 		body["args"] = args
+	} else {
+		body["args"] = field.Arguments()
 	}
 	return body
 }

@@ -39,6 +39,7 @@ const (
 	lambdaDirective         = "lambda"
 	lambdaOnMutateDirective = "lambdaOnMutate"
 	defaultDirective        = "default"
+	transformDirective      = "transform"
 	validateDirective       = "validate"
 	oldValueDirective       = "oldValue"
 
@@ -192,6 +193,18 @@ input CustomHTTP {
 input DgraphDefault {
 	value: String
 	expr: String
+	evaluationOrder: Int
+}
+
+input DgraphTransform {
+	expr: String
+	evaluationOrder: Int
+}
+
+input DgraphValidate {
+	rule: String
+	expr: String
+	reason: String
 }
 
 type Point {
@@ -278,9 +291,10 @@ directive @search(by: [String!]) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
-directive @default(add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
-directive @validate(rule: String, expr: String, reason: String) on FIELD_DEFINITION
-directive @oldValue on FIELD_DEFINITION
+directive @default(value: String, expr: String, evaluationOrder: Int, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
+directive @transform(expr: String, evaluationOrder: Int, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
+directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
+directive @oldValue(fields: [String!]) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @auth(
@@ -313,9 +327,10 @@ directive @search(by: [String!]) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
-directive @default(add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
-directive @validate(rule: String, expr: String, reason: String) on FIELD_DEFINITION
-directive @oldValue on FIELD_DEFINITION
+directive @default(value: String, expr: String, evaluationOrder: Int, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
+directive @transform(expr: String, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
+directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
+directive @oldValue(fields: [String!]) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @remote on OBJECT | INTERFACE | UNION | INPUT_OBJECT | ENUM
@@ -593,6 +608,7 @@ var directiveValidators = map[string]directiveValidator{
 	deprecatedDirective:     ValidatorNoOp,
 	lambdaDirective:         lambdaDirectiveValidation,
 	defaultDirective:        defaultDirectiveValidation,
+	transformDirective:      transformDirectiveValidation,
 	validateDirective:       validateDirectiveValidation,
 	oldValueDirective:       oldValueDirectiveValidation,
 	lambdaOnMutateDirective: ValidatorNoOp,
@@ -2645,7 +2661,7 @@ func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
 		// if the field has a @default(add) value it is optional in add input
 		// an error value also indicates that the default value is provided but might encounter a runtime error.
 		var field = createField(schema, fld)
-		if value, err := getDefaultValue(schema, fld, "add", defn.Name, nil, nil, nil, nil); err != nil || value != nil {
+		if value, err := getDefaultValue(schema, fld, "add", defn.Name, nil, AuthCtx{}, nil, nil); err != nil || value != nil {
 			field.Type.NonNull = false
 		}
 

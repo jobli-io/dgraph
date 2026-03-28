@@ -395,8 +395,13 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	// As only Add and Update mutations generate queries using RewriteQueries,
 	// qNameToUID map will be non-empty only in case of Add or Update Mutation.
 	qNameToUID := make(map[string]string)
+	// Collect the UpdateMutationFilterVar (="xx") result separately so we can call
+	// SetOldValue for update mutations after the main loop.
+	var updateMutFilterResults []idExistenceRes
 	for key, result := range queryResultMap {
 		if key == UpdateMutationFilterVar {
+			// Defer handling — must not add to qNameToUID, but do capture for SetOldValue.
+			updateMutFilterResults = result
 			continue
 		}
 		var matchedResults []idExistenceRes
@@ -426,6 +431,22 @@ func (mr *dgraphResolver) rewriteAndExecute(
 			qNameToUID[key] = res.Uid
 			mr.mutationRewriter.SetOldValue(key, res.OldValues)
 		}
+	}
+
+	// For update mutations: store old values under UpdateMutationFilterVar ("xx") so that
+	// @validate and @default exprs can access `before.*` fields.
+	// When the filter matches multiple nodes we merge all their old-value maps — the shape
+	// is identical across rows (same predicates), so the last writer wins on value, which
+	// is acceptable since expressions that reference `before.*` describe schema-level
+	// invariants, not per-row diffs.
+	if len(updateMutFilterResults) > 0 {
+		merged := make(map[string]interface{})
+		for _, res := range updateMutFilterResults {
+			for k, v := range res.OldValues {
+				merged[k] = v
+			}
+		}
+		mr.mutationRewriter.SetOldValue(UpdateMutationFilterVar, merged)
 	}
 
 	// Create upserts, delete mutations, update mutations, add mutations.

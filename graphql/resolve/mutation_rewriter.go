@@ -18,6 +18,7 @@ import (
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
 	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
 	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
 	"github.com/hypermodeinc/dgraph/v25/x"
@@ -1345,21 +1346,42 @@ func mutationFromFragment(
 
 }
 
-// --- New Helper for `checkXIDExistsQuery` and `checkUIDExistsQuery` ---
 // getFieldsForExistsQuery collects all fields marked @oldValue for a given type,
-// preparing them for inclusion in a DQL query as aliases.
+// preparing them for inclusion in a DQL query. Edge fields with nested selections
+// (from @oldValue(fields:[...])) are emitted as nested GraphQuery children.
 func getFieldsForExistsQuery(typ schema.Type) []*dql.GraphQuery {
-	var children []*dql.GraphQuery
-	children = append(children, &dql.GraphQuery{Attr: "uid"})         // Always fetch uid
-	children = append(children, &dql.GraphQuery{Attr: "dgraph.type"}) // Always fetch dgraph.type
-
-	oldValueFieldMap := typ.GetOldValueFieldsForQuery() // Use the new schema helper
-	for gqlName, dgraphPredicate := range oldValueFieldMap {
-		children = append(children, &dql.GraphQuery{
-			Attr: fmt.Sprintf("%s : %s", gqlName, dgraphPredicate), // Alias GraphQL name to Dgraph predicate
-		})
+	children := []*dql.GraphQuery{
+		{Attr: "uid"},
+		{Attr: "dgraph.type"},
 	}
+	selections := typ.GetOldValueFieldsForQuery()
+	children = append(children, oldValueSelectionToGraphQuery(selections)...)
 	return children
+}
+
+// oldValueSelectionToGraphQuery converts a map[string]*OldValueSelection into
+// a flat list of *dql.GraphQuery nodes, recursing into SubFields for edges.
+func oldValueSelectionToGraphQuery(selections map[string]*schema.OldValueSelection) []*dql.GraphQuery {
+	var result []*dql.GraphQuery
+	for gqlName, sel := range selections {
+		if len(sel.SubFields) == 0 {
+			// Scalar leaf — alias GraphQL name to Dgraph predicate.
+			result = append(result, &dql.GraphQuery{
+				Attr: fmt.Sprintf("%s : %s", gqlName, sel.DgraphPredicate),
+			})
+		} else {
+			// Edge field — alias the predicate to the GraphQL field name so the
+			// result key is `hasAddress` (not `Company.hasAddress`), making
+			// `before.hasAddress` accessible in expr context.
+			subChildren := []*dql.GraphQuery{{Attr: "uid"}}
+			subChildren = append(subChildren, oldValueSelectionToGraphQuery(sel.SubFields)...)
+			result = append(result, &dql.GraphQuery{
+				Attr:     fmt.Sprintf("%s : %s", gqlName, sel.DgraphPredicate),
+				Children: subChildren,
+			})
+		}
+	}
+	return result
 }
 
 func checkXIDExistsQuery(xidVariable, xidString, xidPredicate string, typ schema.Type,
@@ -1765,6 +1787,26 @@ func rewriteObject(
 		action = defaultDirectiveRemoveAct
 	}
 
+	// gather additional contex data
+	authCtx := schema.AuthCtx{}
+	authCtx.AuthVariables = authVariables
+	authCtx.AccessJWT, _ = x.ExtractJwt(ctx)
+	if typ.IDField() != nil {
+		authCtx.AuthHeaderKey = typ.IDField().GetAuthMeta().GetHeader()
+		authCtx.AuthHeaderValue = authorization.GetJwtToken(ctx)
+	}
+
+	// Snapshot the raw user-provided input before any @default values are merged
+	// in. This is exposed as `input` in expression contexts so that @validate
+	// and @default expressions can distinguish client-supplied values from
+	// server-computed defaults (e.g. `input?.search == nil` is true when the
+	// client did not explicitly set the search embedding).
+	rawInputSnapshot := make(map[string]interface{}, len(obj))
+	for k, v := range obj {
+		rawInputSnapshot[k] = v
+	}
+	authCtx.RawInput = rawInputSnapshot
+
 	// Now we know whether this is a new node or not, we can set @default(add/update) fields
 	// We don't want to set default value or validation during an update remove mutation.
 	if mutationType != UpdateWithRemove {
@@ -1774,7 +1816,7 @@ func rewriteObject(
 			}
 
 			oldValue := xidMetadata.variableOldValueMap[variable] // retrieve the old value
-			value, err := field.GetDefaultValue(action, typ.Name(), obj, authVariables, oldValue, objDel)
+			value, err := field.GetDefaultValue(action, typ.Name(), obj, authCtx, oldValue, objDel)
 			if err != nil {
 				retErrors = append(retErrors, errors.Errorf("Type %s; %s", typ.Name(), err.Error()))
 				continue
@@ -1907,6 +1949,27 @@ func rewriteObject(
 		}
 	}
 
+	// Execute input transformation with @transform directive.
+	// At this point, default values have been populated in obj.
+	// @transform runs after @default and before @validate, allowing normalization
+	// (e.g. lowercasing, trimming) of both user-provided and defaulted values.
+	// Fields are processed in evaluationOrder so that transforms that depend on the
+	// already-transformed value of another field see the correct value.
+	// Resolution order within @transform: operation-specific expr > top-level expr.
+	if mutationType != UpdateWithRemove {
+		for _, field := range typ.FieldsInTransformEvaluationOrder(action) {
+			oldValue := xidMetadata.variableOldValueMap[variable]
+			newVal, err := field.TransformValue(action, typ.Name(), obj, authCtx, oldValue, objDel)
+			if err != nil {
+				retErrors = append(retErrors, errors.Errorf("Type %s; %s", typ.Name(), err.Error()))
+				continue
+			}
+			if newVal != nil {
+				obj[field.Name()] = newVal
+			}
+		}
+	}
+
 	// Execute input validation with @validate directive.
 	// At this point, default values for the object type has also been populated in obj.
 	// We can now validate the values before mutation.
@@ -1917,7 +1980,7 @@ func rewriteObject(
 	for _, field := range typ.Fields() {
 		// Extract auth variables
 		oldValue := xidMetadata.variableOldValueMap[variable] // retrieve the old value
-		for _, err := range field.ValidateValue(action, typ.Name(), obj, authVariables, oldValue, objDel) {
+		for _, err := range field.ValidateValue(action, typ.Name(), obj, authCtx, oldValue, objDel) {
 			retErrors = append(retErrors, errors.Errorf("Type %s; %s", typ.Name(), err.Error()))
 		}
 	}

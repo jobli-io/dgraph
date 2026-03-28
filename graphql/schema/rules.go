@@ -1538,7 +1538,7 @@ func defaultDirectiveValidation(sch *ast.Schema,
 			}
 		} else if v := arg.Value.Children.ForName("expr"); v != nil {
 			exprString := v.Raw
-			_, err := getDefaultValue(sch, field, arg.Name, typ.Name, map[string]interface{}{}, nil, nil, nil)
+			_, err := getDefaultValue(sch, field, arg.Name, typ.Name, map[string]interface{}{}, AuthCtx{}, nil, nil)
 			if err != nil {
 				var ce *CompileError
 				if errors.As(err, &ce) {
@@ -1555,6 +1555,156 @@ func defaultDirectiveValidation(sch *ast.Schema,
 					"Type %s; Field %s: @default directive provides a non-integer value \"%s\" for evaluationOrder",
 					typ.Name, field.Name, v.Raw)}
 			}
+		}
+	}
+
+	// Validate root-level evaluationOrder is a valid integer.
+	if rootOrder := dir.Arguments.ForName("evaluationOrder"); rootOrder != nil && rootOrder.Value.Raw != "" {
+		if _, err := strconv.ParseInt(rootOrder.Value.Raw, 10, 64); err != nil {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @default directive provides a non-integer value \"%s\" for evaluationOrder",
+				typ.Name, field.Name, rootOrder.Value.Raw)}
+		}
+	}
+
+	// Validate root-level value and expr args (shorthand that applies to both add and update).
+	fieldType := field.Type.Name()
+	if rootValue := dir.Arguments.ForName("value"); rootValue != nil && rootValue.Value.Raw != "" {
+		value := rootValue.Value.Raw
+		if value == "$now" && fieldType != "DateTime" {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
+				typ.Name, field.Name, value, fieldType)}
+		}
+		if fieldType == "Int" {
+			if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+				return []*gqlerror.Error{gqlerror.ErrorPosf(
+					dir.Position,
+					"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
+					typ.Name, field.Name, value, fieldType)}
+			}
+		}
+		if fieldType == "Float" {
+			if _, err := strconv.ParseFloat(value, 64); err != nil {
+				return []*gqlerror.Error{gqlerror.ErrorPosf(
+					dir.Position,
+					"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
+					typ.Name, field.Name, value, fieldType)}
+			}
+		}
+		if fieldType == "Boolean" && value != "true" && value != "false" {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @default directive provides value \"%s\" which cannot be used with %s",
+				typ.Name, field.Name, value, fieldType)}
+		}
+	}
+	if rootExpr := dir.Arguments.ForName("expr"); rootExpr != nil && rootExpr.Value.Raw != "" {
+		_, err := getDefaultValue(sch, field, "add", typ.Name, map[string]interface{}{}, AuthCtx{}, nil, nil)
+		if err != nil {
+			var ce *CompileError
+			if errors.As(err, &ce) {
+				return []*gqlerror.Error{gqlerror.ErrorPosf(
+					dir.Position,
+					"Type %s; Field %s: @default directive provides expr \"%s\" which cannot be compiled: %s",
+					typ.Name, field.Name, rootExpr.Value.Raw, err.Error())}
+			}
+		}
+	}
+	return nil
+}
+
+// transformDirectiveValidation prevents use of @transform on:
+// Types with @remote directive
+// Fields of type ID
+// Fields with @custom or @lambda directive
+// It also validates that any provided expr argument compiles without errors.
+func transformDirectiveValidation(sch *ast.Schema,
+	typ *ast.Definition,
+	field *ast.FieldDefinition,
+	dir *ast.Directive,
+	secrets map[string]x.Sensitive) gqlerror.List {
+	if typ.Directives.ForName(remoteDirective) != nil {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(
+			dir.Position,
+			"Type %s; Field %s: cannot use @transform directive on a @remote type",
+			typ.Name, field.Name)}
+	}
+	if isID(field) {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(
+			dir.Position,
+			"Type %s; Field %s: cannot use @transform directive on field with type ID",
+			typ.Name, field.Name)}
+	}
+	if field.Directives.ForName(customDirective) != nil {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(
+			dir.Position,
+			"Type %s; Field %s: cannot use @transform directive on field with @custom directive",
+			typ.Name, field.Name)}
+	}
+	if field.Directives.ForName(lambdaDirective) != nil {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(
+			dir.Position,
+			"Type %s; Field %s: cannot use @transform directive on field with @lambda directive",
+			typ.Name, field.Name)}
+	}
+
+	// Validate each expr (top-level and inside add/update) compiles successfully.
+	// We resolve the expr string from: dir.Arguments["expr"] (top-level),
+	// dir.Arguments["add"].Children["expr"], and dir.Arguments["update"].Children["expr"].
+	collectExprs := func() []string {
+		var exprs []string
+		if topExpr := dir.Arguments.ForName("expr"); topExpr != nil {
+			if topExpr.Value.Raw != "" {
+				exprs = append(exprs, topExpr.Value.Raw)
+			}
+		}
+		for _, opName := range []string{"add", "update"} {
+			if opArg := dir.Arguments.ForName(opName); opArg != nil {
+				if exprVal := opArg.Value.Children.ForName("expr"); exprVal != nil && exprVal.Raw != "" {
+					exprs = append(exprs, exprVal.Raw)
+				}
+			}
+		}
+		return exprs
+	}
+
+	for _, exprStr := range collectExprs() {
+		_, err := getTransformValue(sch, field, "add", typ.Name, map[string]interface{}{}, AuthCtx{}, nil, nil, exprStr)
+		if err != nil {
+			var ce *CompileError
+			if errors.As(err, &ce) {
+				return []*gqlerror.Error{gqlerror.ErrorPosf(
+					dir.Position,
+					"Type %s; Field %s: @transform directive expr %q cannot be compiled: %s",
+					typ.Name, field.Name, exprStr, err.Error())}
+			}
+		}
+	}
+
+	// Validate that evaluationOrder inside add/update args is a valid integer.
+	for _, opName := range []string{"add", "update"} {
+		if opArg := dir.Arguments.ForName(opName); opArg != nil {
+			if v := opArg.Value.Children.ForName("evaluationOrder"); v != nil {
+				if _, err := strconv.ParseInt(v.Raw, 10, 64); err != nil {
+					return []*gqlerror.Error{gqlerror.ErrorPosf(
+						dir.Position,
+						"Type %s; Field %s: @transform directive provides a non-integer value %q for evaluationOrder",
+						typ.Name, field.Name, v.Raw)}
+				}
+			}
+		}
+	}
+
+	// Validate root-level evaluationOrder is a valid integer.
+	if rootOrder := dir.Arguments.ForName("evaluationOrder"); rootOrder != nil && rootOrder.Value.Raw != "" {
+		if _, err := strconv.ParseInt(rootOrder.Value.Raw, 10, 64); err != nil {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @transform directive provides a non-integer value %q for evaluationOrder",
+				typ.Name, field.Name, rootOrder.Value.Raw)}
 		}
 	}
 	return nil
@@ -1626,26 +1776,20 @@ func validateDirectiveValidation(sch *ast.Schema,
 
 	// Create a temporary parent map with the test value for `ValidateValue`.
 	// The `auth` context is `nil` as it's not relevant for schema validation.
+	// Run a dry-run for both operations so operation-specific add/update args are also validated.
 	parentForTest := map[string]interface{}{field.Name: testValue}
-	validationFailures := validateValue(sch, field, "add", typ.Name, parentForTest, nil, nil, nil)
-
-	for _, err := range validationFailures {
-		// Check if the error returned by ValidateValue is a PanicWrappedError.
-		// This specifically indicates a schema definition problem (malformed rule/expression).
-		var ce *CompileError
-		if errors.As(err, &ce) {
-			// This is an error that originated from a panic in ValidateValue (e.g., malformed expr syntax).
-			// This *is* a schema validation error.
-			combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(
-				dir.Position,
-				"Type %s; Field %s: malformed validation rule or expression. Reason: %v",
-				typ.Name, field.Name, ce.Unwrap())) // Show the rule string & unwrapped error
+	for _, dryRunAction := range []string{"add", "update"} {
+		for _, err := range validateValue(sch, field, dryRunAction, typ.Name, parentForTest, AuthCtx{}, nil, nil) {
+			// Check if the error returned by ValidateValue is a PanicWrappedError.
+			// This specifically indicates a schema definition problem (malformed rule/expression).
+			var ce *CompileError
+			if errors.As(err, &ce) {
+				combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(
+					dir.Position,
+					"Type %s; Field %s: malformed validation rule or expression. Reason: %v",
+					typ.Name, field.Name, ce.Unwrap()))
+			}
 		}
-		// ELSE: If it's not a PanicWrappedError, it means it's a regular `go-playground/validator` error.
-		// This implies the validation rule was syntactically correct and applied, but our `testValue`
-		// simply failed that rule (e.g., `""` failing `required`).
-		// For schema definition validation, this is NOT an error. It proves the rule is functional.
-		// So, we do *not* add it to `combinedErrors`.
 	}
 
 	// Returns nil if no schema validation errors were found.
@@ -1657,7 +1801,84 @@ func oldValueDirectiveValidation(sch *ast.Schema, typ *ast.Definition,
 	secrets map[string]x.Sensitive) gqlerror.List {
 	var errs []*gqlerror.Error
 
+	fieldsArg := dir.Arguments.ForName("fields")
+	if fieldsArg == nil {
+		// No-argument form — valid on any field, existing behaviour.
+		return nil
+	}
+
+	// `fields` is only meaningful on edge (object) fields.
+	if isScalar(field.Type.Name()) || (sch.Types[field.Type.Name()] != nil &&
+		sch.Types[field.Type.Name()].Kind == ast.Enum) {
+		errs = append(errs, gqlerror.ErrorPosf(
+			dir.Position,
+			"Type %s; Field %s: @oldValue(fields: [...]) is not allowed on scalar or enum fields; use @oldValue without arguments on scalars.",
+			typ.Name, field.Name))
+		return errs
+	}
+
+	// Walk each dot-separated path through the schema type graph.
+	for _, pathVal := range fieldsArg.Value.Children {
+		path := pathVal.Value.Raw
+		if err := validateOldValuePath(sch, field.Type.Name(), path, dir, typ.Name, field.Name,
+			make(map[string]bool)); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	return errs
+}
+
+// validateOldValuePath validates a single dot-separated path against the schema,
+// walking type-by-type at each segment. visited guards against cycles.
+func validateOldValuePath(sch *ast.Schema, typeName, path string,
+	dir *ast.Directive, parentTypName, parentFieldName string,
+	visited map[string]bool) *gqlerror.Error {
+
+	if visited[typeName] {
+		return gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @oldValue path %q contains a cycle at type %s",
+			parentTypName, parentFieldName, path, typeName)
+	}
+	visited[typeName] = true
+	defer func() { delete(visited, typeName) }()
+
+	def := sch.Types[typeName]
+	if def == nil {
+		return gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @oldValue references unknown type %s while validating path %q",
+			parentTypName, parentFieldName, typeName, path)
+	}
+
+	idx := strings.IndexByte(path, '.')
+	var head, tail string
+	if idx < 0 {
+		head = path
+	} else {
+		head, tail = path[:idx], path[idx+1:]
+	}
+
+	fd := def.Fields.ForName(head)
+	if fd == nil {
+		return gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @oldValue path %q references unknown field %q on type %s",
+			parentTypName, parentFieldName, path, head, typeName)
+	}
+
+	if tail == "" {
+		// Leaf reached — valid.
+		return nil
+	}
+
+	// There is more path to walk — the current field must be an object type.
+	nextTypeName := fd.Type.Name()
+	if isScalar(nextTypeName) || (sch.Types[nextTypeName] != nil &&
+		sch.Types[nextTypeName].Kind == ast.Enum) {
+		return gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @oldValue path %q cannot traverse through scalar/enum field %q on type %s",
+			parentTypName, parentFieldName, path, head, typeName)
+	}
+
+	return validateOldValuePath(sch, nextTypeName, tail, dir, parentTypName, parentFieldName, visited)
 }
 
 func lambdaOnMutateValidation(sch *ast.Schema, typ *ast.Definition) gqlerror.List {
