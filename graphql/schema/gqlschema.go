@@ -42,6 +42,7 @@ const (
 	transformDirective      = "transform"
 	validateDirective       = "validate"
 	oldValueDirective       = "oldValue"
+	cascadeDeleteDirective  = "cascadeDelete"
 
 	generateDirective       = "generate"
 	generateQueryArg        = "query"
@@ -207,6 +208,13 @@ input DgraphValidate {
 	reason: String
 }
 
+input DgraphCascadeDelete {
+	onlyIfOrphan: Boolean
+	onlyIfOrphanScope: String
+	filter: String
+	depth: Int
+}
+
 type Point {
 	longitude: Float!
 	latitude: Float!
@@ -293,6 +301,7 @@ directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFI
 directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(value: String, expr: String, evaluationOrder: Int, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
 directive @transform(expr: String, evaluationOrder: Int, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
+directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int, authMode: String) on FIELD_DEFINITION
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
 directive @oldValue(fields: [String!]) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
@@ -329,6 +338,7 @@ directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFI
 directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(value: String, expr: String, evaluationOrder: Int, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
 directive @transform(expr: String, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
+directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int) on FIELD_DEFINITION
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
 directive @oldValue(fields: [String!]) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
@@ -611,6 +621,7 @@ var directiveValidators = map[string]directiveValidator{
 	transformDirective:      transformDirectiveValidation,
 	validateDirective:       validateDirectiveValidation,
 	oldValueDirective:       oldValueDirectiveValidation,
+	cascadeDeleteDirective:  cascadeDeleteDirectiveValidation,
 	lambdaOnMutateDirective: ValidatorNoOp,
 	generateDirective:       ValidatorNoOp,
 	apolloKeyDirective:      ValidatorNoOp,

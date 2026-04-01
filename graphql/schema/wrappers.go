@@ -252,6 +252,7 @@ type Type interface {
 	Fields() []FieldDefinition
 	FieldsInDefaultValueEvaluationOrder(action string) []FieldDefinition
 	FieldsInTransformEvaluationOrder(action string) []FieldDefinition
+	CascadeDeleteFields() []FieldDefinition
 	GetOldValueFieldsForQuery() map[string]*OldValueSelection
 	IDField() FieldDefinition
 	XIDFields() []FieldDefinition
@@ -300,6 +301,7 @@ type FieldDefinition interface {
 	GetDefaultValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (interface{}, error)
 	ValidateValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) []error
 	TransformValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (interface{}, error)
+	CascadeDeleteConfig() *CascadeDeleteFieldConfig
 	GenerateEmbedding(textToEmbed string) ([]float32, error)
 	Inverse() FieldDefinition
 	WithMemberType(string) FieldDefinition
@@ -2412,6 +2414,134 @@ type OldValueSelection struct {
 // all fields on this type that carry @oldValue. Scalar fields produce a leaf
 // entry; edge fields with @oldValue(fields:[...]) produce a nested tree built
 // from the dot-separated path list via buildSelectionTree.
+// CascadeDeleteFieldConfig holds the resolved configuration from a @cascadeDelete directive.
+type CascadeDeleteFieldConfig struct {
+	Enabled           bool
+	OnlyIfOrphan      bool
+	OnlyIfOrphanScope string // "type" (default) or "all"
+	Filter            string // CEL expression
+	Depth             int    // -1 = unlimited
+	AuthMode          string // "skip" (default), "enforce", or "filter"
+}
+
+// CascadeDeleteConfig returns the parsed @cascadeDelete directive config for this field,
+// or nil if the field does not have @cascadeDelete (checked on the field itself and,
+// if absent, on any interface the parent type implements).
+func (fd *fieldDefinition) CascadeDeleteConfig() *CascadeDeleteFieldConfig {
+	if fd.fieldDef == nil {
+		return nil
+	}
+	dir := fd.fieldDef.Directives.ForName(cascadeDeleteDirective)
+	// If the field's own definition doesn't carry the directive, look for it on
+	// any interface that the parent type implements.
+	if dir == nil && fd.parentType != nil {
+		for _, ifaceName := range fd.parentType.Interfaces() {
+			ifaceDef := fd.inSchema.schema.Types[ifaceName]
+			if ifaceDef == nil {
+				continue
+			}
+			ifaceField := ifaceDef.Fields.ForName(fd.fieldDef.Name)
+			if ifaceField != nil {
+				if ifaceDir := ifaceField.Directives.ForName(cascadeDeleteDirective); ifaceDir != nil {
+					dir = ifaceDir
+					break
+				}
+			}
+		}
+	}
+	if dir == nil {
+		return nil
+	}
+	cfg := &CascadeDeleteFieldConfig{Enabled: true, Depth: -1}
+
+	if arg := dir.Arguments.ForName("onlyIfOrphan"); arg != nil && arg.Value.Raw == "true" {
+		cfg.OnlyIfOrphan = true
+	}
+	if arg := dir.Arguments.ForName("onlyIfOrphanScope"); arg != nil && arg.Value.Raw != "" {
+		cfg.OnlyIfOrphanScope = arg.Value.Raw
+	} else {
+		cfg.OnlyIfOrphanScope = "type"
+	}
+	if arg := dir.Arguments.ForName("filter"); arg != nil && arg.Value.Raw != "" {
+		cfg.Filter = arg.Value.Raw
+	}
+	if arg := dir.Arguments.ForName("depth"); arg != nil && arg.Value.Raw != "" {
+		d, err := strconv.Atoi(arg.Value.Raw)
+		if err == nil {
+			cfg.Depth = d
+		}
+	}
+	if arg := dir.Arguments.ForName("authMode"); arg != nil && arg.Value.Raw != "" {
+		cfg.AuthMode = arg.Value.Raw
+	} else {
+		cfg.AuthMode = "skip"
+	}
+	return cfg
+}
+
+// CascadeDeleteFields returns all fields on this type that carry @cascadeDelete,
+// including fields inherited from implemented interfaces.
+//
+// IMPORTANT: t.Fields() (and typeDef.Fields) returns only fields EXPLICITLY
+// declared on the type. Inherited interface fields like Recordable.hasCreateRecord
+// are NOT included — they live only on the interface definition. This function
+// therefore also walks each interface's field list directly.
+//
+// Interface-sourced fields use the INTERFACE's fieldDefinition as parentType so
+// DgraphAlias() produces "InterfaceName.fieldName", matching the Dgraph predicate.
+func (t *astType) CascadeDeleteFields() []FieldDefinition {
+	var result []FieldDefinition
+	seen := make(map[string]bool)
+	typeDef := t.inSchema.schema.Types[t.Name()]
+	if typeDef == nil {
+		return result
+	}
+
+	// 1. Explicitly declared fields on the concrete type.
+	for _, fd := range typeDef.Fields {
+		if fd.Directives.ForName(cascadeDeleteDirective) != nil {
+			seen[fd.Name] = true
+			result = append(result, &fieldDefinition{
+				fieldDef:        fd,
+				inSchema:        t.inSchema,
+				dgraphPredicate: t.dgraphPredicate,
+				parentType:      t,
+			})
+		}
+	}
+
+	// 2. Walk each implemented interface's own field list.
+	// These fields are NOT surfaced through typeDef.Fields, so we must
+	// traverse the interface definitions directly.
+	for _, ifaceName := range typeDef.Interfaces {
+		ifaceDef := t.inSchema.schema.Types[ifaceName]
+		if ifaceDef == nil {
+			continue
+		}
+		for _, ifaceField := range ifaceDef.Fields {
+			if seen[ifaceField.Name] {
+				continue
+			}
+			if ifaceField.Directives.ForName(cascadeDeleteDirective) != nil {
+				seen[ifaceField.Name] = true
+				ifaceType := &astType{
+					typ:             &ast.Type{NamedType: ifaceName},
+					inSchema:        t.inSchema,
+					dgraphPredicate: t.dgraphPredicate,
+				}
+				result = append(result, &fieldDefinition{
+					fieldDef:        ifaceField,
+					inSchema:        t.inSchema,
+					dgraphPredicate: t.dgraphPredicate,
+					parentType:      ifaceType,
+				})
+			}
+		}
+	}
+
+	return result
+}
+
 func (t *astType) GetOldValueFieldsForQuery() map[string]*OldValueSelection {
 	result := make(map[string]*OldValueSelection)
 	for _, field := range t.Fields() {

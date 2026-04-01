@@ -19,6 +19,7 @@ import (
 	"github.com/dgraph-io/gqlparser/v2/gqlerror"
 	"github.com/dgraph-io/gqlparser/v2/parser"
 	"github.com/dgraph-io/gqlparser/v2/validator"
+	"github.com/expr-lang/expr"
 	"github.com/hypermodeinc/dgraph/v25/x"
 	"gopkg.in/yaml.v3"
 )
@@ -1879,6 +1880,124 @@ func validateOldValuePath(sch *ast.Schema, typeName, path string,
 	}
 
 	return validateOldValuePath(sch, nextTypeName, tail, dir, parentTypName, parentFieldName, visited)
+}
+
+// cascadeDeleteDirectiveValidation validates the @cascadeDelete directive.
+// Rules:
+//   - May only appear on edge (non-scalar, non-enum) fields
+//   - Not allowed on @remote types, @custom or @lambda fields
+//   - depth must be a positive integer if supplied
+//   - onlyIfOrphanScope must be "type" or "all" if supplied
+//   - filter expr must compile
+//   - No circular cascade chains (detected via DFS over @cascadeDelete edges)
+func cascadeDeleteDirectiveValidation(sch *ast.Schema,
+	typ *ast.Definition,
+	field *ast.FieldDefinition,
+	dir *ast.Directive,
+	secrets map[string]x.Sensitive) gqlerror.List {
+
+	// Placement: disallow on @remote types.
+	if typ.Directives.ForName(remoteDirective) != nil {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @cascadeDelete cannot be used on a @remote type", typ.Name, field.Name)}
+	}
+
+	// Placement: disallow on scalar fields and enums (must be an edge field).
+	fieldTypeName := field.Type.Name()
+	if isScalar(fieldTypeName) {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @cascadeDelete can only be used on edge (non-scalar) fields, not %s",
+			typ.Name, field.Name, fieldTypeName)}
+	}
+	if sch.Types[fieldTypeName] != nil && sch.Types[fieldTypeName].Kind == ast.Enum {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @cascadeDelete cannot be used on enum fields", typ.Name, field.Name)}
+	}
+
+	// Placement: disallow on @custom and @lambda fields.
+	if field.Directives.ForName(customDirective) != nil {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @cascadeDelete cannot be used on fields with @custom directive",
+			typ.Name, field.Name)}
+	}
+	if field.Directives.ForName(lambdaDirective) != nil {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @cascadeDelete cannot be used on fields with @lambda directive",
+			typ.Name, field.Name)}
+	}
+
+	// Validate depth: must be a positive integer if supplied.
+	if depthArg := dir.Arguments.ForName("depth"); depthArg != nil && depthArg.Value.Raw != "" {
+		d, err := strconv.ParseInt(depthArg.Value.Raw, 10, 64)
+		if err != nil || d <= 0 {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+				"Type %s; Field %s: @cascadeDelete depth must be a positive integer, got %q",
+				typ.Name, field.Name, depthArg.Value.Raw)}
+		}
+	}
+
+	// Validate onlyIfOrphanScope: must be "type" or "all" if supplied.
+	if scopeArg := dir.Arguments.ForName("onlyIfOrphanScope"); scopeArg != nil && scopeArg.Value.Raw != "" {
+		scope := scopeArg.Value.Raw
+		if scope != "type" && scope != "all" {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+				`Type %s; Field %s: @cascadeDelete onlyIfOrphanScope must be "type" or "all", got %q`,
+				typ.Name, field.Name, scope)}
+		}
+	}
+
+	// Validate onlyIfOrphanScope must be "type" or "all" is already validated above; add authMode.
+	// Validate authMode: must be "skip", "enforce", or "filter" if supplied.
+	if authModeArg := dir.Arguments.ForName("authMode"); authModeArg != nil && authModeArg.Value.Raw != "" {
+		mode := authModeArg.Value.Raw
+		if mode != "skip" && mode != "enforce" && mode != "filter" {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+				`Type %s; Field %s: @cascadeDelete authMode must be "skip", "enforce", or "filter", got %q`,
+				typ.Name, field.Name, mode)}
+		}
+	}
+
+	// Validate filter CEL expression if supplied.
+	if filterArg := dir.Arguments.ForName("filter"); filterArg != nil && filterArg.Value.Raw != "" {
+		env := NewExprEvaluationContext(typ.Name, map[string]interface{}{}, nil, nil, AuthCtx{}, "add")
+		if _, err := expr.Compile(filterArg.Value.Raw, expr.Env(env.As())); err != nil {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+				"Type %s; Field %s: @cascadeDelete filter expr %q cannot be compiled: %s",
+				typ.Name, field.Name, filterArg.Value.Raw, err.Error())}
+		}
+	}
+
+	// Cycle detection: build edge graph and check for cycles reachable from this field.
+	visited := map[string]bool{}
+	var detectCycle func(typeName string) bool
+	detectCycle = func(typeName string) bool {
+		if visited[typeName] {
+			return true
+		}
+		visited[typeName] = true
+		def := sch.Types[typeName]
+		if def == nil {
+			return false
+		}
+		for _, f := range def.Fields {
+			if f.Directives.ForName(cascadeDeleteDirective) == nil {
+				continue
+			}
+			if detectCycle(f.Type.Name()) {
+				return true
+			}
+		}
+		visited[typeName] = false
+		return false
+	}
+	visited[typ.Name] = true
+	if detectCycle(fieldTypeName) {
+		return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+			"Type %s; Field %s: @cascadeDelete forms a cycle through type %s",
+			typ.Name, field.Name, fieldTypeName)}
+	}
+
+	return nil
 }
 
 func lambdaOnMutateValidation(sch *ast.Schema, typ *ast.Definition) gqlerror.List {

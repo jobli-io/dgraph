@@ -488,6 +488,81 @@ func (mr *dgraphResolver) rewriteAndExecute(
 			}
 			ext.TouchedUids += qryResp.GetMetrics().GetNumUids()[touchedUidsKey]
 		}
+
+		// Collect @cascadeDelete nodes before the primary delete executes.
+		//
+		// Fast path (ID-based deletes): the delete rewriter creates a block like
+		//   Note_1 as var(func: uid(0xb9ad8)) @filter(type(Note))
+		// We scan upserts[0].Query for such blocks and read Func.UID directly — no
+		// extra query needed, and edges are still live.
+		//
+		// Slow path (filter/bulk deletes): Func.UID is empty, so we augment the
+		// upsert query with consumer blocks (BuildCascadePreQuery) and run it
+		// read-only to resolve the root UIDs from cascadeRoots.
+		mutatedType := mutation.MutatedType()
+		cascadeFields := mutatedType.CascadeDeleteFields()
+		if len(cascadeFields) > 0 && len(upserts) > 0 && upserts[0].Mutations != nil {
+			// --- fast path: extract UIDs from Func.UID on typed uid-function blocks ---
+			typeName := mutatedType.Name()
+			var rootUIDs []string
+			for _, qry := range upserts[0].Query {
+				if qry.Func == nil || qry.Func.Name != "uid" || len(qry.Func.UID) == 0 {
+					continue
+				}
+				filt := qry.Filter
+				if filt == nil || filt.Func == nil {
+					continue
+				}
+				if filt.Func.Name == "type" &&
+					len(filt.Func.Args) > 0 &&
+					filt.Func.Args[0].Value == typeName {
+					for _, u := range qry.Func.UID {
+						rootUIDs = append(rootUIDs, fmt.Sprintf("0x%x", u))
+					}
+				}
+			}
+
+			// --- slow path: run the augmented pre-query for filter/bulk deletes ---
+			if len(rootUIDs) == 0 {
+				preQuery := BuildCascadePreQuery(upserts[0].Query, MutationQueryVar, typeName)
+				preResp, preErr := mr.executor.Execute(ctx,
+					&dgoapi.Request{Query: dgraph.AsString(preQuery), ReadOnly: true}, nil)
+				if preErr == nil && len(preResp.GetJson()) > 0 {
+					var preResult map[string]interface{}
+					if json.Unmarshal(preResp.GetJson(), &preResult) == nil {
+						if arr, ok := preResult["cascadeRoots"].([]interface{}); ok {
+							for _, item := range arr {
+								if m, ok := item.(map[string]interface{}); ok {
+									if uid, ok := m["uid"].(string); ok && uid != "" {
+										rootUIDs = append(rootUIDs, uid)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			if len(rootUIDs) > 0 {
+				customClaims, clErr := mutation.GetAuthMeta().ExtractCustomClaims(ctx)
+				if clErr == nil {
+					auth := schema.AuthCtx{AuthVariables: customClaims.AuthVariables}
+					var existingDeletes []interface{}
+					if json.Unmarshal(upserts[0].Mutations[0].DeleteJson, &existingDeletes) == nil {
+						extended, cascErr := CascadeDeleteCollector(
+							ctx, mr.executor, auth, mutatedType, rootUIDs, existingDeletes)
+						if cascErr != nil {
+							return emptyResult(schema.GQLWrapf(cascErr,
+									"cascade delete collection failed for mutation %s", mutation.Name())),
+								resolverFailed
+						}
+						if b, mErr := json.Marshal(extended); mErr == nil {
+							upserts[0].Mutations[0].DeleteJson = b
+						}
+					}
+				}
+			}
+		}
 	}
 
 	result := make(map[string]interface{})
