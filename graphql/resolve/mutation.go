@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/expr-lang/expr"
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel/attribute"
@@ -21,6 +22,7 @@ import (
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
 	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
 	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
 	"github.com/hypermodeinc/dgraph/v25/x"
@@ -113,10 +115,15 @@ type MutationRewriter interface {
 		mutation schema.Mutation,
 		assigned map[string]string,
 		result map[string]interface{}) []string
-	// MutatedRootUIDs returns a list of Root UIDs that were mutated as part of the mutation.
+	// SetOldValue stores the pre-mutation @oldValue map for a given blank-node variable.
 	SetOldValue(
 		key string,
 		value map[string]interface{})
+	// GetOldValueMap returns the variableOldValueMap populated during existence queries.
+	// Keys are blank-node variable names (e.g. "Post_1", "Post_2") for add/upsert nodes,
+	// or UpdateMutationFilterVar ("xx") for root-level update-filtered nodes.
+	// Used by runPostValidate to expose the pre-mutation "before" state.
+	GetOldValueMap() map[string]map[string]interface{}
 }
 
 // A DgraphExecutor can execute a query/mutation and returns the request response and any errors.
@@ -284,6 +291,10 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	}()
 
 	dgraphPreMutationQueryDuration := &schema.LabeledOffsetDuration{Label: "preMutationQuery"}
+	// dgraphDeletePreQueryDuration tracks the query-field pre-query for delete mutations.
+	// This query runs BEFORE the delete so that the return payload can be captured while
+	// nodes still exist.  It must never be moved to after the mutation loop.
+	dgraphDeletePreQueryDuration := &schema.LabeledOffsetDuration{Label: "preQuery"}
 	dgraphMutationDuration := &schema.LabeledOffsetDuration{Label: "mutation"}
 	dgraphPostMutationQueryDuration := &schema.LabeledOffsetDuration{Label: "query"}
 	ext := &schema.Extensions{
@@ -293,6 +304,7 @@ func (mr *dgraphResolver) rewriteAndExecute(
 					{
 						Dgraph: []*schema.LabeledOffsetDuration{
 							dgraphPreMutationQueryDuration,
+							dgraphDeletePreQueryDuration,
 							dgraphMutationDuration,
 							dgraphPostMutationQueryDuration,
 						},
@@ -470,11 +482,16 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	// We need to execute this query before the mutation to find out the query field.
 	var queryErrs error
 	if mutation.MutationType() == schema.DeleteMutation {
+		// For delete mutations, the queryField is fetched HERE — before the mutation executes —
+		// so that the return payload reflects nodes that still exist in the graph.
+		// deleteRewriter.Rewrite() appends upserts[1] (a query-only block) only when
+		// QueryField() is non-nil, matching the guard below.
 		if qryField := mutation.QueryField(); qryField != nil {
 			dgQuery := upserts[1].Query
 			upserts = upserts[0:1] // we don't need the second upsert anymore
 
-			queryTimer := newtimer(ctx, &dgraphPostMutationQueryDuration.OffsetDuration)
+			// Use the dedicated preQuery timer — this is intentionally PRE-mutation.
+			queryTimer := newtimer(ctx, &dgraphDeletePreQueryDuration.OffsetDuration)
 			queryTimer.Start()
 			qryResp, err = mr.executor.Execute(ctx, &dgoapi.Request{Query: dgraph.AsString(dgQuery),
 				ReadOnly: true}, qryField)
@@ -501,6 +518,7 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		// read-only to resolve the root UIDs from cascadeRoots.
 		mutatedType := mutation.MutatedType()
 		cascadeFields := mutatedType.CascadeDeleteFields()
+		// Note: no need to re-check MutationType — already inside the DeleteMutation block above.
 		if len(cascadeFields) > 0 && len(upserts) > 0 && upserts[0].Mutations != nil {
 			// --- fast path: extract UIDs from Func.UID on typed uid-function blocks ---
 			typeName := mutatedType.Name()
@@ -524,6 +542,8 @@ func (mr *dgraphResolver) rewriteAndExecute(
 
 			// --- slow path: run the augmented pre-query for filter/bulk deletes ---
 			if len(rootUIDs) == 0 {
+				glog.V(2).Infof("CASCADE-DELETE: Initiating DQL 'SLOW-PATH' augmented Pre-Query resolution for Type -> %s", typeName)
+
 				preQuery := BuildCascadePreQuery(upserts[0].Query, MutationQueryVar, typeName)
 				preResp, preErr := mr.executor.Execute(ctx,
 					&dgoapi.Request{Query: dgraph.AsString(preQuery), ReadOnly: true}, nil)
@@ -549,15 +569,26 @@ func (mr *dgraphResolver) rewriteAndExecute(
 					auth := schema.AuthCtx{AuthVariables: customClaims.AuthVariables}
 					var existingDeletes []interface{}
 					if json.Unmarshal(upserts[0].Mutations[0].DeleteJson, &existingDeletes) == nil {
-						extended, cascErr := CascadeDeleteCollector(
-							ctx, mr.executor, auth, mutatedType, rootUIDs, existingDeletes)
+						// Reuse the delete rewriter's VariableGenerator so
+						// cascade-generated reverse-edge cleanup vars don't
+						// collide with variables already emitted by the rewriter.
+						var cascVarGen *VariableGenerator
+						if drw, ok := mr.mutationRewriter.(*deleteRewriter); ok {
+							cascVarGen = drw.VarGen
+						}
+						extended, extraQueries, cascErr := CascadeDeleteCollector(
+							ctx, mr.executor, auth, mutatedType, rootUIDs, existingDeletes, cascVarGen)
 						if cascErr != nil {
 							return emptyResult(schema.GQLWrapf(cascErr,
 									"cascade delete collection failed for mutation %s", mutation.Name())),
 								resolverFailed
 						}
+
 						if b, mErr := json.Marshal(extended); mErr == nil {
 							upserts[0].Mutations[0].DeleteJson = b
+						}
+						if len(extraQueries) > 0 {
+							upserts[0].Query = append(upserts[0].Query, extraQueries...)
 						}
 					}
 				}
@@ -565,6 +596,9 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		}
 	}
 
+	// IMPORTANT: For delete mutations the query-field pre-query has already been executed
+	// above (before this point). Do NOT move any delete query-field execution to after this
+	// mutation loop — the nodes will no longer exist once the delete transaction commits.
 	result := make(map[string]interface{})
 	newNodes := make(map[string]schema.Type)
 
@@ -641,6 +675,12 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	authErr := authorizeNewNodes(ctx, mutation, mutResp.Uids, newNodes, mr.executor, mutResp.Txn)
 	if authErr != nil {
 		return emptyResult(schema.GQLWrapf(authErr, "mutation failed")), resolverFailed
+	}
+
+	// @postValidate: run type-level post-mutation validation within the same
+	// uncommitted transaction. If validation fails the deferred abort fires.
+	if pvErr := runPostValidate(ctx, mutation, mr.executor, mr.mutationRewriter, mutResp, result); pvErr != nil {
+		return emptyResult(schema.GQLWrapf(pvErr, "post-mutation validation failed")), resolverFailed
 	}
 
 	var dgQuery []*dql.GraphQuery
@@ -921,4 +961,398 @@ func authorizeNewNodes(
 	// auth checks.  So the mutation as a whole passed authorization.
 
 	return nil
+}
+
+// runPostValidate executes the @postValidate type-level directive, if present, after
+// the mutation has been written but before the transaction is committed.
+//
+// Expression context (mirrors @validate naming):
+//
+//	nodes  []map  — one entry per mutated node of this type. Each entry is:
+//	               {
+//	                 "uid":    string  — the Dgraph UID (e.g. "0x1a")
+//	                 "before": map     — pre-mutation @oldValue fields (see note below)
+//	                 "after":  map     — post-mutation @oldValue fields (post-write, pre-commit)
+//	               }
+//	auth   map    — JWT auth variables (same as @validate's auth).
+//	action string — "add" or "update" (same as @validate's action).
+//
+// "before" state per node:
+//
+//	Add mutations (new nodes): before is always {} — new nodes have no prior state.
+//	Add-upsert (existing nodes): before is the individual node's snapshot, keyed by
+//	  blank-node name (e.g. "Post_1") in variableOldValueMap. Accurate per-node.
+//	Nested same-type nodes (any depth): each node gets its own blank-node variable
+//	  (e.g. Comment_1, Comment_2, Comment_3 for a self-referencing type), so before
+//	  is accurate per-node regardless of nesting depth.
+//	Update root nodes (matched by filter): stored under the shared key "xx"
+//	  (UpdateMutationFilterVar) as a MERGED map. If the filter matches N nodes,
+//	  their @oldValue fields are overlaid field-by-field (last-writer-wins). This
+//	  means every root-updated node in `nodes` sees the same merged before map —
+//	  not its individual pre-mutation state. This is the same constraint that
+//	  @validate's `before` variable has for bulk update mutations.
+//
+// The expression is evaluated ONCE against the full nodes array.
+func runPostValidate(
+	ctx context.Context,
+	mutation schema.Mutation,
+	executor DgraphExecutor,
+	rewriter MutationRewriter,
+	mutResp *dgoapi.Response,
+	result map[string]interface{},
+) error {
+	// 1. Resolve action string; skip delete mutations.
+	action := ""
+	switch mutation.MutationType() {
+	case schema.AddMutation:
+		action = "add"
+	case schema.UpdateMutation:
+		action = "update"
+	default:
+		// DeleteMutation and others: skip silently.
+		return nil
+	}
+
+	// 2. Check if @postValidate applies for this action.
+	typ := mutation.MutatedType()
+	cfg := typ.PostValidateConfig(action)
+	if cfg == nil {
+		return nil
+	}
+
+	// 3. Collect all UIDs of this type across the entire mutation tree.
+	//    Also returns the inverted map (UID → blank-node name) needed to join before state.
+	uids, uidToBlankName := collectPostValidateUIDs(typ.DgraphName(), mutation, mutResp, result)
+	if len(uids) == 0 {
+		return nil
+	}
+
+	// 4. Fetch post-mutation (after) state for all UIDs in one DQL query within the
+	//    same uncommitted transaction.
+	parsedUIDs := make([]uint64, 0, len(uids))
+	for _, uid := range uids {
+		if v := mustParseUID(uid); v != 0 {
+			parsedUIDs = append(parsedUIDs, v)
+		}
+	}
+	if len(parsedUIDs) == 0 {
+		return nil
+	}
+
+	qry := &dql.GraphQuery{
+		Attr: "postValidateNodes",
+		Func: &dql.Function{
+			Name: "uid",
+			UID:  parsedUIDs,
+		},
+		Children: getFieldsForExistsQuery(typ),
+	}
+
+	resp, err := executor.Execute(ctx, &dgoapi.Request{
+		Query:    dgraph.AsString([]*dql.GraphQuery{qry}),
+		ReadOnly: false, // must share the uncommitted txn
+		StartTs:  mutResp.Txn.GetStartTs(),
+	}, nil)
+	if err != nil {
+		return errors.Wrapf(err, "@postValidate: failed to fetch post-mutation state")
+	}
+
+	var rawResult map[string][]map[string]interface{}
+	if len(resp.GetJson()) > 0 {
+		if err := json.Unmarshal(resp.GetJson(), &rawResult); err != nil {
+			return errors.Wrapf(err, "@postValidate: failed to unmarshal post-mutation query")
+		}
+	}
+
+	// 5. Get the pre-mutation (before) state map from the rewriter.
+	//    Keys: blank-node variable names for add/upsert nodes; "xx" for update root nodes.
+	oldValueMap := rewriter.GetOldValueMap()
+	// Fallback before for update root nodes: the merged "xx" entry.
+	mergedUpdateBefore := oldValueMap[UpdateMutationFilterVar] // nil for add mutations
+
+	// 6. Build the nodes array: each element is {uid, before, after}.
+	//    - after:  post-mutation state from the DQL query, normalised to GQL field names.
+	//    - before: pre-mutation state from the existence query, also normalised.
+	//
+	// Both the DQL existence query (GetOldValueMap) and the post-validate fetch use
+	// Dgraph predicate names ("Review.rating", "Review.comment", …). We strip the
+	// type prefix so expressions can use bare GQL names: .after.rating, .before.comment.
+	dgraphPrefix := typ.DgraphName()
+	// nodes MUST be []map[string]interface{} (not []interface{}) so that expr-lang's
+	// type checker knows the element type and correctly binds `.` in {predicate} blocks.
+	nodes := make([]map[string]interface{}, 0, len(rawResult["postValidateNodes"]))
+	for _, rawAfter := range rawResult["postValidateNodes"] {
+		uid, _ := rawAfter["uid"].(string)
+
+		// Resolve before state: prefer per-node blank-node entry, fall back to merged.
+		var rawBefore map[string]interface{}
+		if blankName, ok := uidToBlankName[uid]; ok {
+			rawBefore = oldValueMap[blankName] // nil for new nodes (empty before)
+		}
+		if rawBefore == nil {
+			rawBefore = mergedUpdateBefore // nil for add-only mutations
+		}
+		if rawBefore == nil {
+			rawBefore = map[string]interface{}{}
+		}
+
+		before := normalizePredicateKeys(rawBefore, dgraphPrefix)
+		after := normalizePredicateKeys(rawAfter, dgraphPrefix)
+
+		// new mirrors @validate's `new` variable: fields in `after` whose value differs
+		// from `before`. For add mutations `before` is empty, so `new` == `after`.
+		newFields := make(map[string]interface{})
+		for k, v := range after {
+			if bv, ok := before[k]; !ok || bv != v {
+				newFields[k] = v
+			}
+		}
+
+		nodes = append(nodes, map[string]interface{}{
+			"uid":    uid,
+			"before": before,
+			"after":  after,
+			"new":    newFields,
+		})
+	}
+
+	// Backfill: in a multi-Alpha cluster the DQL post-mutation read above may be
+	// routed to a different Alpha that cannot see the uncommitted write, causing
+	// rawResult["postValidateNodes"] to be empty even though the node was just
+	// created.  Ensure every UID collected from mutResp.GetUids() has an entry in
+	// nodes, adding a stub (uid + before, empty after/new) if the DQL missed it.
+	// Count-based lambda checks (User/Group quota) use nodes.length, so they
+	// always see the correct batch size. Field-based checks (JobAd quota) can
+	// inspect n.after and gracefully handle the empty-map case.
+	foundInDQL := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		if uid, ok := n["uid"].(string); ok {
+			foundInDQL[uid] = true
+		}
+	}
+	for _, uid := range uids {
+		if foundInDQL[uid] {
+			continue
+		}
+		var rawBefore map[string]interface{}
+		if blankName, ok := uidToBlankName[uid]; ok {
+			rawBefore = oldValueMap[blankName]
+		}
+		if rawBefore == nil {
+			rawBefore = mergedUpdateBefore
+		}
+		if rawBefore == nil {
+			rawBefore = map[string]interface{}{}
+		}
+		before := normalizePredicateKeys(rawBefore, dgraphPrefix)
+		nodes = append(nodes, map[string]interface{}{
+			"uid":    uid,
+			"before": before,
+			"after":  map[string]interface{}{},
+			"new":    map[string]interface{}{},
+		})
+	}
+
+	// 7. Compile and evaluate the CEL expression once against the full nodes array.
+	//
+	// Expression context variables:
+	//   nodes   []map  — all mutated nodes; each element has {uid, before, after, new}.
+	//                    Fields normalised to bare GQL names (.after.rating etc.)
+	//   action  string — "add" or "update"
+	//   auth    map    — JWT claim variables (empty map when unauthenticated)
+	//
+	// Per-node fields accessible inside {predicate} blocks:
+	//   .uid     string — Dgraph UID of the node
+	//   .before  map    — pre-mutation field values (empty for add)
+	//   .after   map    — post-mutation field values
+	//   .new     map    — fields that changed (after - before); mirrors @validate `new`
+	//
+	// Helper functions (same set as @validate):
+	//   callLambda(name, payload) — invoke a registered lambda
+	//   uuid()                    — new UUIDv4 string
+	//   sha256(str)               — hex SHA-256
+	//   generateEmbedding(...)    — vector embedding
+	//   diffMap(a, b)             — fields in b that differ from a
+	//   mapStringWithoutKeys(m,k) — m minus specified keys
+	//   error(v)                  — abort expression with error
+	//
+	// IMPORTANT: expr.Run must receive the SAME type as expr.Env — the compiled bytecode
+	// uses struct field offsets. Passing a map when the env shape is a struct causes the
+	// "reflect: call of reflect.Value.Field on map Value" panic.
+	type postValidateNode = map[string]interface{}
+	type postValidateEnv struct {
+		Nodes  []postValidateNode     `expr:"nodes"`
+		Action string                 `expr:"action"`
+		Auth   map[string]interface{} `expr:"auth"`
+		// Helper functions — same set as @validate (NewExprEvaluationContext).
+		CallLambda           func(string, map[string]interface{}) (interface{}, error)                            `expr:"callLambda"`
+		UUID                 func() string                                                                        `expr:"uuid"`
+		Sha256               func(string) string                                                                  `expr:"sha256"`
+		GenerateEmbedding    func(string, string, string, map[string]any) []float32                               `expr:"generateEmbedding"`
+		DiffMap              func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error) `expr:"diffMap"`
+		MapStringWithoutKeys func(map[string]interface{}, []interface{}) map[string]interface{}                   `expr:"mapStringWithoutKeys"`
+		Error                func(interface{}) (interface{}, error)                                               `expr:"error"`
+	}
+	prog, err := expr.Compile(cfg.Expr,
+		expr.Env(postValidateEnv{}),
+		expr.AllowUndefinedVariables(),
+	)
+	if err != nil {
+		return errors.Wrapf(err, "@postValidate on type %s: failed to compile expression %q", typ.Name(), cfg.Expr)
+	}
+
+	// Build the full AuthCtx — same pattern as mutation_rewriter.go — so that
+	// callLambda is wired up with the real JWT from the incoming HTTP request.
+	authCtx := schema.AuthCtx{}
+	authCtx.AccessJWT, _ = x.ExtractJwt(ctx)
+	if idField := typ.IDField(); idField != nil {
+		authCtx.AuthHeaderKey = idField.GetAuthMeta().GetHeader()
+		authCtx.AuthHeaderValue = authorization.GetJwtToken(ctx)
+	}
+	customClaims, clErr := mutation.GetAuthMeta().ExtractCustomClaims(ctx)
+	if clErr == nil && customClaims.AuthVariables != nil {
+		authCtx.AuthVariables = customClaims.AuthVariables
+	}
+	if authCtx.AuthVariables == nil {
+		authCtx.AuthVariables = map[string]interface{}{}
+	}
+
+	// Populate the struct helper functions using the exported constructor so that
+	// the unexported schema-package helpers (callLambda, hashSHA256, …) are accessible.
+	helpers := schema.NewPostValidateExprHelpers(authCtx)
+
+	// Pass the populated struct — must match the postValidateEnv type used at compile time.
+	evalEnv := postValidateEnv{
+		Nodes:                nodes,
+		Action:               action,
+		Auth:                 authCtx.AuthVariables,
+		CallLambda:           helpers["callLambda"].(func(string, map[string]interface{}) (interface{}, error)),
+		UUID:                 helpers["uuid"].(func() string),
+		Sha256:               helpers["sha256"].(func(string) string),
+		GenerateEmbedding:    helpers["generateEmbedding"].(func(string, string, string, map[string]any) []float32),
+		DiffMap:              helpers["diffMap"].(func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error)),
+		MapStringWithoutKeys: helpers["mapStringWithoutKeys"].(func(map[string]interface{}, []interface{}) map[string]interface{}),
+		Error:                helpers["error"].(func(interface{}) (interface{}, error)),
+	}
+
+	exprResult, runErr := expr.Run(prog, evalEnv)
+	if runErr != nil {
+		return errors.Wrapf(runErr, "@postValidate on type %s: expression error", typ.Name())
+	}
+
+	passed, ok := exprResult.(bool)
+	if !ok || !passed {
+		msg := fmt.Sprintf("@postValidate on type %s failed", typ.Name())
+		if cfg.Reason != "" {
+			msg = cfg.Reason
+		}
+		return errors.New(msg)
+	}
+	return nil
+}
+
+// buildPostValidateEnv is intentionally not used at compile time (see runPostValidate).
+// Kept as documentation of the runtime variable shape passed to expr.Run.
+//
+//	nodes  []map[string]interface{}  — each element: {uid, before, after}
+//	auth   map[string]interface{}    — JWT claim variables; {} if no auth
+//	action string                    — "add" or "update"
+func buildPostValidateEnv() map[string]interface{} {
+	nodeShape := map[string]interface{}{
+		"uid":    "",
+		"before": map[string]interface{}{},
+		"after":  map[string]interface{}{},
+	}
+	return map[string]interface{}{
+		"nodes":  []interface{}{nodeShape},
+		"auth":   map[string]interface{}{},
+		"action": "",
+	}
+}
+
+// normalizePredicateKeys converts Dgraph predicate-namespaced keys in a map to bare
+// GraphQL field names so that CEL expressions can use n.after.rating / n.before.comment
+// instead of n.after["Review.rating"]. This applies to both the pre-mutation (before)
+// state from the existence query and the post-mutation (after) state fetched by
+// runPostValidate.
+//
+// Transformation rules:
+//   - "<dgraphTypeName>.<field>"  →  "<field>"   (e.g. "Review.rating" → "rating")
+//   - "uid", "dgraph.type", etc. are kept unchanged (no matching prefix)
+func normalizePredicateKeys(m map[string]interface{}, dgraphTypeName string) map[string]interface{} {
+	if len(m) == 0 {
+		return m
+	}
+	prefix := dgraphTypeName + "."
+	out := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		if strings.HasPrefix(k, prefix) {
+			out[k[len(prefix):]] = v
+		} else {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// collectPostValidateUIDs gathers all UIDs of the validated type from the mutation response
+// and returns both the UID list and an inverted map (UID → blank-node variable name).
+//
+// The inverted map is used to join each fetched after-node to its per-node before state
+// in variableOldValueMap.
+//
+// Blank nodes follow the naming scheme "TypeName_N" (e.g. "Post_1", "Post_2") generated
+// by VariableGenerator.Next. Filtering mutResp.GetUids() by this prefix captures every
+// node of the type created anywhere in the mutation tree (root or nested) without
+// tree traversal — including nested same-type objects at any depth.
+//
+// For update mutations, root-level updated UIDs (existing nodes matched by the filter,
+// not in GetUids()) are also collected from the Dgraph result map. Their before state
+// is NOT individually keyed — it lives under the shared "xx" key as a merged map.
+func collectPostValidateUIDs(
+	dgraphTypeName string,
+	mutation schema.Mutation,
+	mutResp *dgoapi.Response,
+	result map[string]interface{},
+) ([]string, map[string]string) {
+	seenUID := make(map[string]bool)
+	var uids []string
+	// uidToBlankName: inverted map for before-state join.
+	uidToBlankName := make(map[string]string)
+
+	// Blank-node prefix for this type (e.g. "Post_" for type Post).
+	prefix := dgraphTypeName + "_"
+
+	// Newly-assigned UIDs: covers add (root + nested) and nested-add-within-update.
+	// This correctly handles same-type objects at any nesting depth because the
+	// VariableGenerator assigns a unique blank-node name per object regardless of depth.
+	for blankName, uid := range mutResp.GetUids() {
+		if uid != "" && strings.HasPrefix(blankName, prefix) && !seenUID[uid] {
+			seenUID[uid] = true
+			uids = append(uids, uid)
+			uidToBlankName[uid] = blankName
+		}
+	}
+
+	// For update mutations, root nodes are existing (not in GetUids()).
+	// Their before state is stored under "xx" (merged across all filter-matched nodes).
+	if mutation.MutationType() == schema.UpdateMutation {
+		for _, uid := range extractMutated(result, mutation.Name()) {
+			if uid != "" && !seenUID[uid] {
+				seenUID[uid] = true
+				uids = append(uids, uid)
+				// No individual blank-node name — before falls back to merged "xx" entry.
+			}
+		}
+	}
+
+	return uids, uidToBlankName
+}
+
+// mustParseUID converts a hex-string UID (e.g. "0x1a") to uint64.
+// Returns 0 on parse failure (the block will simply return no results).
+func mustParseUID(uid string) uint64 {
+	uid = strings.TrimPrefix(uid, "0x")
+	v, _ := strconv.ParseUint(uid, 16, 64)
+	return v
 }
