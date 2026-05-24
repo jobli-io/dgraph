@@ -762,26 +762,76 @@ func parseRuleNodeFromTemplate(template string, authorityVars, childVars map[str
 	// on every field in the AST. This is REQUIRED — without it, field.Arguments()
 	// panics at query time when ArgumentMap() is called on a nil Definition.
 	//
-	// Cascaded rules always query the authority type (e.g. queryWorkspace for
-	// Workspace authority). We pass the authority type def so gqlValidateRule's
-	// f.Name == "query"+typ.Name check matches the rule's root query field.
-	authorityTypeDef := sch.schema.Types[authorityTypeName]
-	if authorityTypeDef == nil {
-		// Authority type not found — last resort (produces unvalidated rule; may panic
-		// at query time). Should never happen in a well-formed schema.
-		if err := gqlParseRuleForCascade(sch, substituted, node); err != nil {
-			return nil, fmt.Errorf(
-				"Type %s: @cascadeAuth: expanding from authority type %s: %w",
-				childTypeName, authorityTypeName, err)
-		}
-		return node, nil
-	}
-	if err := gqlValidateRule(sch, authorityTypeDef, substituted, node); err != nil {
+	// The rule may query a different type than the authority type. For example, Group's
+	// @auth rule might say `queryIAMResource(...)` because the auth was defined on the
+	// IAMResource interface that Group implements. gqlValidateRule checks
+	// f.Name == "query"+typ.Name — so we need to pass the type that the rule actually
+	// queries, not necessarily the authority type.
+	//
+	// Strategy: infer the queried type from the root query field name in the substituted
+	// rule, look it up in the schema, and validate against that type. Fall back to the
+	// authority type def if the inferred type is not found.
+	typeDef := inferQueriedTypeDef(sch, substituted, authorityTypeName)
+	if err := gqlValidateRule(sch, typeDef, substituted, node); err != nil {
 		return nil, fmt.Errorf(
 			"Type %s: @cascadeAuth: expanding from authority type %s: %w",
 			childTypeName, authorityTypeName, err)
 	}
 	return node, nil
+}
+
+// inferQueriedTypeDef parses the root query field name from a GQL rule string
+// (e.g. "query { queryIAMResource(...) {...} }") and returns the *ast.Definition
+// for the type it queries (e.g. sch.schema.Types["IAMResource"]). Falls back to
+// sch.schema.Types[authorityTypeName] if the inferred type is not in the schema.
+//
+// This is needed because authority types can have @auth rules that query an interface
+// they implement (the auth was defined on the interface). gqlValidateRule checks
+// f.Name == "query"+typ.Name — so we must pass the type the rule actually queries.
+func inferQueriedTypeDef(sch *schema, rule, authorityTypeName string) *ast.Definition {
+	fallback := sch.schema.Types[authorityTypeName]
+
+	// Fast path: extract the root query field name with a simple string scan.
+	// Rules have the shape: "query(...) {\n  queryFoo(...) { ... }\n}"
+	// Find "query" keyword at the field position (after the outer "query {" block).
+	// We look for a token starting with "query" followed by a non-lowercase letter
+	// (to distinguish the operation keyword from field names like "queryFoo").
+	// Simple approach: find the second occurrence of "query" that is followed by
+	// an uppercase letter — that's the root field name.
+	const prefix = "query"
+	remaining := rule
+	foundOp := false
+	for {
+		idx := strings.Index(remaining, prefix)
+		if idx == -1 {
+			break
+		}
+		token := remaining[idx:]
+		remaining = remaining[idx+len(prefix):]
+		// Skip the operation keyword "query" (followed by space, newline, '(', or '{').
+		if !foundOp {
+			if len(remaining) == 0 || remaining[0] == ' ' || remaining[0] == '\n' ||
+				remaining[0] == '\t' || remaining[0] == '(' || remaining[0] == '{' {
+				foundOp = true
+				continue
+			}
+		}
+		// This "query" is followed by a name character — it's a field like "queryFoo".
+		end := len(prefix)
+		for end < len(token) && (token[end] >= 'A' && token[end] <= 'Z' ||
+			token[end] >= 'a' && token[end] <= 'z' ||
+			token[end] >= '0' && token[end] <= '9' || token[end] == '_') {
+			end++
+		}
+		fieldName := token[:end] // e.g. "queryIAMResource"
+		// The type name is fieldName with "query" prefix stripped.
+		typeName := fieldName[len(prefix):] // e.g. "IAMResource"
+		if def := sch.schema.Types[typeName]; def != nil {
+			return def
+		}
+		break
+	}
+	return fallback
 }
 
 // childOwnQueryRule returns the child type's own @auth(query:...) RuleNode.
