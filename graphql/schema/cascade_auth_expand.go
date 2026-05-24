@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/dgraph-io/gqlparser/v2/ast"
+	"github.com/dgraph-io/gqlparser/v2/gqlerror"
 )
 
 // ---------------------------------------------------------------------------
@@ -176,10 +177,10 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 
 		// Build per-parent-edge RuleNodes, reading from the snapshot so that
 		// cascade rules are derived only from each authority's declared @auth.
-		var perEdgeRules []*RuleNode
+		var perEdgeRules []*RuleNode // used only for preCascadeQueryAuth / bidir setup
 		for _, edge := range edges {
-			ruleNode, err := cascadeAuthRuleForEdge(edge, childTypeName, incomingEdges, authRulesForCascade,
-				make(map[string]bool), 0, sch)
+			ruleNode, err := cascadeAuthRuleForEdge(edge, childTypeName, "query", incomingEdges,
+				authRulesForCascade, make(map[string]bool), 0, sch)
 			if err != nil {
 				return err
 			}
@@ -188,20 +189,21 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 			}
 		}
 
-		if len(perEdgeRules) == 0 {
+		if len(perEdgeRules) == 0 && !policy.IncludeSelf {
 			continue
 		}
 
-		// Combine per-edge rules according to policy.
-		var cascadeRule *RuleNode
+		// Combined query-cascade rule (for bidir / preCascadeQueryAuth lookup).
+		var cascadeRule *RuleNode // query-op combined rule; used for bidir
 		switch {
 		case len(perEdgeRules) == 1:
 			cascadeRule = perEdgeRules[0]
-		case policy.Aggregation == "or":
+		case len(perEdgeRules) > 1 && policy.Aggregation == "or":
 			cascadeRule = &RuleNode{Or: perEdgeRules}
-		default:
+		case len(perEdgeRules) > 1:
 			cascadeRule = &RuleNode{And: perEdgeRules}
 		}
+		_ = cascadeRule // op-specific loop below rebuilds per-op rules
 
 		// Ensure TypeAuth exists.
 		if authRules[childTypeName] == nil {
@@ -224,9 +226,44 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 			}
 		}
 
-		// Merge into each covered operation slot.
+		// Merge into each covered operation slot, using op-specific authority rules
+		// where available (add→@auth(add:...) with @auth(query:...) fallback, etc.).
 		ops := operationsFromEdges(edges)
 		for _, op := range ops {
+			// Build per-op per-edge rules (op-specific authority rule selection).
+			var perOpEdgeRules []*RuleNode
+			for _, edge := range edges {
+				ruleNode, err := cascadeAuthRuleForEdge(edge, childTypeName, op, incomingEdges,
+					authRulesForCascade, make(map[string]bool), 0, sch)
+				if err != nil {
+					return err
+				}
+				if ruleNode != nil {
+					perOpEdgeRules = append(perOpEdgeRules, ruleNode)
+				}
+			}
+			if len(perOpEdgeRules) == 0 {
+				continue
+			}
+			// Combine per-edge rules according to aggregation policy.
+			var cascadeRule *RuleNode
+			switch {
+			case len(perOpEdgeRules) == 1:
+				cascadeRule = perOpEdgeRules[0]
+			case policy.Aggregation == "or":
+				cascadeRule = &RuleNode{Or: perOpEdgeRules}
+			default:
+				cascadeRule = &RuleNode{And: perOpEdgeRules}
+			}
+			// includeSelf: OR the child's own pre-cascade @auth(query:...) alongside the
+			// cascade rule so a caller can reach the child via its own auth OR the cascade
+			// path. Only applied when policy.IncludeSelf is true.
+			if policy.IncludeSelf {
+				ownRule := childOwnQueryRule(childTypeName, authRulesForCascade)
+				if ownRule != nil {
+					cascadeRule = mergeAuthNodeWithOr(ownRule, cascadeRule)
+				}
+			}
 			mergeIntoOp(authRules[childTypeName], op, cascadeRule, policy.Aggregation)
 		}
 
@@ -427,9 +464,10 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 }
 
 // cascadeAuthRuleForEdge builds the RuleNode for a single incoming cascade edge.
-// It returns the parent's @auth(query:...) RuleNode, optionally resolved with
-// the child type's @authVariables substitution. For multi-hop chains it recurses.
-func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string,
+// op is the operation being processed ("query", "add", "update", "delete").
+// For add/update/delete it prefers the authority's op-specific @auth rule,
+// falling back to @auth(query:...) when no op-specific rule is declared.
+func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string, op string,
 	incomingEdges map[string][]cascadeAuthIncomingEdge,
 	authRules map[string]*TypeAuth,
 	visited map[string]bool, depth int, sch *schema) (*RuleNode, error) {
@@ -442,8 +480,8 @@ func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string,
 	}
 
 	ta := authRules[edge.parentTypeName]
-	if ta == nil || ta.Rules == nil || ta.Rules.Query == nil {
-		// Authority has no own @auth(query:...). If it's an interface, collect auth
+	if ta == nil || ta.Rules == nil {
+		// Authority has no own @auth. If it's an interface, collect auth
 		// rules from all concrete implementors and use their union instead.
 		authorityDef := sch.schema.Types[edge.parentTypeName]
 		if authorityDef == nil || authorityDef.Kind != ast.Interface {
@@ -457,8 +495,26 @@ func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string,
 		return withCascadeEdgePred(implRule, edge.dgraphPred), nil
 	}
 
-	// Clone the parent's query RuleNode and apply @authVariables substitution.
-	parentRule, err := resolveAuthVarsInRuleNode(ta.Rules.Query, edge, childTypeName, sch)
+	// Select the op-specific authority rule, falling back to query.
+	// Doc table: add→@auth(add:..) || @auth(query:..), etc.
+	var authorityRule *RuleNode
+	switch op {
+	case "add":
+		authorityRule = ta.Rules.Add
+	case "update":
+		authorityRule = ta.Rules.Update
+	case "delete":
+		authorityRule = ta.Rules.Delete
+	}
+	if authorityRule == nil {
+		authorityRule = ta.Rules.Query // fallback / query path
+	}
+	if authorityRule == nil {
+		return nil, nil
+	}
+
+	// Clone the authority rule and apply @authVariables substitution.
+	parentRule, err := resolveAuthVarsInRuleNode(authorityRule, edge, childTypeName, sch)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +530,7 @@ func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string,
 
 		var grandparentRules []*RuleNode
 		for _, parentEdge := range parentEdges {
-			gpRule, err := cascadeAuthRuleForEdge(parentEdge, edge.parentTypeName,
+			gpRule, err := cascadeAuthRuleForEdge(parentEdge, edge.parentTypeName, op,
 				incomingEdges, authRules, visited, depth+1, sch)
 			if err != nil {
 				return nil, err
@@ -490,12 +546,7 @@ func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string,
 		}
 	}
 
-	// Wrap parentRule with cascade edge pred. We clone rather than mutate because:
-	// 1. For variableContext:"parent"/"adaptive", resolveAuthVarsInRuleNode returns
-	//    ta.Rules.Query directly (shared pointer). Multiple child types with the same
-	//    authority would corrupt each other if we mutate in place.
-	// 2. Grandparent rules (from recursion) already have their own edge pred set —
-	//    we must not overwrite them with the current level's edge pred.
+	// Wrap parentRule with cascade edge pred.
 	parentRule = withCascadeEdgePred(parentRule, edge.dgraphPred)
 
 	return parentRule, nil
@@ -551,21 +602,31 @@ func withCascadeEdgePred(rn *RuleNode, pred string) *RuleNode {
 	return &clone
 }
 
-// resolveAuthVarsInRuleNode returns a RuleNode for the child type using the parent's
+// resolveAuthVarsInRuleNode applies the variableContext strategy to produce the
 // rule template with the appropriate @authVariables applied.
 //
-//   - variableContext: "parent"   — returns authority's already-substituted RuleNode as-is.
-//   - variableContext: "self"     — re-substitutes using child's @authVariables (child MUST
-//     have @authVariables; enforced by the validator).
-//   - variableContext: "adaptive" — uses self path if child has @authVariables, silently
-//     falls back to parent's rule if not (no validator error required).
+//   - variableContext: ""        — unset; treated as "adaptive" (the doc default).
+//   - variableContext: "adaptive" — uses child's @authVariables if present (self
+//     path); silently falls back to authority's rule if not. No schema error.
+//   - variableContext: "self"    — re-substitutes using child's @authVariables.
+//     REQUIRES @authVariables on child; schema load error if missing.
+//   - variableContext: "parent"  — returns authority's already-substituted rule as-is.
 func resolveAuthVarsInRuleNode(parentRule *RuleNode, edge cascadeAuthIncomingEdge,
 	childTypeName string, sch *schema) (*RuleNode, error) {
 
 	switch edge.cfg.VariableContext {
 	case "self":
+		// "self" requires @authVariables on the child — schema load error if absent.
+		childTypeDef := sch.schema.Types[childTypeName]
+		if childTypeDef == nil || childTypeDef.Directives.ForName(authVariablesDirective) == nil {
+			return nil, gqlerror.Errorf(
+				"Type %s: @cascadeAuth field %s has variableContext: self but "+
+					"type %s has no @authVariables directive. "+
+					"Either add @authVariables to %s or change variableContext to adaptive.",
+				childTypeName, edge.fieldName, childTypeName, childTypeName)
+		}
 		return resubstituteRuleNode(parentRule, edge, childTypeName, sch)
-	case "adaptive":
+	case "adaptive", "": // "" = unset; adaptive is the documented default
 		// Use self path only if child has @authVariables defined.
 		childTypeDef := sch.schema.Types[childTypeName]
 		if childTypeDef != nil && childTypeDef.Directives.ForName(authVariablesDirective) != nil {
@@ -573,7 +634,7 @@ func resolveAuthVarsInRuleNode(parentRule *RuleNode, edge cascadeAuthIncomingEdg
 		}
 		// No @authVariables on child — fall back to authority's rule as-is.
 		return parentRule, nil
-	default: // "parent" or unset
+	default: // "parent" or unrecognised value
 		return parentRule, nil
 	}
 }

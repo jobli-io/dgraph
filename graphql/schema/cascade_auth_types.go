@@ -33,6 +33,10 @@ type CascadeAuthFieldConfig struct {
 type CascadeAuthPolicyConfig struct {
 	// Aggregation is "and" or "or" — how multiple incoming edges are combined.
 	Aggregation string
+	// IncludeSelf adds the child's own @auth rule as an additional OR path alongside
+	// the cascade rules, so a caller can access the child via its own auth OR via the
+	// cascade path (e.g. direct ownership in addition to workspace membership).
+	IncludeSelf bool
 	// SkipBidirectional suppresses bidirectional rule propagation for this type.
 	SkipBidirectional bool
 }
@@ -82,6 +86,9 @@ func (t *astType) CascadeAuthPolicyConfig() CascadeAuthPolicyConfig {
 	cfg := CascadeAuthPolicyConfig{Aggregation: "and"}
 	if v := dir.Arguments.ForName("aggregation"); v != nil {
 		cfg.Aggregation = v.Value.Raw
+	}
+	if v := dir.Arguments.ForName("includeSelf"); v != nil {
+		cfg.IncludeSelf = v.Value.Raw == "true"
 	}
 	if v := dir.Arguments.ForName("skipBidirectional"); v != nil {
 		cfg.SkipBidirectional = v.Value.Raw == "true"
