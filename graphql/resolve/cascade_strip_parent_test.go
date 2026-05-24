@@ -1,0 +1,5 @@
+package resolve
+
+import "testing"
+
+func TestDummy(t *testing.T) {}

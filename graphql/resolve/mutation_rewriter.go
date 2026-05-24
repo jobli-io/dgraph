@@ -21,6 +21,7 @@ import (
 	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
 	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
 	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/protos/pb"
 	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
@@ -132,6 +133,14 @@ func (xm *xidMetadata) SetOldValue(
 	xm.variableOldValueMap[key] = value
 }
 
+// GetOldValueMap returns a shallow copy of the variableOldValueMap.
+func (xm *xidMetadata) GetOldValueMap() map[string]map[string]interface{} {
+	if xm == nil || xm.variableOldValueMap == nil {
+		return nil
+	}
+	return xm.variableOldValueMap
+}
+
 // Next gets the Next variable name for the given type and xid.
 // So, if two objects of the same type have same value for xid field,
 // then they will get same variable name.
@@ -189,7 +198,16 @@ func (v *VariableGenerator) Next(typ schema.Type, xidName, xidVal string, auth b
 	return varName
 }
 
-// NewAddRewriter returns new MutationRewriter for add & update mutations.
+// NextFromTypeName generates the next variable name from a plain type-name string.
+// Use this when no schema.Type is available (e.g., CascadeBundlePred intermediate vars).
+func (v *VariableGenerator) NextFromTypeName(typeName string, auth bool) string {
+	v.counter++
+	if auth {
+		return fmt.Sprintf("%s_Auth%v", typeName, v.counter)
+	}
+	return fmt.Sprintf("%s_%v", typeName, v.counter)
+}
+
 func NewAddRewriter() MutationRewriter {
 	return &AddRewriter{}
 }
@@ -376,11 +394,13 @@ func (urw *UpdateRewriter) RewriteQueries(
 			if err != nil {
 				return nil, nil, err
 			}
+			updateAuthVarCache := make(map[string]string)
 			authRw := &authRewriter{
 				authVariables: customClaims.AuthVariables,
 				varGen:        urw.VarGen,
 				selector:      updateAuthSelector,
 				parentVarName: m.MutatedType().Name() + "Root",
+				authVarCache:  &updateAuthVarCache,
 			}
 			authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 
@@ -443,6 +463,15 @@ func (arw *AddRewriter) SetOldValue(
 	arw.XidMetadata.SetOldValue(key, value)
 }
 
+// GetOldValueMap returns the pre-mutation @oldValue data for all blank-node variables
+// produced during this add mutation. Keys are blank-node names (e.g. "Post_1").
+func (arw *AddRewriter) GetOldValueMap() map[string]map[string]interface{} {
+	if arw == nil || arw.XidMetadata == nil {
+		return nil
+	}
+	return arw.XidMetadata.GetOldValueMap()
+}
+
 // SetOldValue adds old value to Rewriter
 func (urw *UpdateRewriter) SetOldValue(
 	key string,
@@ -453,6 +482,17 @@ func (urw *UpdateRewriter) SetOldValue(
 	urw.XidMetadata.SetOldValue(key, value)
 }
 
+// GetOldValueMap returns the pre-mutation @oldValue data.
+// For update mutations the root-level matched nodes are stored under the special
+// key UpdateMutationFilterVar ("xx") as a merged map (last-writer-wins across all
+// nodes matched by the filter). Nested add/upsert nodes are stored by blank-node name.
+func (urw *UpdateRewriter) GetOldValueMap() map[string]map[string]interface{} {
+	if urw == nil || urw.XidMetadata == nil {
+		return nil
+	}
+	return urw.XidMetadata.GetOldValueMap()
+}
+
 // SetOldValue adds old value to Rewriter
 func (drw *deleteRewriter) SetOldValue(
 	key string,
@@ -461,6 +501,11 @@ func (drw *deleteRewriter) SetOldValue(
 		return
 	}
 	drw.XidMetadata.SetOldValue(key, value)
+}
+
+// GetOldValueMap returns nil for delete mutations (no before state is fetched).
+func (drw *deleteRewriter) GetOldValueMap() map[string]map[string]interface{} {
+	return nil
 }
 
 // Rewrite takes a GraphQL schema.Mutation add and builds a Dgraph upsert mutation.
@@ -594,11 +639,13 @@ func (arw *AddRewriter) Rewrite(
 		// which is going to be updated. Eg. State3 .
 		if upsertVar != "" {
 			// Add auth queries for upsert mutation.
+			upsertAuthVarCache := make(map[string]string)
 			authRw := &authRewriter{
 				authVariables: customClaims.AuthVariables,
 				varGen:        varGen,
 				selector:      updateAuthSelector,
 				parentVarName: fmt.Sprintf("%sRoot_%d", m.MutatedType().Name(), pos), // append node position to avoid conflict in multi-node upsert.
+				authVarCache:  &upsertAuthVarCache,
 			}
 			authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 			// Get upsert query of the form,
@@ -714,11 +761,13 @@ func (urw *UpdateRewriter) Rewrite(
 		return ret, err
 	}
 
+	updateMutAuthVarCache := make(map[string]string)
 	authRw := &authRewriter{
 		authVariables: customClaims.AuthVariables,
 		varGen:        varGen,
 		selector:      updateAuthSelector,
 		parentVarName: m.MutatedType().Name() + "Root",
+		authVarCache:  &updateMutAuthVarCache,
 	}
 	authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 
@@ -892,11 +941,13 @@ func (arw *AddRewriter) FromMutationResult(
 		return nil, err
 	}
 
+	addResultAuthVarCache := make(map[string]string)
 	authRw := &authRewriter{
 		authVariables: customClaims.AuthVariables,
 		varGen:        NewVariableGenerator(),
 		selector:      queryAuthSelector,
 		parentVarName: mutation.MutatedType().Name() + "Root",
+		authVarCache:  &addResultAuthVarCache,
 	}
 	authRw.hasAuthRules = hasAuthRules(mutation.QueryField(), authRw)
 
@@ -933,11 +984,13 @@ func (urw *UpdateRewriter) FromMutationResult(
 		return nil, err
 	}
 
+	updateResultAuthVarCache := make(map[string]string)
 	authRw := &authRewriter{
 		authVariables: customClaims.AuthVariables,
 		varGen:        NewVariableGenerator(),
 		selector:      queryAuthSelector,
 		parentVarName: mutation.MutatedType().Name() + "Root",
+		authVarCache:  &updateResultAuthVarCache,
 	}
 	authRw.hasAuthRules = hasAuthRules(mutation.QueryField(), authRw)
 	return rewriteAsQueryByIds(mutation.QueryField(), uids, authRw, mutation.Alias()), nil
@@ -1169,11 +1222,13 @@ func (drw *deleteRewriter) Rewrite(
 		return nil, err
 	}
 
+	deleteAuthVarCache := make(map[string]string)
 	authRw := &authRewriter{
 		authVariables: customClaims.AuthVariables,
 		varGen:        drw.VarGen,
 		selector:      deleteAuthSelector,
 		parentVarName: m.MutatedType().Name() + "Root",
+		authVarCache:  &deleteAuthVarCache,
 	}
 	authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 
@@ -1201,6 +1256,7 @@ func (drw *deleteRewriter) Rewrite(
 	// If the mutation had the query field, then we also need to query the nodes which are going to
 	// be deleted before they are deleted. Let's add a query to do that.
 	if queryField := m.QueryField(); queryField != nil {
+		deleteQryAuthVarCache := make(map[string]string)
 		queryAuthRw := &authRewriter{
 			authVariables: customClaims.AuthVariables,
 			varGen:        drw.VarGen,
@@ -1209,6 +1265,7 @@ func (drw *deleteRewriter) Rewrite(
 			parentVarName: drw.VarGen.Next(queryField.Type(), "", "", false),
 			varName:       MutationQueryVar,
 			hasAuthRules:  hasAuthRules(queryField, authRw),
+			authVarCache:  &deleteQryAuthVarCache,
 		}
 
 		// these queries are responsible for querying the queryField
@@ -1293,7 +1350,11 @@ func addAuthSelector(t schema.Type) *schema.RuleNode {
 	if auth == nil || auth.Rules == nil {
 		return nil
 	}
-
+	// Cascade auth rules (CascadeBundlePred/CascadeInversePred) are fully enforced for add.
+	// The OR structure means an efficient arm (e.g. ownership via Workspace lookup) satisfies
+	// the check without requiring expensive IAMBinding var-chains to succeed in mutation context.
+	// Dgraph's fillVars gracefully returns empty UIDs for unresolvable var-blocks, failing only
+	// those specific OR arms — not the whole auth check.
 	return auth.Rules.Add
 }
 
@@ -1302,7 +1363,7 @@ func updateAuthSelector(t schema.Type) *schema.RuleNode {
 	if auth == nil || auth.Rules == nil {
 		return nil
 	}
-
+	// Same rationale as addAuthSelector — cascade auth is enforced for update mutations.
 	return auth.Rules.Update
 }
 
@@ -1311,7 +1372,6 @@ func deleteAuthSelector(t schema.Type) *schema.RuleNode {
 	if auth == nil || auth.Rules == nil {
 		return nil
 	}
-
 	return auth.Rules.Delete
 }
 
@@ -1356,14 +1416,65 @@ func getFieldsForExistsQuery(typ schema.Type) []*dql.GraphQuery {
 	}
 	selections := typ.GetOldValueFieldsForQuery()
 	children = append(children, oldValueSelectionToGraphQuery(selections)...)
+
+	// Also fetch @hasInverse(immutable: true) fields so the pre-mutation existence
+	// result carries the current edge target. This is used in rewriteObject to enforce
+	// the write-once constraint: if the edge is already set to a DIFFERENT node, the
+	// mutation is rejected. The field is aliased to its GraphQL name so OldValues is
+	// keyed by field name (e.g. "workspace"), matching the schema field lookup below.
+	//
+	// Skip any field already covered by the @oldValue selection above — the @oldValue
+	// DQL node always starts with a {uid} child, so the immutable-inverse check in
+	// rewriteObject can read the linked uid from OldValues without a duplicate entry.
+	// Emitting the same predicate twice in a DQL block causes Dgraph to reject the
+	// query with "X not allowed multiple times in same sub-query".
+	for _, fld := range typ.Fields() {
+		if !fld.IsImmutableInverse() {
+			continue
+		}
+		if _, coveredByOldValue := selections[fld.Name()]; coveredByOldValue {
+			// Already emitted by oldValueSelectionToGraphQuery above; uid is
+			// always the first child of that selection, so the immutable-inverse
+			// enforcement still reads the correct linked uid from OldValues.
+			continue
+		}
+		// For list-type inverse fields (one-to-many, e.g. JobBoard.hasPortalForm: [PortalForm]),
+		// the collision check in rewriteObject is skipped entirely — the immutability
+		// constraint is enforced from the scalar side (PortalForm.forJobBoard) only.
+		// Fetching the list here would pull an unbounded number of uids for no benefit,
+		// so skip it to avoid overfetching on large collections.
+		if fld.Type().ListType() != nil {
+			continue
+		}
+		children = append(children, &dql.GraphQuery{
+			Attr: fmt.Sprintf("%s : %s", fld.Name(), fld.DgraphPredicate()),
+			Children: []*dql.GraphQuery{
+				{Attr: "uid"},
+			},
+		})
+	}
 	return children
 }
 
 // oldValueSelectionToGraphQuery converts a map[string]*OldValueSelection into
 // a flat list of *dql.GraphQuery nodes, recursing into SubFields for edges.
+// When an edge selection carries First > 0 or a non-empty Sort, those are
+// applied to the corresponding DQL query node so the pre-query is bounded
+// and/or ordered before the result is captured as `before`.
 func oldValueSelectionToGraphQuery(selections map[string]*schema.OldValueSelection) []*dql.GraphQuery {
 	var result []*dql.GraphQuery
 	for gqlName, sel := range selections {
+		// ID field (type: ID!) — alias the DQL built-in `uid` to the GraphQL
+		// field name so the result carries `"id": "0x1abc"` alongside the
+		// always-present `"uid"` key. This makes before.owner.id accessible in
+		// CEL when the user declares `@oldValue(fields: ["id"])` or a path like
+		// `@oldValue(fields: ["owner.id"])`.
+		if sel.IsUID {
+			result = append(result, &dql.GraphQuery{
+				Attr: fmt.Sprintf("%s : uid", gqlName),
+			})
+			continue
+		}
 		if len(sel.SubFields) == 0 {
 			// Scalar leaf — alias GraphQL name to Dgraph predicate.
 			result = append(result, &dql.GraphQuery{
@@ -1375,10 +1486,32 @@ func oldValueSelectionToGraphQuery(selections map[string]*schema.OldValueSelecti
 			// `before.hasAddress` accessible in expr context.
 			subChildren := []*dql.GraphQuery{{Attr: "uid"}}
 			subChildren = append(subChildren, oldValueSelectionToGraphQuery(sel.SubFields)...)
-			result = append(result, &dql.GraphQuery{
+			gq := &dql.GraphQuery{
 				Attr:     fmt.Sprintf("%s : %s", gqlName, sel.DgraphPredicate),
 				Children: subChildren,
-			})
+			}
+			// Apply first (pagination limit).
+			if sel.First > 0 {
+				if gq.Args == nil {
+					gq.Args = make(map[string]string)
+				}
+				gq.Args["first"] = strconv.Itoa(sel.First)
+			}
+			// Apply sort. The sort value is either a plain field name (ascending)
+			// or prefixed with "-" (descending).
+			if sel.Sort != "" {
+				desc := false
+				pred := sel.Sort
+				if len(pred) > 0 && pred[0] == '-' {
+					desc = true
+					pred = pred[1:]
+				}
+				gq.Order = append(gq.Order, &pb.Order{
+					Attr: pred,
+					Desc: desc,
+				})
+			}
+			result = append(result, gq)
 		}
 	}
 	return result
@@ -1534,6 +1667,52 @@ func rewriteObject(
 					retErrors = append(retErrors, err)
 					return nil, upsertVar, retErrors
 				} else {
+					// @hasInverse(immutable: true) enforcement:
+					// The pre-mutation existence query fetched the target node's immutable
+					// inverse fields into OldValues (see getFieldsForExistsQuery).
+					// Check: if srcField is the forward side of an immutable inverse pair,
+					// the target node's inverse field must be unset OR already point to srcUID.
+					if srcField != nil && srcField.IsImmutableInverse() {
+						invField := srcField.Inverse()
+						if invField != nil {
+							// For list-type inverse fields (one-to-many, e.g. JobBoard.hasPortalForm: [PortalForm]),
+							// the immutability is enforced from the scalar side only (PortalForm.forJobBoard).
+							// A JobBoard can legitimately accumulate many PortalForms, so seeing an occupied
+							// list is not a collision. Only enforce for scalar (one-to-one) inverses.
+							if invField.Type().ListType() != nil {
+								// one-to-many: list inverse — no collision check here.
+								// The scalar side (PortalForm.forJobBoard) will enforce
+								// immutability when that PortalForm itself is the target.
+							} else {
+								// one-to-one: scalar inverse — check for reassignment.
+								oldValueMap := xidMetadata.GetOldValueMap()
+								if nodeData, ok := oldValueMap[variable]; ok {
+									if currentEdge, ok := nodeData[invField.Name()]; ok && currentEdge != nil {
+										// Extract the current target uid from the edge map.
+										var currentUID string
+										switch v := currentEdge.(type) {
+										case map[string]interface{}:
+											currentUID, _ = v["uid"].(string)
+										}
+										// Allow if the edge already points to srcUID (idempotent re-establish).
+										// srcUID may be a blank-node var like "uid(Group1)" for new nodes —
+										// these can never match an existing UID, so they always fail the check.
+										if currentUID != "" && currentUID != srcUID {
+											err := x.GqlErrorf(
+												"cannot link to %s %s — %s.%s is immutable "+
+													"and already points to %s",
+												srcField.Type().Name(), idVal.(string),
+												srcField.Type().Name(), invField.Name(),
+												currentUID,
+											)
+											retErrors = append(retErrors, err)
+											return nil, upsertVar, retErrors
+										}
+									}
+								}
+							}
+						}
+					}
 					return asIDReference(ctx, idVal, srcField, srcUID, varGen, mutationType == UpdateWithRemove), upsertVar, nil
 				}
 			} else {
@@ -1831,7 +2010,11 @@ func rewriteObject(
 				var fieldTypes []string
 				if val, ok := value.([]interface{}); ok {
 					for _, i := range val {
-						obj := i.(map[string]interface{})
+						obj, ok := i.(map[string]interface{})
+						if !ok {
+							// Scalar element (e.g. float64, string) — no existence queries needed.
+							continue
+						}
 						queries, typs, errs := existenceQueries(ctx, typ.Field(field.Name()).Type(), field, varGen, obj, xidMetadata)
 						if len(errs) > 0 {
 							// for _, err := range errs {
@@ -2675,12 +2858,14 @@ func addDelete(
 		return
 	}
 
+	nestedAuthVarCache := make(map[string]string)
 	newRw := &authRewriter{
 		authVariables: customClaims.AuthVariables,
 		varGen:        varGen,
 		varName:       targetVar,
 		selector:      updateAuthSelector,
 		parentVarName: qryFld.Type().Name() + "Root",
+		authVarCache:  &nestedAuthVarCache,
 	}
 	if rn := newRw.selector(qryFld.Type()); rn != nil {
 		newRw.hasAuthRules = true

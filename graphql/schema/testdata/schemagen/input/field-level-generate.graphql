@@ -1,0 +1,17 @@
+type Post {
+  id:        ID!
+  title:     String!
+
+  # Fully internal: clients cannot add, update, or query this field.
+  # @default sets it automatically on both add and update.
+  updatedAt: DateTime @generate(mutation: { add: false, update: false }, query: false)
+                      @default(add: { expr: "now()" }, update: { expr: "now()" })
+
+  # Write-once via @default on add; clients can read it but cannot update it.
+  createdAt: DateTime @generate(mutation: { update: false })
+                      @default(add: { expr: "now()" })
+
+  # Visible in add input (optional because of @default) and queryable, but excluded from update patch.
+  score: Int @generate(mutation: { update: false })
+             @default(add: { value: "0" })
+}

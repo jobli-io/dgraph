@@ -42,6 +42,9 @@ type authRewriter struct {
 	hasAuthRules bool
 	// `hasCascade` indicates if any of fields in the complete query hierarchy has cascade directive.
 	hasCascade bool
+	// `authVarCache` caches resolved auth variable mappings (predicate → DQL variable name)
+	// to avoid redundant variable generation across nested mutation rewriting passes.
+	authVarCache *map[string]string
 }
 
 // The struct is used as a return type for buildCommonAuthQueries function.

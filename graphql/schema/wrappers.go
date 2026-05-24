@@ -254,6 +254,10 @@ type Type interface {
 	FieldsInTransformEvaluationOrder(action string) []FieldDefinition
 	CascadeDeleteFields() []FieldDefinition
 	GetOldValueFieldsForQuery() map[string]*OldValueSelection
+	// PostValidateConfig returns the resolved @postValidate configuration for the
+	// given mutation action ("add" or "update"). Returns nil if no @postValidate
+	// directive is present on the type or if the directive has no expr for this action.
+	PostValidateConfig(action string) *PostValidateConfig
 	IDField() FieldDefinition
 	XIDFields() []FieldDefinition
 	InterfaceImplHasAuthRules() bool
@@ -294,6 +298,10 @@ type FieldDefinition interface {
 	HasSearchDirective() bool
 	HasOldValueDirective() bool
 	OldValueFields() []string
+	// OldValueFirst returns the `first` argument of @oldValue (0 = no limit).
+	OldValueFirst() int
+	// OldValueSort returns the `sort` argument of @oldValue ("" = no sort).
+	OldValueSort() string
 	HasEmbeddingDirective() bool
 	HasEmbeddingProvider() bool
 	EmbeddingSearchMetric() string
@@ -304,6 +312,16 @@ type FieldDefinition interface {
 	CascadeDeleteConfig() *CascadeDeleteFieldConfig
 	GenerateEmbedding(textToEmbed string) ([]float32, error)
 	Inverse() FieldDefinition
+	// IsImmutableInverse returns true if this field has @hasInverse(immutable: true),
+	// meaning the edge pair is write-once: settable on creation, never reassignable after.
+	IsImmutableInverse() bool
+	// IsGenerateAdd returns false when @generate(mutation: { add: false }) is declared on
+	// this field, hiding it from AddXxxInput. Internal mechanisms (@default, @transform)
+	// still write the field during mutation rewriting.
+	IsGenerateAdd() bool
+	// IsGenerateUpdate returns false when @generate(mutation: { update: false }) is declared
+	// on this field, hiding it from XxxPatch.
+	IsGenerateUpdate() bool
 	WithMemberType(string) FieldDefinition
 	// TODO - It might be possible to get rid of ForwardEdge and just use Inverse() always.
 	ForwardEdge() FieldDefinition
@@ -2405,9 +2423,18 @@ func (t *astType) FieldsInTransformEvaluationOrder(action string) []FieldDefinit
 // pre-fetched before a mutation to capture the "old value". SubFields is non-nil
 // when this is an edge field with a nested selection specified via the `fields`
 // argument of @oldValue.
+// First and Sort, when set, are applied to the DQL query node for this edge
+// so that only the first N entries (optionally ordered) are pre-fetched.
+// IsUID is true when the field is an ID (type: ID!) field, which maps to Dgraph's
+// uid rather than a stored predicate. The DQL generator emits `id : uid` so that
+// the result is keyed by the GraphQL field name instead of the internal "uid" key.
 type OldValueSelection struct {
 	DgraphPredicate string
 	SubFields       map[string]*OldValueSelection
+	First           int    // 0 = no limit
+	Sort            string // Dgraph predicate to order by; prefix with "-" for descending
+	// IsUID is true for ID (type: ID!) fields, which map to Dgraph's uid.
+	IsUID bool
 }
 
 // GetOldValueFieldsForQuery returns a tree of OldValueSelection descriptors for
@@ -2542,14 +2569,36 @@ func (t *astType) CascadeDeleteFields() []FieldDefinition {
 	return result
 }
 
+// PostValidateConfig holds the resolved configuration from a type-level @postValidate
+// directive for a specific mutation action ("add" or "update").
+type PostValidateConfig struct {
+	// Expr is the CEL expression to evaluate. The expression receives the variables:
+	//   nodes  - list of {uid, before, after} maps for the mutated nodes
+	//   auth   - JWT auth variables
+	//   action - "add" or "update"
+	Expr string
+	// Reason is the error message to surface when the expression evaluates to false.
+	Reason string
+}
+
 func (t *astType) GetOldValueFieldsForQuery() map[string]*OldValueSelection {
 	result := make(map[string]*OldValueSelection)
 	for _, field := range t.Fields() {
 		if !field.HasOldValueDirective() {
 			continue
 		}
+		// ID fields (type: ID!) map to Dgraph's uid, which has no stored predicate
+		// entry in the dgraphPredicate map (the map entry is intentionally absent).
+		// Emit IsUID:true so the DQL generator produces `id : uid` — aliasing the
+		// built-in uid to the GraphQL field name, making before.owner.id accessible.
+		if field.IsID() {
+			result[field.Name()] = &OldValueSelection{IsUID: true}
+			continue
+		}
 		sel := &OldValueSelection{
 			DgraphPredicate: field.DgraphPredicate(),
+			First:           field.OldValueFirst(),
+			Sort:            field.OldValueSort(),
 		}
 		paths := field.OldValueFields()
 		if len(paths) > 0 {
@@ -2558,6 +2607,48 @@ func (t *astType) GetOldValueFieldsForQuery() map[string]*OldValueSelection {
 		result[field.Name()] = sel
 	}
 	return result
+}
+
+// PostValidateConfig returns the resolved @postValidate directive configuration for the
+// given mutation action ("add" or "update"). Returns nil if the directive is absent,
+// or if no expression applies to this action.
+//
+// Resolution order for expr and reason:
+//  1. Operation-specific sub-arg (add/update) takes precedence.
+//  2. Top-level expr/reason applies to both operations.
+func (t *astType) PostValidateConfig(action string) *PostValidateConfig {
+	typeDef := t.inSchema.schema.Types[t.Name()]
+	if typeDef == nil {
+		return nil
+	}
+	dir := typeDef.Directives.ForName(postValidateDirective)
+	if dir == nil {
+		return nil
+	}
+
+	// Helper: resolve a named string arg with operation-specific precedence.
+	resolveArg := func(name string) string {
+		if opArg := dir.Arguments.ForName(action); opArg != nil {
+			if child := opArg.Value.Children.ForName(name); child != nil && child.Raw != "" {
+				return child.Raw
+			}
+		}
+		if rootArg := dir.Arguments.ForName(name); rootArg != nil && rootArg.Value.Raw != "" {
+			return rootArg.Value.Raw
+		}
+		return ""
+	}
+
+	exprStr := resolveArg("expr")
+	if exprStr == "" {
+		// No expr applies to this operation — skip.
+		return nil
+	}
+
+	return &PostValidateConfig{
+		Expr:   exprStr,
+		Reason: resolveArg("reason"),
+	}
 }
 
 // buildSelectionTree converts a list of dot-separated field paths into a nested
@@ -2581,6 +2672,14 @@ func buildSelectionTree(t Type, paths []string) map[string]*OldValueSelection {
 		fd := t.Field(head)
 		if fd == nil {
 			// Caught by validation — skip gracefully at runtime.
+			continue
+		}
+		// ID fields (type: ID!) map to Dgraph's uid, which has no stored predicate
+		// entry in the dgraphPredicate map (the map entry is intentionally absent).
+		// Emit IsUID:true so the DQL generator produces `id : uid` — aliasing the
+		// built-in uid to the GraphQL field name, making before.owner.id accessible.
+		if fd.IsID() {
+			result[head] = &OldValueSelection{IsUID: true}
 			continue
 		}
 		sel := &OldValueSelection{
@@ -3611,6 +3710,44 @@ func (fd *fieldDefinition) OldValueFields() []string {
 	return paths
 }
 
+// OldValueFirst returns the `first` argument of the @oldValue directive on this field.
+// Returns 0 when the argument is absent or non-positive (no limit).
+func (fd *fieldDefinition) OldValueFirst() int {
+	if fd.fieldDef == nil {
+		return 0
+	}
+	dir := fd.fieldDef.Directives.ForName(oldValueDirective)
+	if dir == nil {
+		return 0
+	}
+	arg := dir.Arguments.ForName("first")
+	if arg == nil || arg.Value.Raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(arg.Value.Raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+// OldValueSort returns the `sort` argument of the @oldValue directive on this field.
+// Returns "" when the argument is absent.
+func (fd *fieldDefinition) OldValueSort() string {
+	if fd.fieldDef == nil {
+		return ""
+	}
+	dir := fd.fieldDef.Directives.ForName(oldValueDirective)
+	if dir == nil {
+		return ""
+	}
+	arg := dir.Arguments.ForName("sort")
+	if arg == nil {
+		return ""
+	}
+	return arg.Value.Raw
+}
+
 func (fd *fieldDefinition) Type() Type {
 	if fd.fieldDef == nil {
 		return nil
@@ -3626,8 +3763,43 @@ func (fd *fieldDefinition) ParentType() Type {
 	return fd.parentType
 }
 
-func (fd *fieldDefinition) Inverse() FieldDefinition {
+// IsImmutableInverse returns true when this field's @hasInverse directive has
+// immutable: true. The edge is write-once: can be set on creation but cannot
+// be reassigned or removed after that via a GraphQL mutation.
+// Node-deletion cascade still clears the edge (existing Dgraph behaviour).
+func (fd *fieldDefinition) IsImmutableInverse() bool {
+	if fd.fieldDef == nil {
+		return false
+	}
+	dir := fd.fieldDef.Directives.ForName(inverseDirective)
+	if dir == nil {
+		return false
+	}
+	immArg := dir.Arguments.ForName(inverseImmutableArg)
+	return immArg != nil && immArg.Value.Raw == "true"
+}
 
+// IsGenerateAdd returns false when this field has @generate(mutation: { add: false }),
+// meaning it is hidden from AddXxxInput. Clients cannot supply the value on creation;
+// @default and @transform still inject values during mutation rewriting.
+func (fd *fieldDefinition) IsGenerateAdd() bool {
+	if fd.fieldDef == nil {
+		return true
+	}
+	return isFieldGenerateAdd(fd.fieldDef)
+}
+
+// IsGenerateUpdate returns false when this field has @generate(mutation: { update: false }),
+// meaning it is hidden from XxxPatch. Clients cannot set it via update mutations;
+// @default and @transform still inject values during mutation rewriting.
+func (fd *fieldDefinition) IsGenerateUpdate() bool {
+	if fd.fieldDef == nil {
+		return true
+	}
+	return isFieldGenerateUpdate(fd.fieldDef)
+}
+
+func (fd *fieldDefinition) Inverse() FieldDefinition {
 	if fd.fieldDef == nil {
 		return nil
 	}
@@ -4435,4 +4607,40 @@ func parseRequiredArgsFromGQLRequest(req string) (map[string]bool, error) {
 	args := req[strings.Index(req, "(")+1 : strings.LastIndex(req, ")")]
 	_, rf, err := parseBodyTemplate("{"+args+"}", false)
 	return rf, err
+}
+
+// NewPostValidateExprHelpers returns a map of helper functions that can be injected
+// into postValidateEnv for CEL expression evaluation in @postValidate directives.
+// This mirrors the helpers registered in NewExprEvaluationContext (used by @validate),
+// giving @postValidate the same set of built-in functions (callLambda, uuid, sha256,
+// generateEmbedding, diffMap, mapStringWithoutKeys, error).
+//
+// The function is exported so that resolve/mutation.go can access unexported schema-package
+// helpers (callLambda, hashSHA256, etc.) without violating Go's package boundaries.
+func NewPostValidateExprHelpers(auth AuthCtx) map[string]interface{} {
+	return map[string]interface{}{
+		"callLambda": func(lambdaName string, payload map[string]interface{}) (interface{}, error) {
+			return callLambda(x.RootNamespace, lambdaName, payload, auth.AccessJWT, auth.AuthHeaderKey, auth.AuthHeaderValue)
+		},
+		"uuid": func() string {
+			return uuid.NewString()
+		},
+		"sha256": func(input string) string {
+			return hashSHA256(input)
+		},
+		"generateEmbedding": func(provider string, modelName string, textToEmbed string, parameters map[string]any) []float32 {
+			vector, _ := generateEmbedding(provider, modelName, textToEmbed, parameters)
+			return vector
+		},
+		"diffMap": func(obj1, obj2 map[string]interface{}) (map[string]interface{}, error) {
+			return diffMapInterface(obj1, obj2)
+		},
+		"mapStringWithoutKeys": func(originalMap map[string]interface{}, keysToRemove []interface{}) map[string]interface{} {
+			return mapStringWithoutKeys(originalMap, keysToRemove)
+		},
+		"error": func(v interface{}) (interface{}, error) {
+			b, _ := json.Marshal(v)
+			return nil, errors.New(string(b))
+		},
+	}
 }

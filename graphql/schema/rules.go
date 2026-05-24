@@ -1967,34 +1967,59 @@ func cascadeDeleteDirectiveValidation(sch *ast.Schema,
 		}
 	}
 
-	// Cycle detection: build edge graph and check for cycles reachable from this field.
-	visited := map[string]bool{}
-	var detectCycle func(typeName string) bool
-	detectCycle = func(typeName string) bool {
-		if visited[typeName] {
-			return true
+	// Cycle detection: build edge graph and check for unbounded cycles reachable from this field.
+	//
+	// An unbounded cycle is dangerous because the cascade would recurse infinitely at runtime.
+	// A cycle is safe if every edge on the cycle-forming path has `depth` specified — the
+	// bounded edge terminates the walk after at most N hops.
+	//
+	// Algorithm: DFS over the @cascadeDelete edge graph. At each edge we stop (treat as a leaf)
+	// if the edge itself carries depth — that branch is bounded and cannot cause infinite recursion.
+	// We only report a cycle if we reach an already-visited type through unbounded edges.
+	hasBoundedDepth := false
+	if depthArg := dir.Arguments.ForName("depth"); depthArg != nil && depthArg.Value.Raw != "" {
+		if d, err := strconv.ParseInt(depthArg.Value.Raw, 10, 64); err == nil && d > 0 {
+			hasBoundedDepth = true
 		}
-		visited[typeName] = true
-		def := sch.Types[typeName]
-		if def == nil {
-			return false
-		}
-		for _, f := range def.Fields {
-			if f.Directives.ForName(cascadeDeleteDirective) == nil {
-				continue
-			}
-			if detectCycle(f.Type.Name()) {
+	}
+
+	if !hasBoundedDepth {
+		visited := map[string]bool{}
+		var detectCycle func(typeName string) bool
+		detectCycle = func(typeName string) bool {
+			if visited[typeName] {
 				return true
 			}
+			visited[typeName] = true
+			def := sch.Types[typeName]
+			if def == nil {
+				return false
+			}
+			for _, f := range def.Fields {
+				cdDir := f.Directives.ForName(cascadeDeleteDirective)
+				if cdDir == nil {
+					continue
+				}
+				// If this edge has its own depth bound it terminates the cascade — safe to skip.
+				if depthArg := cdDir.Arguments.ForName("depth"); depthArg != nil && depthArg.Value.Raw != "" {
+					if d, err := strconv.ParseInt(depthArg.Value.Raw, 10, 64); err == nil && d > 0 {
+						continue // bounded edge: won't recurse infinitely, stop here
+					}
+				}
+				if detectCycle(f.Type.Name()) {
+					return true
+				}
+			}
+			visited[typeName] = false
+			return false
 		}
-		visited[typeName] = false
-		return false
-	}
-	visited[typ.Name] = true
-	if detectCycle(fieldTypeName) {
-		return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
-			"Type %s; Field %s: @cascadeDelete forms a cycle through type %s",
-			typ.Name, field.Name, fieldTypeName)}
+		visited[typ.Name] = true
+		if detectCycle(fieldTypeName) {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+				"Type %s; Field %s: @cascadeDelete forms an unbounded cycle through type %s — "+
+					"add depth: N on the cycle-forming edge to bound the cascade",
+				typ.Name, field.Name, fieldTypeName)}
+		}
 	}
 
 	return nil

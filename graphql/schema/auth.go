@@ -40,6 +40,16 @@ type RuleNode struct {
 	DQLRule   *dql.GraphQuery
 	RBACRule  *RBACQuery
 	Variables ast.VariableDefinitionList
+	// CascadeEdgePred is the Dgraph predicate for the cascade traversal edge
+	// (e.g. "WorkspaceMember.inWorkspace"). Set by withCascadeEdgePred in
+	// cascade_auth_expand.go and read by the DQL auth rewriter.
+	CascadeEdgePred string
+	// CascadeEdgePredTypeFilter, when non-empty, causes the DQL rewriter to emit
+	// @filter(type(X)) on the edge traversal block for this leaf rule.
+	CascadeEdgePredTypeFilter string
+	// RuleTemplate is the raw (pre-substitution) GraphQL rule string on leaf nodes.
+	// Used by cascade_auth_expand.go to re-substitute child @authVariables.
+	RuleTemplate string
 }
 
 type AuthContainer struct {
@@ -373,6 +383,12 @@ func parseAuthNode(sch *schema, typ *ast.Definition, val *ast.Value) (*RuleNode,
 		var err error
 		if strings.HasPrefix(rule.Raw, RBACQueryPrefix) {
 			result.RBACRule, err = getRBACQuery(typ, rule.Raw)
+		} else if strings.Contains(rule.Raw, "{{") {
+			// Rule contains @authVariables template placeholders (e.g. {{ADM_PERMISSIONS}}).
+			// Passing these to the GraphQL parser produces "Expected Name, found {" because
+			// the double-brace syntax is not valid GraphQL. Store as RuleTemplate; the cascade
+			// auth expand pipeline will substitute the variables and re-parse before use.
+			result.RuleTemplate = rule.Raw
 		} else {
 			err = gqlValidateRule(sch, typ, rule.Raw, result)
 		}

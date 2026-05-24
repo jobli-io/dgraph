@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	inverseDirective = "hasInverse"
-	inverseArg       = "field"
+	inverseDirective    = "hasInverse"
+	inverseArg          = "field"
+	inverseImmutableArg = "immutable"
 
 	searchDirective = "search"
 	searchArgs      = "by"
@@ -28,21 +29,25 @@ const (
 	dgraphPredArg      = "pred"
 	embeddingDirective = "embedding"
 
-	idDirective             = "id"
-	idDirectiveInterfaceArg = "interface"
-	subscriptionDirective   = "withSubscription"
-	secretDirective         = "secret"
-	authDirective           = "auth"
-	customDirective         = "custom"
-	remoteDirective         = "remote" // types with this directive are not stored in Dgraph.
-	remoteResponseDirective = "remoteResponse"
-	lambdaDirective         = "lambda"
-	lambdaOnMutateDirective = "lambdaOnMutate"
-	defaultDirective        = "default"
-	transformDirective      = "transform"
-	validateDirective       = "validate"
-	oldValueDirective       = "oldValue"
-	cascadeDeleteDirective  = "cascadeDelete"
+	idDirective                = "id"
+	idDirectiveInterfaceArg    = "interface"
+	subscriptionDirective      = "withSubscription"
+	secretDirective            = "secret"
+	authDirective              = "auth"
+	customDirective            = "custom"
+	remoteDirective            = "remote" // types with this directive are not stored in Dgraph.
+	remoteResponseDirective    = "remoteResponse"
+	lambdaDirective            = "lambda"
+	lambdaOnMutateDirective    = "lambdaOnMutate"
+	defaultDirective           = "default"
+	transformDirective         = "transform"
+	validateDirective          = "validate"
+	postValidateDirective      = "postValidate"
+	oldValueDirective          = "oldValue"
+	cascadeDeleteDirective     = "cascadeDelete"
+	cascadeAuthDirective       = "cascadeAuth"
+	cascadeAuthPolicyDirective = "cascadeAuthPolicy"
+	authVariablesDirective     = "authVariables"
 
 	generateDirective       = "generate"
 	generateQueryArg        = "query"
@@ -208,6 +213,11 @@ input DgraphValidate {
 	reason: String
 }
 
+input DgraphPostValidate {
+	expr:   String
+	reason: String
+}
+
 input DgraphCascadeDelete {
 	onlyIfOrphan: Boolean
 	onlyIfOrphanScope: String
@@ -294,7 +304,7 @@ input GenerateMutationParams {
 }
 `
 	directiveDefs = `
-directive @hasInverse(field: String!) on FIELD_DEFINITION
+directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
 directive @search(by: [String!]) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
@@ -302,16 +312,26 @@ directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(value: String, expr: String, evaluationOrder: Int, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
 directive @transform(expr: String, evaluationOrder: Int, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
 directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int, authMode: String) on FIELD_DEFINITION
+input AuthVariable { key: String! value: [String!]! }
+directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
+enum CascadeAuthVariableContext { self parent adaptive }
+enum CascadeAuthOperation { query add update delete }
+input InterfaceMergePolicy { interface: String! merge: String! operations: [String!] }
+directive @cascadeAuth(operations: [CascadeAuthOperation!], authMode: String, depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, when: String) on FIELD_DEFINITION
+directive @cascadeAuthPolicy(aggregation: String, includeSelf: Boolean, skipBidirectional: Boolean) on OBJECT | INTERFACE
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
-directive @oldValue(fields: [String!]) on FIELD_DEFINITION
+directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
+directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @auth(
+	mergeInto: String
 	password: AuthRule
 	query: AuthRule,
 	add: AuthRule,
 	update: AuthRule,
-	delete: AuthRule) on OBJECT | INTERFACE
+	delete: AuthRule,
+	interfacePolicy: [InterfaceMergePolicy!]) on OBJECT | INTERFACE
 directive @custom(http: CustomHTTP, dql: String) on FIELD_DEFINITION
 directive @remote on OBJECT | INTERFACE | UNION | INPUT_OBJECT | ENUM
 directive @remoteResponse(name: String) on FIELD_DEFINITION
@@ -322,7 +342,7 @@ directive @cacheControl(maxAge: Int!) on QUERY
 directive @generate(
 	query: GenerateQueryParams,
 	mutation: GenerateMutationParams,
-	subscription: Boolean) on OBJECT | INTERFACE
+	subscription: Boolean) on OBJECT | INTERFACE | FIELD_DEFINITION
 `
 	// see: https://www.apollographql.com/docs/federation/gateway/#custom-directive-support
 	// So, we should only add type system directives here.
@@ -331,7 +351,7 @@ directive @generate(
 	// See: https://github.com/apollographql/apollo-server/issues/3655
 	// So, such directives have to be missed too.
 	apolloSupportedDirectiveDefs = `
-directive @hasInverse(field: String!) on FIELD_DEFINITION
+directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
 directive @search(by: [String!]) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
@@ -340,7 +360,8 @@ directive @default(value: String, expr: String, evaluationOrder: Int, add: Dgrap
 directive @transform(expr: String, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
 directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int) on FIELD_DEFINITION
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
-directive @oldValue(fields: [String!]) on FIELD_DEFINITION
+directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
+directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @remote on OBJECT | INTERFACE | UNION | INPUT_OBJECT | ENUM
@@ -605,31 +626,35 @@ func ValidatorNoOp(
 }
 
 var directiveValidators = map[string]directiveValidator{
-	inverseDirective:        hasInverseValidation,
-	searchDirective:         searchValidation,
-	embeddingDirective:      embeddingValidation,
-	dgraphDirective:         dgraphDirectiveValidation,
-	idDirective:             idValidation,
-	subscriptionDirective:   ValidatorNoOp,
-	secretDirective:         passwordValidation,
-	authDirective:           ValidatorNoOp, // Just to get it printed into generated schema
-	customDirective:         customDirectiveValidation,
-	remoteDirective:         ValidatorNoOp,
-	deprecatedDirective:     ValidatorNoOp,
-	lambdaDirective:         lambdaDirectiveValidation,
-	defaultDirective:        defaultDirectiveValidation,
-	transformDirective:      transformDirectiveValidation,
-	validateDirective:       validateDirectiveValidation,
-	oldValueDirective:       oldValueDirectiveValidation,
-	cascadeDeleteDirective:  cascadeDeleteDirectiveValidation,
-	lambdaOnMutateDirective: ValidatorNoOp,
-	generateDirective:       ValidatorNoOp,
-	apolloKeyDirective:      ValidatorNoOp,
-	apolloExtendsDirective:  ValidatorNoOp,
-	apolloExternalDirective: apolloExternalValidation,
-	apolloRequiresDirective: apolloRequiresValidation,
-	apolloProvidesDirective: apolloProvidesValidation,
-	remoteResponseDirective: remoteResponseValidation,
+	inverseDirective:           hasInverseValidation,
+	searchDirective:            searchValidation,
+	embeddingDirective:         embeddingValidation,
+	dgraphDirective:            dgraphDirectiveValidation,
+	idDirective:                idValidation,
+	subscriptionDirective:      ValidatorNoOp,
+	secretDirective:            passwordValidation,
+	authDirective:              ValidatorNoOp, // Just to get it printed into generated schema
+	customDirective:            customDirectiveValidation,
+	remoteDirective:            ValidatorNoOp,
+	deprecatedDirective:        ValidatorNoOp,
+	lambdaDirective:            lambdaDirectiveValidation,
+	defaultDirective:           defaultDirectiveValidation,
+	transformDirective:         transformDirectiveValidation,
+	validateDirective:          validateDirectiveValidation,
+	postValidateDirective:      ValidatorNoOp, // type-level; handled by typeValidations
+	oldValueDirective:          oldValueDirectiveValidation,
+	cascadeDeleteDirective:     cascadeDeleteDirectiveValidation,
+	cascadeAuthDirective:       cascadeAuthDirectiveValidation,
+	authVariablesDirective:     ValidatorNoOp,
+	cascadeAuthPolicyDirective: ValidatorNoOp,
+	lambdaOnMutateDirective:    ValidatorNoOp,
+	generateDirective:          ValidatorNoOp,
+	apolloKeyDirective:         ValidatorNoOp,
+	apolloExtendsDirective:     ValidatorNoOp,
+	apolloExternalDirective:    apolloExternalValidation,
+	apolloRequiresDirective:    apolloRequiresValidation,
+	apolloProvidesDirective:    apolloProvidesValidation,
+	remoteResponseDirective:    remoteResponseValidation,
 }
 
 // directiveLocationMap stores the directives and their locations for the ones which can be
@@ -645,16 +670,19 @@ var directiveLocationMap = map[string]map[ast.DefinitionKind]bool{
 	customDirective:       nil,
 	remoteDirective: {ast.Object: true, ast.Interface: true, ast.Union: true,
 		ast.InputObject: true, ast.Enum: true},
-	lambdaDirective:         nil,
-	lambdaOnMutateDirective: {ast.Object: true, ast.Interface: true},
-	generateDirective:       {ast.Object: true, ast.Interface: true},
-	apolloKeyDirective:      {ast.Object: true, ast.Interface: true},
-	apolloExtendsDirective:  {ast.Object: true, ast.Interface: true},
-	apolloExternalDirective: nil,
-	apolloRequiresDirective: nil,
-	apolloProvidesDirective: nil,
-	remoteResponseDirective: nil,
-	cascadeDirective:        nil,
+	lambdaDirective:            nil,
+	lambdaOnMutateDirective:    {ast.Object: true, ast.Interface: true},
+	postValidateDirective:      {ast.Object: true, ast.Interface: true},
+	cascadeAuthPolicyDirective: {ast.Object: true, ast.Interface: true},
+	authVariablesDirective:     {ast.Object: true, ast.Interface: true},
+	generateDirective:          {ast.Object: true, ast.Interface: true},
+	apolloKeyDirective:         {ast.Object: true, ast.Interface: true},
+	apolloExtendsDirective:     {ast.Object: true, ast.Interface: true},
+	apolloExternalDirective:    nil,
+	apolloRequiresDirective:    nil,
+	apolloProvidesDirective:    nil,
+	remoteResponseDirective:    nil,
+	cascadeDirective:           nil,
 }
 
 // Struct to store parameters of @generate directive
@@ -2612,6 +2640,35 @@ func getPatchFields(schema *ast.Schema, defn *ast.Definition, providesTypeMap ma
 			continue
 		}
 
+		// Fields with @hasInverse(immutable: true) must not appear in the patch type.
+		// They are write-once: settable on creation, permanently fixed thereafter.
+		// Excluding from XxxPatch covers both `set` and `remove` clauses since both use
+		// the same patch type.
+		if dir := fld.Directives.ForName(inverseDirective); dir != nil {
+			if immArg := dir.Arguments.ForName(inverseImmutableArg); immArg != nil && immArg.Value.Raw == "true" {
+				continue
+			}
+		}
+
+		// Auto-propagation: if this field is the inverse of another field that carries
+		// @hasInverse(immutable: true), then this side is also effectively immutable.
+		// E.g. House.owner has @hasInverse(field: "house", immutable: true) →
+		// Owner.house is the inverse and must also be excluded from OwnerPatch.
+		if invDir := fld.Directives.ForName(inverseDirective); invDir != nil {
+			if invField := invDir.Arguments.ForName("field"); invField != nil {
+				invTypeDef := schema.Types[fld.Type.Name()]
+				if invTypeDef != nil {
+					if invFld := invTypeDef.Fields.ForName(invField.Value.Raw); invFld != nil {
+						if invFldDir := invFld.Directives.ForName(inverseDirective); invFldDir != nil {
+							if immArg := invFldDir.Arguments.ForName(inverseImmutableArg); immArg != nil && immArg.Value.Raw == "true" {
+								continue
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// Even if a field isn't referenceable with an ID or XID, it can still go into an
 		// input/update type because it can be created (but not linked by reference) as
 		// part of the mutation.
@@ -2620,6 +2677,13 @@ func getPatchFields(schema *ast.Schema, defn *ast.Definition, providesTypeMap ma
 		// interfaces - only the types that implement them
 		if schema.Types[fld.Type.Name()].Kind == ast.Interface &&
 			(!hasID(schema.Types[fld.Type.Name()]) && !hasXID(schema.Types[fld.Type.Name()])) {
+			continue
+		}
+
+		// Fields with field-level @generate(mutation: { update: false }) must not appear
+		// in the patch type so clients cannot set them in update mutations.
+		// Internal mechanisms (@default, @transform) still write to these fields at runtime.
+		if !isFieldGenerateUpdate(fld) {
 			continue
 		}
 
@@ -2669,6 +2733,14 @@ func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
 			continue
 		}
 
+		// Fields with field-level @generate(mutation: { add: false }) must not appear
+		// in AddXxxInput so clients cannot supply them on creation.
+		// Internal mechanisms (@default, @transform) still write to these fields at runtime —
+		// @default fires when obj[field] == nil, which is always true here.
+		if !isFieldGenerateAdd(fld) {
+			continue
+		}
+
 		// if the field has a @default(add) value it is optional in add input
 		// an error value also indicates that the default value is provided but might encounter a runtime error.
 		var field = createField(schema, fld)
@@ -2684,6 +2756,89 @@ func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
 		return fldList
 	}
 	return append(fldList, pd)
+}
+
+// isFieldGenerateAdd reports whether the field is allowed to appear in AddXxxInput.
+// Returns false only when @generate(mutation: { add: false }) is explicitly declared on
+// the field definition. Returns true when the directive is absent or add is true/omitted.
+// Only the mutation.add flag is honoured at field level; query/subscription args are ignored.
+func isFieldGenerateAdd(fld *ast.FieldDefinition) bool {
+	return fieldGenerateMutationFlag(fld, generateAddField)
+}
+
+// isFieldGenerateUpdate reports whether the field is allowed to appear in XxxPatch.
+// Returns false only when @generate(mutation: { update: false }) is explicitly declared.
+func isFieldGenerateUpdate(fld *ast.FieldDefinition) bool {
+	return fieldGenerateMutationFlag(fld, generateUpdateField)
+}
+
+// fieldGenerateMutationFlag is the shared implementation for isFieldGenerateAdd /
+// isFieldGenerateUpdate. It reads @generate(mutation: { <flagName>: Boolean }) from
+// a field definition and returns the boolean value (default: true when absent).
+func fieldGenerateMutationFlag(fld *ast.FieldDefinition, flagName string) bool {
+	dir := fld.Directives.ForName(generateDirective)
+	if dir == nil {
+		return true
+	}
+	mutArg := dir.Arguments.ForName(generateMutationArg)
+	if mutArg == nil {
+		return true
+	}
+	flagFld := mutArg.Value.Children.ForName(flagName)
+	if flagFld == nil {
+		return true
+	}
+	val, err := flagFld.Value(nil)
+	if err != nil {
+		return true // on parse error, be permissive
+	}
+	boolVal, ok := val.(bool)
+	if !ok {
+		return true
+	}
+	return boolVal
+}
+
+// isFieldGenerateQuery reports whether the field is allowed to appear in query results
+// (i.e., in the output type visible to GraphQL clients).
+// Returns false only when @generate(query: false) is explicitly declared on the field.
+// When false, the field is stripped from defn.Fields after mutation inputs are generated,
+// so it becomes invisible to clients but remains writable by @default and @transform.
+func isFieldGenerateQuery(fld *ast.FieldDefinition) bool {
+	dir := fld.Directives.ForName(generateDirective)
+	if dir == nil {
+		return true
+	}
+	queryArg := dir.Arguments.ForName(generateQueryArg)
+	if queryArg == nil {
+		return true
+	}
+	// At field level, query: Boolean (not GenerateQueryParams) — check raw value directly.
+	val, err := queryArg.Value.Value(nil)
+	if err != nil {
+		return true
+	}
+	boolVal, ok := val.(bool)
+	if !ok {
+		return true
+	}
+	return boolVal
+}
+
+// stripQueryHiddenFields removes fields with @generate(query: false) from defn.Fields.
+// This is called in completeSchema after mutation input types have been generated
+// (addInputType, addPatchType, addUpdateType — which all read defn.Fields), and before
+// query-facing types are built (addFieldFilters, addQueries, addTypeOrderable).
+// After stripping, query results, filters, and orderable enums no longer include these fields,
+// making them completely invisible to GraphQL clients.
+func stripQueryHiddenFields(defn *ast.Definition) {
+	filtered := defn.Fields[:0]
+	for _, fld := range defn.Fields {
+		if isFieldGenerateQuery(fld) {
+			filtered = append(filtered, fld)
+		}
+	}
+	defn.Fields = filtered
 }
 
 // This function check if given gql field has multiple language tags

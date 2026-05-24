@@ -1,0 +1,440 @@
+#######################
+# Input Schema
+#######################
+
+type Post {
+	id: ID!
+	title: String!
+	createdAt: DateTime @generate(mutation: {update:false}) @default(add: {expr:"now()"})
+	score: Int @generate(mutation: {update:false}) @default(add: {value:"0"})
+}
+
+#######################
+# Extended Definitions
+#######################
+
+"""
+The Int64 scalar type represents a signed 64‐bit numeric non‐fractional value.
+Int64 can represent values in range [-(2^63),(2^63 - 1)].
+"""
+scalar Int64
+
+"""
+The DateTime scalar type represents date and time as a string in RFC3339 format.
+For example: "1985-04-12T23:20:50.52Z" represents 20 mins 50.52 secs after the 23rd hour of Apr 12th 1985 in UTC.
+"""
+scalar DateTime
+
+input IntRange{
+	min: Int!
+	max: Int!
+}
+
+input FloatRange{
+	min: Float!
+	max: Float!
+}
+
+input Int64Range{
+	min: Int64!
+	max: Int64!
+}
+
+input DateTimeRange{
+	min: DateTime!
+	max: DateTime!
+}
+
+input StringRange{
+	min: String!
+	max: String!
+}
+
+enum DgraphIndex {
+	int
+	int64
+	float
+	bool
+	hash
+	exact
+	term
+	fulltext
+	trigram
+	regexp
+	year
+	month
+	day
+	hour
+	geo
+	hnsw
+}
+
+input AuthRule {
+	and: [AuthRule]
+	or: [AuthRule]
+	not: AuthRule
+	rule: String
+}
+
+enum HTTPMethod {
+	GET
+	POST
+	PUT
+	PATCH
+	DELETE
+}
+
+enum Mode {
+	BATCH
+	SINGLE
+}
+
+input CustomHTTP {
+	url: String!
+	method: HTTPMethod!
+	body: String
+	graphql: String
+	mode: Mode
+	forwardHeaders: [String!]
+	secretHeaders: [String!]
+	introspectionHeaders: [String!]
+	skipIntrospection: Boolean
+}
+
+input DgraphDefault {
+	value: String
+	expr: String
+	evaluationOrder: Int
+}
+
+input DgraphTransform {
+	expr: String
+	evaluationOrder: Int
+}
+
+input DgraphValidate {
+	rule: String
+	expr: String
+	reason: String
+}
+
+input DgraphPostValidate {
+	expr:   String
+	reason: String
+}
+
+input DgraphCascadeDelete {
+	onlyIfOrphan: Boolean
+	onlyIfOrphanScope: String
+	filter: String
+	depth: Int
+}
+
+type Point {
+	longitude: Float!
+	latitude: Float!
+}
+
+input PointRef {
+	longitude: Float!
+	latitude: Float!
+}
+
+input NearFilter {
+	distance: Float!
+	coordinate: PointRef!
+}
+
+input PointGeoFilter {
+	near: NearFilter
+	within: WithinFilter
+}
+
+type PointList {
+	points: [Point!]!
+}
+
+input PointListRef {
+	points: [PointRef!]!
+}
+
+type Polygon {
+	coordinates: [PointList!]!
+}
+
+input PolygonRef {
+	coordinates: [PointListRef!]!
+}
+
+type MultiPolygon {
+	polygons: [Polygon!]!
+}
+
+input MultiPolygonRef {
+	polygons: [PolygonRef!]!
+}
+
+input WithinFilter {
+	polygon: PolygonRef!
+}
+
+input ContainsFilter {
+	point: PointRef
+	polygon: PolygonRef
+}
+
+input IntersectsFilter {
+	polygon: PolygonRef
+	multiPolygon: MultiPolygonRef
+}
+
+input PolygonGeoFilter {
+	near: NearFilter
+	within: WithinFilter
+	contains: ContainsFilter
+	intersects: IntersectsFilter
+}
+
+input GenerateQueryParams {
+	get: Boolean
+	query: Boolean
+	password: Boolean
+	aggregate: Boolean
+}
+
+input GenerateMutationParams {
+	add: Boolean
+	update: Boolean
+	delete: Boolean
+}
+
+directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
+directive @search(by: [String!]) on FIELD_DEFINITION
+directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
+directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
+directive @id(interface: Boolean) on FIELD_DEFINITION
+directive @default(value: String, expr: String, evaluationOrder: Int, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
+directive @transform(expr: String, evaluationOrder: Int, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
+directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int, authMode: String = "skip") on FIELD_DEFINITION
+input AuthVariable { key: String! value: [String!]! }
+directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
+input InterfaceMergePolicy { interface: String! merge: String! operations: [String!] }
+enum CascadeAuthVariableContext { self parent adaptive }
+enum CascadeAuthOperation { query add update delete }
+directive @cascadeAuth(operations: [CascadeAuthOperation!], authMode: String = "skip", depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, when: String) on FIELD_DEFINITION
+directive @cascadeAuthPolicy(aggregation: String, includeSelf: Boolean, skipBidirectional: Boolean) on OBJECT | INTERFACE
+directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
+directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
+directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
+directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
+directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
+directive @auth(
+	mergeInto:       String
+	password: AuthRule
+	query: AuthRule,
+	add: AuthRule,
+	update: AuthRule,
+	delete: AuthRule,
+	interfacePolicy: [InterfaceMergePolicy!]) on OBJECT | INTERFACE
+directive @custom(http: CustomHTTP, dql: String) on FIELD_DEFINITION
+directive @remote on OBJECT | INTERFACE | UNION | INPUT_OBJECT | ENUM
+directive @remoteResponse(name: String) on FIELD_DEFINITION
+directive @cascade(fields: [String]) on FIELD
+directive @lambda on FIELD_DEFINITION
+directive @lambdaOnMutate(add: Boolean, update: Boolean, delete: Boolean) on OBJECT | INTERFACE
+directive @cacheControl(maxAge: Int!) on QUERY
+directive @generate(
+	query: GenerateQueryParams,
+	mutation: GenerateMutationParams,
+	subscription: Boolean) on OBJECT | INTERFACE | FIELD_DEFINITION
+
+input IntFilter {
+	eq: Int
+	in: [Int]
+	le: Int
+	lt: Int
+	ge: Int
+	gt: Int
+	between: IntRange
+}
+
+input Int64Filter {
+	eq: Int64
+	in: [Int64]
+	le: Int64
+	lt: Int64
+	ge: Int64
+	gt: Int64
+	between: Int64Range
+}
+
+input FloatFilter {
+	eq: Float
+	in: [Float]
+	le: Float
+	lt: Float
+	ge: Float
+	gt: Float
+	between: FloatRange
+}
+
+input DateTimeFilter {
+	eq: DateTime
+	in: [DateTime]
+	le: DateTime
+	lt: DateTime
+	ge: DateTime
+	gt: DateTime
+	between: DateTimeRange
+}
+
+input StringTermFilter {
+	allofterms: String
+	anyofterms: String
+}
+
+input StringRegExpFilter {
+	regexp: String
+}
+
+input StringFullTextFilter {
+	alloftext: String
+	anyoftext: String
+}
+
+input StringExactFilter {
+	eq: String
+	in: [String]
+	le: String
+	lt: String
+	ge: String
+	gt: String
+	between: StringRange
+}
+
+input StringHashFilter {
+	eq: String
+	in: [String]
+}
+
+input SimilarToVector {
+	vector: [Float!]!
+	topK: Int
+	distance: Float
+}
+
+input SimilarToText {
+	text: String!
+	topK: Int
+	distance: Float
+}
+
+#######################
+# Generated Types
+#######################
+
+type AddPostPayload {
+	post(filter: PostFilter, order: PostOrder, first: Int, offset: Int): [Post]
+	numUids: Int
+}
+
+type DeletePostPayload {
+	post(filter: PostFilter, order: PostOrder, first: Int, offset: Int): [Post]
+	msg: String
+	numUids: Int
+}
+
+type PostAggregateResult {
+	count: Int
+	titleMin: String
+	titleMax: String
+	createdAtMin: DateTime
+	createdAtMax: DateTime
+	scoreMin: Int
+	scoreMax: Int
+	scoreSum: Int
+	scoreAvg: Float
+}
+
+type UpdatePostPayload {
+	post(filter: PostFilter, order: PostOrder, first: Int, offset: Int): [Post]
+	numUids: Int
+}
+
+#######################
+# Generated Enums
+#######################
+
+enum PostHasFilter {
+	title
+	createdAt
+	score
+}
+
+enum PostOrderable {
+	title
+	createdAt
+	score
+}
+
+#######################
+# Generated Inputs
+#######################
+
+input AddPostInput {
+	title: String!
+	createdAt: DateTime
+	score: Int
+}
+
+input PostFilter {
+	id: [ID!]
+	has: [PostHasFilter]
+	and: [PostFilter]
+	or: [PostFilter]
+	not: PostFilter
+}
+
+input PostOrder {
+	asc: PostOrderable
+	desc: PostOrderable
+	then: PostOrder
+}
+
+input PostPatch {
+	title: String
+}
+
+input PostRef {
+	id: ID
+	title: String
+	createdAt: DateTime
+	score: Int
+}
+
+input UpdatePostInput {
+	filter: PostFilter!
+	set: PostPatch
+	remove: PostPatch
+}
+
+#######################
+# Generated Query
+#######################
+
+type Query {
+	getPost(id: ID!): Post
+	queryPost(filter: PostFilter, order: PostOrder, first: Int, offset: Int): [Post]
+	aggregatePost(filter: PostFilter): PostAggregateResult
+}
+
+#######################
+# Generated Mutations
+#######################
+
+type Mutation {
+	addPost(input: [AddPostInput!]!): AddPostPayload
+	updatePost(input: UpdatePostInput!): UpdatePostPayload
+	deletePost(filter: PostFilter!): DeletePostPayload
+}
+

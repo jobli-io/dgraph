@@ -83,6 +83,11 @@ func (mrw *addGroupRewriter) SetOldValue(
 	return
 }
 
+// GetOldValueMap returns the variableOldValueMap populated during existence queries.
+func (mrw *addGroupRewriter) GetOldValueMap() map[string]map[string]interface{} {
+	return ((*resolve.AddRewriter)(mrw)).GetOldValueMap()
+}
+
 // removeDuplicateRuleRef removes duplicate rules based on predicate value.
 // for duplicate rules, only the last rule with duplicate predicate name is preserved.
 func removeDuplicateRuleRef(rules []interface{}) ([]interface{}, x.GqlErrorList) {

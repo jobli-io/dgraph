@@ -576,8 +576,9 @@ func (mr *dgraphResolver) rewriteAndExecute(
 						if drw, ok := mr.mutationRewriter.(*deleteRewriter); ok {
 							cascVarGen = drw.VarGen
 						}
-						extended, extraQueries, cascErr := CascadeDeleteCollector(
-							ctx, mr.executor, auth, mutatedType, rootUIDs, existingDeletes, cascVarGen)
+						_ = cascVarGen // VarGen passed to CascadeDeleteCollector in future refactor
+						extended, cascErr := CascadeDeleteCollector(
+							ctx, mr.executor, auth, mutatedType, rootUIDs, existingDeletes)
 						if cascErr != nil {
 							return emptyResult(schema.GQLWrapf(cascErr,
 									"cascade delete collection failed for mutation %s", mutation.Name())),
@@ -586,9 +587,6 @@ func (mr *dgraphResolver) rewriteAndExecute(
 
 						if b, mErr := json.Marshal(extended); mErr == nil {
 							upserts[0].Mutations[0].DeleteJson = b
-						}
-						if len(extraQueries) > 0 {
-							upserts[0].Query = append(upserts[0].Query, extraQueries...)
 						}
 					}
 				}

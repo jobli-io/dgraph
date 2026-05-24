@@ -178,6 +178,11 @@ func (urw *updateGroupRewriter) SetOldValue(
 	return
 }
 
+// GetOldValueMap returns the variableOldValueMap populated during existence queries.
+func (urw *updateGroupRewriter) GetOldValueMap() map[string]map[string]interface{} {
+	return ((*resolve.UpdateRewriter)(urw)).GetOldValueMap()
+}
+
 // addAclRuleQuery adds a *dql.GraphQuery to upsertQuery.Children to query a rule inside a group
 // based on its predicate value.
 func addAclRuleQuery(upsertQuery []*dql.GraphQuery, predicate, variable string) {
