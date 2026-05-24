@@ -369,22 +369,22 @@ func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string][]string, 
 			}
 			return &RuleNode{RBACRule: rbac, RuleTemplate: rn.RuleTemplate}
 		}
-		// Attempt GraphQL parse using the strict type-validating parser first.
-		// This sets node.Rule (the compiled query) via gqlValidateRule.
+		// Attempt GraphQL parse. gqlValidateRule populates ast.Field.Definition on
+		// every field via validator.Validate — this is required so that ArgumentMap()
+		// can coerce argument types at query time. Rules that bypass this step would
+		// produce ast.Field nodes with nil Definition, causing a panic in
+		// f.field.ArgumentMap() during query rewriting.
+		// If gqlValidateRule fails (e.g. the substituted enum values don't pass the
+		// strict validator, or the type's query name doesn't match), leave rn.Rule==nil.
+		// The resubstituteRuleNode fallback (rn.Rule != nil) handles this correctly:
+		// it skips re-substitution and returns nil for this cascade arm, which is safe.
 		node := &RuleNode{RuleTemplate: rn.RuleTemplate}
 		typ := sch.schema.Types[typeName]
 		if typ == nil {
 			return rn
 		}
 		if err := gqlValidateRule(sch, typ, substituted, node); err != nil {
-			// gqlValidateRule enforces queryTypeName and full schema validation.
-			// This can fail when the substituted enum values don't pass the
-			// validator (e.g. enum-typed "in:" filter) or when the type has a
-			// non-standard query name. Fall back to the lenient cascade parser
-			// (gqlParseRuleForCascade) which just parses syntax.
-			if cerr := gqlParseRuleForCascade(sch, substituted, node); cerr != nil {
-				return rn // both parsers failed — leave as-is
-			}
+			return rn // leave as-is; resubstituteRuleNode will handle the nil Rule case
 		}
 		return node
 	}

@@ -1382,6 +1382,11 @@ func (authRw *authRewriter) rewriteRuleNode(
 		}
 
 		qry := rn.Rule.AuthFor(authRw.authVariables)
+		if qry == nil {
+			// AuthFor returned nil — rule cannot be evaluated (e.g. required JWT
+			// variable missing). Skip this cascade arm.
+			return nil, nil
+		}
 
 		// Build the authority var query. rewriteAsQuery sets func:uid(parentVar)
 		// for auth queries; for cascade authority vars we want func:type(AuthorityType)
