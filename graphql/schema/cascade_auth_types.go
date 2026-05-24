@@ -91,6 +91,14 @@ func (t *astType) CascadeAuthPolicyConfig() CascadeAuthPolicyConfig {
 
 // AuthVariables returns the @authVariables substitution map for this type,
 // keyed by variable name with a list of allowed values.
+//
+// The @authVariables directive has shape:
+//
+//	@authVariables(vars: [AuthVariable!]!)
+//	input AuthVariable { key: String! value: [String!]! }
+//
+// So the directive has one argument named "vars" whose value is a list of
+// AuthVariable input objects, each with "key" and "value" children.
 func (t *astType) AuthVariables() map[string][]string {
 	def := t.inSchema.schema.Types[t.typ.Name()]
 	if def == nil {
@@ -100,18 +108,42 @@ func (t *astType) AuthVariables() map[string][]string {
 	if dir == nil {
 		return nil
 	}
+	varsArg := dir.Arguments.ForName("vars")
+	if varsArg == nil || varsArg.Value == nil {
+		return nil
+	}
 	result := make(map[string][]string)
-	for _, arg := range dir.Arguments {
-		if arg.Value == nil {
+	// varsArg.Value is a list literal; each child is an AuthVariable object literal.
+	for _, item := range varsArg.Value.Children {
+		if item.Value == nil {
 			continue
 		}
+		// item.Value is an object literal with fields "key" and "value".
+		var key string
 		var vals []string
-		for _, child := range arg.Value.Children {
-			if child.Value != nil {
-				vals = append(vals, child.Value.Raw)
+		for _, field := range item.Value.Children {
+			switch field.Name {
+			case "key":
+				if field.Value != nil {
+					key = field.Value.Raw
+				}
+			case "value":
+				if field.Value != nil {
+					// field.Value is a list literal of strings.
+					for _, v := range field.Value.Children {
+						if v.Value != nil {
+							vals = append(vals, v.Value.Raw)
+						}
+					}
+				}
 			}
 		}
-		result[arg.Name] = vals
+		if key != "" {
+			result[key] = vals
+		}
+	}
+	if len(result) == 0 {
+		return nil
 	}
 	return result
 }
