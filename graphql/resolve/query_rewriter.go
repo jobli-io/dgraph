@@ -50,21 +50,6 @@ type authRewriter struct {
 	// Initialized once at the root Rewrite() call and shared (by reference) across all
 	// derived authRewriter instances within the same request.
 	cascadeVarCache map[*schema.RuleNode]string
-	// `authorityAuthCache` deduplicates the authority type's own @auth sub-var blocks
-	// across multiple child types that cascade through the same authority in one request.
-	//
-	// Different child types (JobAd, JobBoard, PortalForm ...) all cascading through
-	// Workspace generate identical Workspace @auth sub-var DQL blocks. Only the first
-	// call emits the sub-var blocks; subsequent calls reuse the cached filter, which
-	// references the already-emitted sub-var var names.
-	//
-	// Key: *schema.RuleNode of queryAuthSelector(authorityType) — pointer equality means
-	//   the same compiled @auth rule for the authority type.
-	// Value: *dql.FilterTree referencing the sub-var names from the first generation.
-	// On a cache hit: apply the cached filter, emit zero new sub-var blocks.
-	// Initialized once at root Rewrite() and shared (by reference) across all derived
-	// authRewriter instances within the same request.
-	authorityAuthCache map[*schema.RuleNode]*dql.FilterTree
 	// `mutVarCache` caches predicate → DQL variable name mappings used during mutation
 	// rewriting to avoid emitting duplicate auth var blocks within a single mutation pass.
 	// Distinct from cascadeVarCache: this is mutation-specific and uses a string key.
@@ -138,12 +123,11 @@ func (qr *queryRewriter) Rewrite(
 	}
 
 	authRw := &authRewriter{
-		authVariables:      customClaims.AuthVariables,
-		varGen:             NewVariableGenerator(),
-		selector:           getAuthSelector(gqlQuery.QueryType()),
-		parentVarName:      gqlQuery.ConstructedFor().Name() + "Root",
-		cascadeVarCache:    make(map[*schema.RuleNode]string),
-		authorityAuthCache: make(map[*schema.RuleNode]*dql.FilterTree),
+		authVariables:   customClaims.AuthVariables,
+		varGen:          NewVariableGenerator(),
+		selector:        getAuthSelector(gqlQuery.QueryType()),
+		parentVarName:   gqlQuery.ConstructedFor().Name() + "Root",
+		cascadeVarCache: make(map[*schema.RuleNode]string),
 	}
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
 	authRw.hasCascade = hasCascadeDirective(gqlQuery)
@@ -1118,14 +1102,13 @@ func (authRw *authRewriter) addAuthQueries(
 
 			// Form Auth Queries for the given object
 			objAuthQueries, objfilter := (&authRewriter{
-				authVariables:      authRw.authVariables,
-				varGen:             authRw.varGen,
-				varName:            queryVar,
-				selector:           authRw.selector,
-				parentVarName:      authRw.parentVarName,
-				hasAuthRules:       authRw.hasAuthRules,
-				cascadeVarCache:    authRw.cascadeVarCache,
-				authorityAuthCache: authRw.authorityAuthCache,
+				authVariables:   authRw.authVariables,
+				varGen:          authRw.varGen,
+				varName:         queryVar,
+				selector:        authRw.selector,
+				parentVarName:   authRw.parentVarName,
+				hasAuthRules:    authRw.hasAuthRules,
+				cascadeVarCache: authRw.cascadeVarCache,
 			}).rewriteAuthQueries(object)
 
 			// 1. If there is no Auth Query for the Given type then it means that
@@ -1307,15 +1290,14 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 	}
 
 	return (&authRewriter{
-		authVariables:      authRw.authVariables,
-		varGen:             authRw.varGen,
-		isWritingAuth:      true,
-		varName:            authRw.varName,
-		selector:           authRw.selector,
-		parentVarName:      authRw.parentVarName,
-		hasAuthRules:       authRw.hasAuthRules,
-		cascadeVarCache:    authRw.cascadeVarCache,
-		authorityAuthCache: authRw.authorityAuthCache,
+		authVariables:   authRw.authVariables,
+		varGen:          authRw.varGen,
+		isWritingAuth:   true,
+		varName:         authRw.varName,
+		selector:        authRw.selector,
+		parentVarName:   authRw.parentVarName,
+		hasAuthRules:    authRw.hasAuthRules,
+		cascadeVarCache: authRw.cascadeVarCache,
 	}).rewriteRuleNode(typ, authRw.selector(typ))
 }
 
@@ -1464,63 +1446,21 @@ func (authRw *authRewriter) rewriteRuleNode(
 		//   authSubVarBlocks — extra var blocks like "User_Auth6_hasIAMBinding as IAMBinding.forResource"
 		//   filter           — @filter(uid(User_Auth6_hasIAMBinding)) to apply on r1[0]
 		//
-		// authorityAuthCache deduplicates these sub-var blocks across child types:
-		// when JobAd AND JobBoard both cascade through Workspace, only the first call
-		// emits the Workspace @auth sub-vars. Subsequent calls reuse the cached filter
-		// (which already references the first call's var names) and emit no new blocks.
-		// This is semantically correct: a var defined once in DQL can be referenced
-		// multiple times by different cascade authority vars.
+		// We apply the filter to r1[0].Filter (AND with any inline filter from the
+		// cascade rule's own @cascade predicate selection) and append the sub-var blocks.
 		if qry != nil {
 			authorityType := qry.Type()
-			// authorityRuleKey identifies the authority's compiled @auth rule.
-			// Same pointer = same rule = same DQL output for any JWT variable values
-			// (JWT vars are constant within one request).
-			authorityRuleKey := queryAuthSelector(authorityType)
-
-			var authFilter *dql.FilterTree
-			var authSubVars []*dql.GraphQuery
-
-			if authorityRuleKey != nil && authRw.authorityAuthCache != nil {
-				if cachedFilter, ok := authRw.authorityAuthCache[authorityRuleKey]; ok {
-					// Cache hit: authority auth sub-vars were already emitted for a
-					// previous child type. Reuse the filter (which references the
-					// already-emitted sub-var var names). No new blocks needed.
-					authFilter = cachedFilter
-					// authSubVars stays nil — skip emission.
-				} else {
-					// Cache miss: generate the authority auth sub-vars and cache the filter.
-					cascadeAuthRw := &authRewriter{
-						authVariables:      authRw.authVariables,
-						varGen:             authRw.varGen,
-						selector:           queryAuthSelector,
-						varName:            varName,
-						parentVarName:      varName,
-						isWritingAuth:      true,
-						hasAuthRules:       authRw.hasAuthRules,
-						cascadeVarCache:    authRw.cascadeVarCache,
-						authorityAuthCache: authRw.authorityAuthCache,
-					}
-					authSubVars, authFilter = cascadeAuthRw.rewriteAuthQueries(authorityType)
-					if authFilter != nil {
-						authRw.authorityAuthCache[authorityRuleKey] = authFilter
-					}
-				}
-			} else {
-				// Authority type has no @auth or cache is unavailable: generate normally.
-				cascadeAuthRw := &authRewriter{
-					authVariables:      authRw.authVariables,
-					varGen:             authRw.varGen,
-					selector:           queryAuthSelector,
-					varName:            varName,
-					parentVarName:      varName,
-					isWritingAuth:      true,
-					hasAuthRules:       authRw.hasAuthRules,
-					cascadeVarCache:    authRw.cascadeVarCache,
-					authorityAuthCache: authRw.authorityAuthCache,
-				}
-				authSubVars, authFilter = cascadeAuthRw.rewriteAuthQueries(authorityType)
+			cascadeAuthRw := &authRewriter{
+				authVariables:   authRw.authVariables,
+				varGen:          authRw.varGen,
+				selector:        queryAuthSelector, // always query-auth for cascade authority
+				varName:         varName,
+				parentVarName:   varName,
+				isWritingAuth:   true, // prevent recursive addAuthQueries wrapping
+				hasAuthRules:    authRw.hasAuthRules,
+				cascadeVarCache: authRw.cascadeVarCache, // share the cache
 			}
-
+			authSubVars, authFilter := cascadeAuthRw.rewriteAuthQueries(authorityType)
 			if authFilter != nil {
 				if r1[0].Filter == nil {
 					r1[0].Filter = authFilter
@@ -2411,13 +2351,12 @@ func buildFilter(typ schema.Type,
 
 					if !auth.isWritingAuth {
 						wr := &authRewriter{
-							authVariables:      auth.authVariables,
-							varGen:             auth.varGen,
-							selector:           auth.selector,
-							parentVarName:      qn + "Root",
-							isWritingAuth:      auth.isWritingAuth,
-							cascadeVarCache:    auth.cascadeVarCache,
-							authorityAuthCache: auth.authorityAuthCache,
+							authVariables:   auth.authVariables,
+							varGen:          auth.varGen,
+							selector:        auth.selector,
+							parentVarName:   qn + "Root",
+							isWritingAuth:   auth.isWritingAuth,
+							cascadeVarCache: auth.cascadeVarCache,
 						}
 
 						rbac := wr.evaluateStaticRules(fd.Type())
