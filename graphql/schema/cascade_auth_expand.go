@@ -610,6 +610,15 @@ func resubstituteRuleNode(rn *RuleNode, edge cascadeAuthIncomingEdge,
 		child, err := parseRuleNodeFromTemplate(rn.RuleTemplate, authorityVars, childVars,
 			childTypeName, edge.parentTypeName, sch)
 		if err != nil {
+			// Re-substitution failed (e.g. authority vars empty/unavailable, enum
+			// validation rejects the substituted value, or child lacks required keys).
+			// If the authority rule was pre-compiled by resolveTemplateLeaves (Rule != nil),
+			// fall back to it silently — it already has the authority's own @authVariables
+			// baked in and is correct for a parent-style cascade.
+			// Only propagate the error when there is no pre-compiled fallback.
+			if rn.Rule != nil {
+				return rn, nil
+			}
 			return nil, err
 		}
 		if child != nil {
