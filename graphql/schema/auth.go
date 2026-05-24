@@ -240,6 +240,47 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 		}
 	}
 
+	// Resolve each type's own compile-time @authVariables ({{KEY}} placeholders)
+	// into its own auth rules NOW, before cascade expansion runs.
+	// parseAuthNode stores {{KEY}} rules as RuleTemplate-only (Rule==nil) because
+	// the GraphQL parser cannot handle the {{}} syntax. We must substitute here so
+	// that when cascadeAuthRuleForEdge reads ta.Rules.Query for an authority type,
+	// it finds fully-parsed RuleNodes, not bare templates.
+	for _, typ := range s.Types {
+		name := typeName(typ)
+		ta := authRules[name]
+		if ta == nil {
+			continue
+		}
+		authorityAstType := &astType{
+			typ:             &ast.Type{NamedType: name},
+			inSchema:        sch,
+			dgraphPredicate: sch.dgraphPredicate,
+		}
+		ownVars := authorityAstType.AuthVariables()
+		if len(ownVars) == 0 {
+			continue
+		}
+		if ta.Rules != nil {
+			ta.Rules.Query = resolveTemplateLeaves(sch, ta.Rules.Query, ownVars, name)
+			ta.Rules.Add = resolveTemplateLeaves(sch, ta.Rules.Add, ownVars, name)
+			ta.Rules.Update = resolveTemplateLeaves(sch, ta.Rules.Update, ownVars, name)
+			ta.Rules.Delete = resolveTemplateLeaves(sch, ta.Rules.Delete, ownVars, name)
+		}
+		for field, ac := range ta.Fields {
+			if ac == nil {
+				continue
+			}
+			ta.Fields[field] = &AuthContainer{
+				Query:    resolveTemplateLeaves(sch, ac.Query, ownVars, name),
+				Add:      resolveTemplateLeaves(sch, ac.Add, ownVars, name),
+				Update:   resolveTemplateLeaves(sch, ac.Update, ownVars, name),
+				Delete:   resolveTemplateLeaves(sch, ac.Delete, ownVars, name),
+				Password: resolveTemplateLeaves(sch, ac.Password, ownVars, name),
+			}
+		}
+	}
+
 	// Snapshot before interface merging: used by expandCascadeAuth to propagate
 	// only a type's own declared @auth bidirectionally (not the interface-level auth).
 	authRulesOwnOnly := snapshotTypeAuthMap(authRules)
@@ -297,6 +338,66 @@ func snapshotTypeAuthMap(src map[string]*TypeAuth) map[string]*TypeAuth {
 		out[k] = &copy
 	}
 	return out
+}
+
+// resolveTemplateLeaves walks a RuleNode tree and, for each leaf node whose
+// RuleTemplate is non-empty (i.e. a {{KEY}} compile-time template), substitutes
+// vars into the template and re-parses the result. The leaf is replaced with the
+// newly parsed node so that downstream code sees a proper Rule (not a bare template).
+//
+// This is called in authRules() after parseAuthDirective to ensure that a type's
+// own @authVariables constants (e.g. {{QRY_PERMISSIONS}} on Workspace) are fully
+// resolved in that type's own auth rules before cascade expansion reads them.
+//
+// If substitution or re-parsing fails, the original leaf is returned unchanged.
+func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string][]string, typeName string) *RuleNode {
+	if rn == nil || len(vars) == 0 {
+		return rn
+	}
+	// Leaf with a template: substitute own vars and re-parse.
+	if rn.RuleTemplate != "" && rn.Rule == nil && rn.DQLRule == nil && rn.RBACRule == nil {
+		substituted := substitutAuthVars(rn.RuleTemplate, vars)
+		if strings.Contains(substituted, RBACQueryPrefix) {
+			// Became an RBAC rule — parse it.
+			typ := sch.schema.Types[typeName]
+			if typ == nil {
+				return rn
+			}
+			rbac, err := getRBACQuery(typ, substituted)
+			if err != nil {
+				return rn // parse failed — leave as-is
+			}
+			return &RuleNode{RBACRule: rbac, RuleTemplate: rn.RuleTemplate}
+		}
+		// Attempt GraphQL parse.
+		node := &RuleNode{RuleTemplate: rn.RuleTemplate}
+		typ := sch.schema.Types[typeName]
+		if typ == nil {
+			return rn
+		}
+		if err := gqlValidateRule(sch, typ, substituted, node); err != nil {
+			return rn // parse failed — leave as-is; may still contain unresolved keys
+		}
+		return node
+	}
+	// Composite nodes: recurse.
+	clone := *rn
+	if len(rn.Or) > 0 {
+		clone.Or = make([]*RuleNode, len(rn.Or))
+		for i, child := range rn.Or {
+			clone.Or[i] = resolveTemplateLeaves(sch, child, vars, typeName)
+		}
+	}
+	if len(rn.And) > 0 {
+		clone.And = make([]*RuleNode, len(rn.And))
+		for i, child := range rn.And {
+			clone.And[i] = resolveTemplateLeaves(sch, child, vars, typeName)
+		}
+	}
+	if rn.Not != nil {
+		clone.Not = resolveTemplateLeaves(sch, rn.Not, vars, typeName)
+	}
+	return &clone
 }
 
 func mergeAuthNodeWithAnd(objectAuth, interfaceAuth *RuleNode) *RuleNode {

@@ -597,7 +597,17 @@ func resubstituteRuleNode(rn *RuleNode, edge cascadeAuthIncomingEdge,
 
 	// Leaf rule node: re-substitute and re-parse.
 	if rn.RuleTemplate != "" {
-		child, err := parseRuleNodeFromTemplate(rn.RuleTemplate, childVars,
+		// Resolve the authority type's own compile-time @authVariables FIRST
+		// (e.g. {{QRY_PERMISSIONS}} defined on Workspace), then the child's.
+		// This prevents spurious "unresolved placeholder" errors when the
+		// authority has constant-valued placeholders the child never declares.
+		authorityAstType := &astType{
+			typ:             &ast.Type{NamedType: edge.parentTypeName},
+			inSchema:        sch,
+			dgraphPredicate: sch.dgraphPredicate,
+		}
+		authorityVars := authorityAstType.AuthVariables()
+		child, err := parseRuleNodeFromTemplate(rn.RuleTemplate, authorityVars, childVars,
 			childTypeName, edge.parentTypeName, sch)
 		if err != nil {
 			return nil, err
@@ -651,10 +661,19 @@ func resubstituteRuleNode(rn *RuleNode, edge cascadeAuthIncomingEdge,
 // Important: the rule is validated against the AUTHORITY type definition, not the
 // child type. A cascaded rule like queryWorkspace(...) queries the authority; validating
 // it against Contact (the child) would always fail with "expected queryContact, found queryWorkspace".
-func parseRuleNodeFromTemplate(template string, childVars map[string][]string,
+//
+// authorityVars are the compile-time @authVariables constants from the authority type
+// (e.g. {{QRY_PERMISSIONS}} on Workspace). They are resolved FIRST so that authority-level
+// constants do not show up as unresolved when the child's own @authVariables are applied.
+// childVars are the child type's own @authVariables (may include overlapping keys; child
+// values take precedence so a child can override an authority default if needed).
+func parseRuleNodeFromTemplate(template string, authorityVars, childVars map[string][]string,
 	childTypeName, authorityTypeName string, sch *schema) (*RuleNode, error) {
 
-	substituted := substitutAuthVars(template, childVars)
+	// Step 1: resolve authority compile-time constants ({{QRY_PERMISSIONS}}, etc.).
+	substituted := substitutAuthVars(template, authorityVars)
+	// Step 2: overlay child @authVariables (may further expand child-specific keys).
+	substituted = substitutAuthVars(substituted, childVars)
 	if strings.HasPrefix(substituted, RBACQueryPrefix) {
 		return nil, nil
 	}
