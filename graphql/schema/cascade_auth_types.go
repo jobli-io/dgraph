@@ -17,6 +17,10 @@ import (
 type CascadeAuthFieldConfig struct {
 	// Operations the cascade applies to (e.g. ["query", "add", "update", "delete"]).
 	Operations []string
+	// OperationsProvided is true when the operations: argument was explicitly
+	// specified in the directive. When false, the default (all four operations)
+	// should be used. When true with an empty slice, no operations are covered.
+	OperationsProvided bool
 	// Bidirectional propagates child auth rules back to the parent.
 	Bidirectional bool
 	// VariableContext controls @authVariables resolution: "parent", "self", or "adaptive".
@@ -46,6 +50,7 @@ func (fd *fieldDefinition) CascadeAuthConfig() *CascadeAuthFieldConfig {
 	}
 	cfg := &CascadeAuthFieldConfig{Depth: -1}
 	if v := dir.Arguments.ForName("operations"); v != nil {
+		cfg.OperationsProvided = true
 		for _, item := range v.Value.Children {
 			cfg.Operations = append(cfg.Operations, item.Value.Raw)
 		}

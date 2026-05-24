@@ -50,6 +50,22 @@ type RuleNode struct {
 	// RuleTemplate is the raw (pre-substitution) GraphQL rule string on leaf nodes.
 	// Used by cascade_auth_expand.go to re-substitute child @authVariables.
 	RuleTemplate string
+	// CascadeBundlePred marks a composite bundle node that wraps the authority
+	// type's combined auth rules behind a uid_in traversal. Set on AND/OR composite
+	// nodes whose children are the authority type's own rules (post-merge).
+	// Value is the Dgraph predicate for the cascade edge (same format as CascadeEdgePred).
+	CascadeBundlePred string
+	// CascadeRootType is the Dgraph type name of the authority (root) node for a
+	// cascade bundle (e.g. "Workspace"). Used by formatRuleNode for diagnostics.
+	CascadeRootType string
+	// CascadeInversePred is the Dgraph predicate that the uid_in filter traverses
+	// to scope the child type from the authority's side. On leaf cascade nodes this
+	// mirrors CascadeEdgePred; on bundle nodes CascadeBundlePred takes precedence.
+	CascadeInversePred string
+	// CascadeEdgeForwardPath records the cascade hop chain for a leaf rule node.
+	// Each entry is a predicate name in the forward traversal order (e.g.
+	// ["inGroup", "inWorkspace"] for a Company→Group→Workspace chain).
+	CascadeEdgeForwardPath []string
 }
 
 type AuthContainer struct {
@@ -224,6 +240,10 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 		}
 	}
 
+	// Snapshot before interface merging: used by expandCascadeAuth to propagate
+	// only a type's own declared @auth bidirectionally (not the interface-level auth).
+	authRulesOwnOnly := snapshotTypeAuthMap(authRules)
+
 	// Merge the Auth rules on interfaces into the implementing types
 	for _, typ := range s.Types {
 		name := typeName(typ)
@@ -241,6 +261,15 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 		}
 	}
 
+	// Expand @cascadeAuth directives: propagate parent @auth rules into child
+	// TypeAuth entries. This runs after interface auth has been merged into
+	// concrete types (so each type has its full rule set) but before interfaces
+	// are reset to empty (so the function can still read interface auth for
+	// implementor-union rules).
+	if err = expandCascadeAuth(sch, authRules, authRulesOwnOnly); err != nil {
+		errResult = AppendGQLErrs(errResult, err)
+	}
+
 	// Reinitialize the Interface's auth to be empty as Any operation on interface
 	// will be broken into an operation on subsequent implementing types and auth rules
 	// will be verified against the types only.
@@ -252,6 +281,22 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 	}
 
 	return authRules, errResult
+}
+
+// snapshotTypeAuthMap creates a shallow copy of the authRules map where each
+// TypeAuth value is independently cloned. Used to preserve the pre-interface-merge
+// state for expandCascadeAuth's bidirectional propagation logic.
+func snapshotTypeAuthMap(src map[string]*TypeAuth) map[string]*TypeAuth {
+	out := make(map[string]*TypeAuth, len(src))
+	for k, v := range src {
+		if v == nil {
+			out[k] = nil
+			continue
+		}
+		copy := *v
+		out[k] = &copy
+	}
+	return out
 }
 
 func mergeAuthNodeWithAnd(objectAuth, interfaceAuth *RuleNode) *RuleNode {
@@ -390,7 +435,12 @@ func parseAuthNode(sch *schema, typ *ast.Definition, val *ast.Value) (*RuleNode,
 			// auth expand pipeline will substitute the variables and re-parse before use.
 			result.RuleTemplate = rule.Raw
 		} else {
+			// Standard GQL auth rule — validate and parse immediately.
 			err = gqlValidateRule(sch, typ, rule.Raw, result)
+			// Also preserve the raw rule string as RuleTemplate so that the cascade auth
+			// expansion pipeline can re-substitute @authVariables from child types when
+			// variableContext:"self" is configured (resubstituteRuleNode re-parses from this).
+			result.RuleTemplate = rule.Raw
 		}
 		errResult = AppendGQLErrs(errResult, err)
 		numChildren++

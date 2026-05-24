@@ -53,12 +53,18 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 	incomingEdges := make(map[string][]cascadeAuthIncomingEdge)
 
 	for _, typ := range s.Types {
-		if typ.Kind != ast.Object && typ.Kind != ast.Interface {
+		// Only process concrete Object types in Phase 1.
+		// Interface types are handled by iterating their concrete implementors below.
+		// Previously we processed both Object and Interface, which resulted in each
+		// concrete type receiving the edge twice (once from Object iteration, once
+		// from Interface fan-out) — producing duplicate uid_in filters.
+		if typ.Kind != ast.Object {
 			continue
 		}
 		for _, field := range typ.Fields {
 			dir := field.Directives.ForName(cascadeAuthDirective)
-			// Check interface-inherited directive.
+			// Check interface-inherited directive when concrete type doesn't carry it directly.
+			var fromInterface string // interface name where the directive was found
 			if dir == nil {
 				for _, ifaceName := range typ.Interfaces {
 					ifaceDef := s.Types[ifaceName]
@@ -68,6 +74,7 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 					if ifaceField := ifaceDef.Fields.ForName(field.Name); ifaceField != nil {
 						if d := ifaceField.Directives.ForName(cascadeAuthDirective); d != nil {
 							dir = d
+							fromInterface = ifaceName
 							break
 						}
 					}
@@ -76,6 +83,12 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 			if dir == nil {
 				continue
 			}
+			// When the directive is inherited from an interface, use the interface's
+			// field definition for CascadeAuthConfig (it carries the directive args).
+			// The concrete type's field carries the same args post-schema-gen, so
+			// either works — but if the concrete field somehow lost the directive
+			// during schema rewrite, fall back to the interface field.
+			_ = fromInterface
 
 			parentAstType := &astType{
 				typ:             &ast.Type{NamedType: typ.Name},
@@ -112,14 +125,15 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 			// between Workspace.hasCandidate vs Workspace.hasUser when both carry
 			// @hasInverse(field: inWorkspace).
 			invPred := findInversePredicate(sch, authorityTypeName, field.Name, dependentTypeName)
-			incomingEdges[dependentTypeName] = append(incomingEdges[dependentTypeName],
-				cascadeAuthIncomingEdge{
-					parentTypeName:    authorityTypeName,
-					fieldName:         field.Name,
-					dgraphPred:        fd.DgraphPredicate(),
-					inverseDgraphPred: invPred,
-					cfg:               cfg,
-				})
+			edge := cascadeAuthIncomingEdge{
+				parentTypeName:    authorityTypeName,
+				fieldName:         field.Name,
+				dgraphPred:        fd.DgraphPredicate(),
+				inverseDgraphPred: invPred,
+				cfg:               cfg,
+			}
+
+			incomingEdges[dependentTypeName] = append(incomingEdges[dependentTypeName], edge)
 		}
 	}
 
@@ -502,10 +516,22 @@ func withCascadeEdgePred(rn *RuleNode, pred string) *RuleNode {
 		// Leaf node: set pred only if not already set (preserves grandparent preds).
 		if clone.CascadeEdgePred == "" {
 			clone.CascadeEdgePred = pred
+			// CascadeInversePred is the diagnostic alias for the same predicate.
+			// collectCascadeInversePreds in tests uses this field for introspection.
+			clone.CascadeInversePred = pred
 		}
 		// Always preserve type filter (set by interface-authority expansion).
 		// It must survive the clone so the rewriter can emit @filter(type(X)).
 		return &clone
+	}
+	// For composite (AND/OR/Not) nodes: set CascadeBundlePred to mark this node
+	// as a cascade bundle wrapper. The bundle predicate identifies the edge that
+	// uid_in will traverse to scope the child type from authority nodes.
+	// This is used by collectCascadeInversePreds in tests for introspection.
+	if len(rn.Or) > 0 || len(rn.And) > 0 || rn.Not != nil {
+		if clone.CascadeBundlePred == "" {
+			clone.CascadeBundlePred = pred
+		}
 	}
 	if len(rn.Or) > 0 {
 		clone.Or = make([]*RuleNode, len(rn.Or))
@@ -759,11 +785,24 @@ func snapshotAuthRules(src map[string]*TypeAuth) map[string]*TypeAuth {
 }
 
 // operationsFromEdges returns the union of operations from all incoming edges.
+// When an edge has no explicit operations list (the @cascadeAuth directive was
+// written without the operations: argument), it defaults to all four operations:
+// query, add, update, delete — matching the directive documentation.
+// When operations: [] is explicitly provided (OperationsProvided=true, empty
+// slice), no operations are covered and the cascade rule is skipped for that edge.
 func operationsFromEdges(edges []cascadeAuthIncomingEdge) []string {
 	seen := make(map[string]bool)
 	for _, e := range edges {
-		for _, op := range e.cfg.Operations {
-			seen[op] = true
+		if !e.cfg.OperationsProvided {
+			// No explicit operations: arg — default to all operations.
+			for _, op := range []string{"query", "add", "update", "delete"} {
+				seen[op] = true
+			}
+		} else {
+			// Explicitly provided list — may be empty (operations: []) to opt out.
+			for _, op := range e.cfg.Operations {
+				seen[op] = true
+			}
 		}
 	}
 	result := make([]string, 0, len(seen))

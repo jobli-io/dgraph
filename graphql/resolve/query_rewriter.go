@@ -1366,6 +1366,58 @@ func (authRw *authRewriter) rewriteRuleNode(
 			Op:    "not",
 			Child: []*dql.FilterTree{filter},
 		}
+	case rn.Rule != nil && rn.CascadeEdgePred != "":
+		// CascadeEdgePred is set by cascade_auth_expand.go withCascadeEdgePred.
+		// It means this rule is a cascade scoping rule: the authority type
+		// (e.g. Workspace) is queried as a flat var and the child type (e.g.
+		// Group) is scoped using uid_in(WorkspaceMember.inWorkspace, uid(AuthVar)).
+		//
+		// DQL output:
+		//   Group_Auth3 as var(func: type(Workspace)) @cascade {
+		//     Workspace.inUsers @filter(eq(User.email, "u@example.com"))
+		//   }
+		//   @filter( uid_in(WorkspaceMember.inWorkspace, uid(Group_Auth3)) )
+		if rn.EvaluateStatic(authRw.authVariables) == schema.Negative {
+			return nil, nil
+		}
+
+		qry := rn.Rule.AuthFor(authRw.authVariables)
+
+		// Build the authority var query. rewriteAsQuery sets func:uid(parentVar)
+		// for auth queries; for cascade authority vars we want func:type(AuthorityType)
+		// so the var is a flat set of authority nodes, independent of the child root.
+		varName := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+		r1 := rewriteAsQuery(qry, authRw, varName)
+		r1[0].Var = varName
+		r1[0].Attr = "var"
+		// Override the func to type(AuthorityType).
+		// qry.Type().DgraphName() gives "Workspace" (the Dgraph type name),
+		// not "queryWorkspace" (the GQL operation name from qry.Name()).
+		if qry != nil {
+			r1[0].Func = &dql.Function{
+				Name: "type",
+				Args: []dql.Arg{{Value: qry.Type().DgraphName()}},
+			}
+			// Reset filter: the type-scan var itself has no additional filter —
+			// the @cascade directive on r1[0] handles predicate-level filtering.
+			r1[0].Filter = nil
+		}
+		if len(r1[0].Cascade) == 0 {
+			r1[0].Cascade = append(r1[0].Cascade, "__all__")
+		}
+
+		// The filter on the child is uid_in(pred, uid(AuthVar)) — not uid(AuthVar).
+		// This correctly scopes Group to only those nodes where the cascade edge
+		// (WorkspaceMember.inWorkspace) points to an authorized Workspace node.
+		return r1, &dql.FilterTree{
+			Func: &dql.Function{
+				Name: "uid_in",
+				Args: []dql.Arg{
+					{Value: rn.CascadeEdgePred},
+					{Value: "uid(" + varName + ")"},
+				},
+			},
+		}
 	case rn.Rule != nil:
 		if rn.EvaluateStatic(authRw.authVariables) == schema.Negative {
 			return nil, nil
