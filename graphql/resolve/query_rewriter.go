@@ -1403,9 +1403,14 @@ func (authRw *authRewriter) rewriteRuleNode(
 				Name: "type",
 				Args: []dql.Arg{{Value: qry.Type().DgraphName()}},
 			}
-			// Reset filter: the type-scan var itself has no additional filter —
-			// the @cascade directive on r1[0] handles predicate-level filtering.
-			r1[0].Filter = nil
+			// Do NOT reset r1[0].Filter here.
+			// rewriteAsQuery/addAuthQueries generates auth sub-var blocks
+			// (e.g. User_Auth6_hasIAMBinding) and sets r1[0].Filter =
+			// @filter(uid(User_Auth6_hasIAMBinding)) to reference them.
+			// Clearing Filter leaves those sub-vars defined but not used —
+			// Dgraph rejects the query. Keep Filter so auth scoping works:
+			//   User_Auth6 as var(func: type(IAMResource))
+			//     @filter(uid(User_Auth6_hasIAMBinding)) @cascade { ... }
 		}
 		if len(r1[0].Cascade) == 0 {
 			r1[0].Cascade = append(r1[0].Cascade, "__all__")
