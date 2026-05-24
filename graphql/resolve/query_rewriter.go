@@ -1388,30 +1388,65 @@ func (authRw *authRewriter) rewriteRuleNode(
 			return nil, nil
 		}
 
-		// Build the authority var query. rewriteAsQuery sets func:uid(parentVar)
-		// for auth queries; for cascade authority vars we want func:type(AuthorityType)
-		// so the var is a flat set of authority nodes, independent of the child root.
+		// Build the authority var query using a nested auth rewriter — the same
+		// pattern as addSelectionSetFrom uses for nested field auth (line ~2285).
+		// The outer authRw has isWritingAuth=true which causes addAuthQueries inside
+		// rewriteAsQuery to skip (early-return at line 1041). That leaves the
+		// authority type's own @auth rules unevaluated through the addAuthQueries
+		// path, producing disconnected sub-var blocks or missing filters.
+		//
+		// Using isWritingAuth: false lets rewriteAsQuery → addAuthQueries run fully
+		// for the authority type, generating a self-contained var query with correct
+		// @filter references (e.g. @filter(uid(User_Auth6_hasIAMBinding))).
 		varName := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
 		r1 := rewriteAsQuery(qry, authRw, varName)
 		r1[0].Var = varName
 		r1[0].Attr = "var"
-		// Override the func to type(AuthorityType).
-		// qry.Type().DgraphName() gives "Workspace" (the Dgraph type name),
-		// not "queryWorkspace" (the GQL operation name from qry.Name()).
+		// Override the func to type(AuthorityType) — a flat type scan independent
+		// of the child root.
 		if qry != nil {
 			r1[0].Func = &dql.Function{
 				Name: "type",
 				Args: []dql.Arg{{Value: qry.Type().DgraphName()}},
 			}
-			// Do NOT reset r1[0].Filter here.
-			// rewriteAsQuery/addAuthQueries generates auth sub-var blocks
-			// (e.g. User_Auth6_hasIAMBinding) and sets r1[0].Filter =
-			// @filter(uid(User_Auth6_hasIAMBinding)) to reference them.
-			// Clearing Filter leaves those sub-vars defined but not used —
-			// Dgraph rejects the query. Keep Filter so auth scoping works:
-			//   User_Auth6 as var(func: type(IAMResource))
-			//     @filter(uid(User_Auth6_hasIAMBinding)) @cascade { ... }
 		}
+
+		// Apply the authority type's own @auth rules using the nested filter rewriter
+		// pattern (matching addSelectionSetFrom ~line 2285). The outer authRw has
+		// isWritingAuth=true which short-circuits addAuthQueries, so we create a fresh
+		// rewriter with isWritingAuth=false to evaluate the authority's @auth rules.
+		//
+		// rewriteAuthQueries returns (authSubVarBlocks, filter):
+		//   authSubVarBlocks — extra var blocks like "User_Auth6_hasIAMBinding as IAMBinding.forResource"
+		//   filter           — @filter(uid(User_Auth6_hasIAMBinding)) to apply on r1[0]
+		//
+		// We apply the filter to r1[0].Filter (AND with any inline filter from the
+		// cascade rule's own @cascade predicate selection) and append the sub-var blocks.
+		if qry != nil {
+			authorityType := qry.Type()
+			cascadeAuthRw := &authRewriter{
+				authVariables: authRw.authVariables,
+				varGen:        authRw.varGen,
+				selector:      queryAuthSelector, // always query-auth for cascade authority
+				varName:       varName,
+				parentVarName: varName,
+				isWritingAuth: true, // prevent recursive addAuthQueries wrapping
+				hasAuthRules:  authRw.hasAuthRules,
+			}
+			authSubVars, authFilter := cascadeAuthRw.rewriteAuthQueries(authorityType)
+			if authFilter != nil {
+				if r1[0].Filter == nil {
+					r1[0].Filter = authFilter
+				} else {
+					r1[0].Filter = &dql.FilterTree{
+						Op:    "and",
+						Child: []*dql.FilterTree{r1[0].Filter, authFilter},
+					}
+				}
+			}
+			r1 = append(r1, authSubVars...)
+		}
+
 		if len(r1[0].Cascade) == 0 {
 			r1[0].Cascade = append(r1[0].Cascade, "__all__")
 		}
