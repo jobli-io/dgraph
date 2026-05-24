@@ -42,9 +42,18 @@ type authRewriter struct {
 	hasAuthRules bool
 	// `hasCascade` indicates if any of fields in the complete query hierarchy has cascade directive.
 	hasCascade bool
-	// `authVarCache` caches resolved auth variable mappings (predicate → DQL variable name)
-	// to avoid redundant variable generation across nested mutation rewriting passes.
-	authVarCache *map[string]string
+	// `cascadeVarCache` deduplicates cascade authority vars within a single request.
+	// Key: *schema.RuleNode (pointer to the compiled cascade edge rule — same pointer
+	// means same compiled authority rule). Value: DQL var name of the already-generated
+	// cascade authority var block. On a cache hit, the cascade edge returns a uid_in
+	// filter referencing the existing var without emitting duplicate DQL blocks.
+	// Initialized once at the root Rewrite() call and shared (by reference) across all
+	// derived authRewriter instances within the same request.
+	cascadeVarCache map[*schema.RuleNode]string
+	// `mutVarCache` caches predicate → DQL variable name mappings used during mutation
+	// rewriting to avoid emitting duplicate auth var blocks within a single mutation pass.
+	// Distinct from cascadeVarCache: this is mutation-specific and uses a string key.
+	mutVarCache *map[string]string
 }
 
 // The struct is used as a return type for buildCommonAuthQueries function.
@@ -114,10 +123,11 @@ func (qr *queryRewriter) Rewrite(
 	}
 
 	authRw := &authRewriter{
-		authVariables: customClaims.AuthVariables,
-		varGen:        NewVariableGenerator(),
-		selector:      getAuthSelector(gqlQuery.QueryType()),
-		parentVarName: gqlQuery.ConstructedFor().Name() + "Root",
+		authVariables:   customClaims.AuthVariables,
+		varGen:          NewVariableGenerator(),
+		selector:        getAuthSelector(gqlQuery.QueryType()),
+		parentVarName:   gqlQuery.ConstructedFor().Name() + "Root",
+		cascadeVarCache: make(map[*schema.RuleNode]string),
 	}
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
 	authRw.hasCascade = hasCascadeDirective(gqlQuery)
@@ -1092,12 +1102,13 @@ func (authRw *authRewriter) addAuthQueries(
 
 			// Form Auth Queries for the given object
 			objAuthQueries, objfilter := (&authRewriter{
-				authVariables: authRw.authVariables,
-				varGen:        authRw.varGen,
-				varName:       queryVar,
-				selector:      authRw.selector,
-				parentVarName: authRw.parentVarName,
-				hasAuthRules:  authRw.hasAuthRules,
+				authVariables:   authRw.authVariables,
+				varGen:          authRw.varGen,
+				varName:         queryVar,
+				selector:        authRw.selector,
+				parentVarName:   authRw.parentVarName,
+				hasAuthRules:    authRw.hasAuthRules,
+				cascadeVarCache: authRw.cascadeVarCache,
 			}).rewriteAuthQueries(object)
 
 			// 1. If there is no Auth Query for the Given type then it means that
@@ -1279,13 +1290,14 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 	}
 
 	return (&authRewriter{
-		authVariables: authRw.authVariables,
-		varGen:        authRw.varGen,
-		isWritingAuth: true,
-		varName:       authRw.varName,
-		selector:      authRw.selector,
-		parentVarName: authRw.parentVarName,
-		hasAuthRules:  authRw.hasAuthRules,
+		authVariables:   authRw.authVariables,
+		varGen:          authRw.varGen,
+		isWritingAuth:   true,
+		varName:         authRw.varName,
+		selector:        authRw.selector,
+		parentVarName:   authRw.parentVarName,
+		hasAuthRules:    authRw.hasAuthRules,
+		cascadeVarCache: authRw.cascadeVarCache,
 	}).rewriteRuleNode(typ, authRw.selector(typ))
 }
 
@@ -1388,6 +1400,20 @@ func (authRw *authRewriter) rewriteRuleNode(
 			return nil, nil
 		}
 
+		// Cache hit: this exact cascade rule was already processed in this request.
+		// Reuse the previously generated cascade authority var — no new DQL blocks needed.
+		if cached, ok := authRw.cascadeVarCache[rn]; ok {
+			return nil, &dql.FilterTree{
+				Func: &dql.Function{
+					Name: "uid_in",
+					Args: []dql.Arg{
+						{Value: rn.CascadeEdgePred},
+						{Value: "uid(" + cached + ")"},
+					},
+				},
+			}
+		}
+
 		// Build the authority var query using a nested auth rewriter — the same
 		// pattern as addSelectionSetFrom uses for nested field auth (line ~2285).
 		// The outer authRw has isWritingAuth=true which causes addAuthQueries inside
@@ -1425,13 +1451,14 @@ func (authRw *authRewriter) rewriteRuleNode(
 		if qry != nil {
 			authorityType := qry.Type()
 			cascadeAuthRw := &authRewriter{
-				authVariables: authRw.authVariables,
-				varGen:        authRw.varGen,
-				selector:      queryAuthSelector, // always query-auth for cascade authority
-				varName:       varName,
-				parentVarName: varName,
-				isWritingAuth: true, // prevent recursive addAuthQueries wrapping
-				hasAuthRules:  authRw.hasAuthRules,
+				authVariables:   authRw.authVariables,
+				varGen:          authRw.varGen,
+				selector:        queryAuthSelector, // always query-auth for cascade authority
+				varName:         varName,
+				parentVarName:   varName,
+				isWritingAuth:   true, // prevent recursive addAuthQueries wrapping
+				hasAuthRules:    authRw.hasAuthRules,
+				cascadeVarCache: authRw.cascadeVarCache, // share the cache
 			}
 			authSubVars, authFilter := cascadeAuthRw.rewriteAuthQueries(authorityType)
 			if authFilter != nil {
@@ -1449,6 +1476,12 @@ func (authRw *authRewriter) rewriteRuleNode(
 
 		if len(r1[0].Cascade) == 0 {
 			r1[0].Cascade = append(r1[0].Cascade, "__all__")
+		}
+
+		// Store in cache so subsequent calls for the same cascade edge rule
+		// reuse this var and skip redundant DQL block generation.
+		if authRw.cascadeVarCache != nil {
+			authRw.cascadeVarCache[rn] = varName
 		}
 
 		// The filter on the child is uid_in(pred, uid(AuthVar)) — not uid(AuthVar).
@@ -2318,11 +2351,12 @@ func buildFilter(typ schema.Type,
 
 					if !auth.isWritingAuth {
 						wr := &authRewriter{
-							authVariables: auth.authVariables,
-							varGen:        auth.varGen,
-							selector:      auth.selector,
-							parentVarName: qn + "Root",
-							isWritingAuth: auth.isWritingAuth,
+							authVariables:   auth.authVariables,
+							varGen:          auth.varGen,
+							selector:        auth.selector,
+							parentVarName:   qn + "Root",
+							isWritingAuth:   auth.isWritingAuth,
+							cascadeVarCache: auth.cascadeVarCache,
 						}
 
 						rbac := wr.evaluateStaticRules(fd.Type())

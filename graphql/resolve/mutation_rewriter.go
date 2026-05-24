@@ -400,7 +400,7 @@ func (urw *UpdateRewriter) RewriteQueries(
 				varGen:        urw.VarGen,
 				selector:      updateAuthSelector,
 				parentVarName: m.MutatedType().Name() + "Root",
-				authVarCache:  &updateAuthVarCache,
+				mutVarCache:   &updateAuthVarCache,
 			}
 			authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 
@@ -645,7 +645,7 @@ func (arw *AddRewriter) Rewrite(
 				varGen:        varGen,
 				selector:      updateAuthSelector,
 				parentVarName: fmt.Sprintf("%sRoot_%d", m.MutatedType().Name(), pos), // append node position to avoid conflict in multi-node upsert.
-				authVarCache:  &upsertAuthVarCache,
+				mutVarCache:   &upsertAuthVarCache,
 			}
 			authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 			// Get upsert query of the form,
@@ -767,7 +767,7 @@ func (urw *UpdateRewriter) Rewrite(
 		varGen:        varGen,
 		selector:      updateAuthSelector,
 		parentVarName: m.MutatedType().Name() + "Root",
-		authVarCache:  &updateMutAuthVarCache,
+		mutVarCache:   &updateMutAuthVarCache,
 	}
 	authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 
@@ -947,7 +947,7 @@ func (arw *AddRewriter) FromMutationResult(
 		varGen:        NewVariableGenerator(),
 		selector:      queryAuthSelector,
 		parentVarName: mutation.MutatedType().Name() + "Root",
-		authVarCache:  &addResultAuthVarCache,
+		mutVarCache:   &addResultAuthVarCache,
 	}
 	authRw.hasAuthRules = hasAuthRules(mutation.QueryField(), authRw)
 
@@ -990,7 +990,7 @@ func (urw *UpdateRewriter) FromMutationResult(
 		varGen:        NewVariableGenerator(),
 		selector:      queryAuthSelector,
 		parentVarName: mutation.MutatedType().Name() + "Root",
-		authVarCache:  &updateResultAuthVarCache,
+		mutVarCache:   &updateResultAuthVarCache,
 	}
 	authRw.hasAuthRules = hasAuthRules(mutation.QueryField(), authRw)
 	return rewriteAsQueryByIds(mutation.QueryField(), uids, authRw, mutation.Alias()), nil
@@ -1228,7 +1228,7 @@ func (drw *deleteRewriter) Rewrite(
 		varGen:        drw.VarGen,
 		selector:      deleteAuthSelector,
 		parentVarName: m.MutatedType().Name() + "Root",
-		authVarCache:  &deleteAuthVarCache,
+		mutVarCache:   &deleteAuthVarCache,
 	}
 	authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 
@@ -1265,7 +1265,7 @@ func (drw *deleteRewriter) Rewrite(
 			parentVarName: drw.VarGen.Next(queryField.Type(), "", "", false),
 			varName:       MutationQueryVar,
 			hasAuthRules:  hasAuthRules(queryField, authRw),
-			authVarCache:  &deleteQryAuthVarCache,
+			mutVarCache:   &deleteQryAuthVarCache,
 		}
 
 		// these queries are responsible for querying the queryField
@@ -2865,7 +2865,7 @@ func addDelete(
 		varName:       targetVar,
 		selector:      updateAuthSelector,
 		parentVarName: qryFld.Type().Name() + "Root",
-		authVarCache:  &nestedAuthVarCache,
+		mutVarCache:   &nestedAuthVarCache,
 	}
 	if rn := newRw.selector(qryFld.Type()); rn != nil {
 		newRw.hasAuthRules = true
