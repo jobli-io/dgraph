@@ -757,11 +757,26 @@ func parseRuleNodeFromTemplate(template string, authorityVars, childVars map[str
 			childTypeName, authorityTypeName, unresolved, childTypeName, authorityTypeName)
 	}
 	node := &RuleNode{RuleTemplate: template}
-	// Use gqlParseRuleForCascade (not gqlValidateRule) — cascaded rules query the
-	// authority or interface type (e.g. queryWorkspaceMember, queryWorkspace), not
-	// the child type. gqlValidateRule enforces f.Name == "query"+authorityType.Name
-	// which fails for interface-inherited rules. gqlParseRuleForCascade skips that check.
-	if err := gqlParseRuleForCascade(sch, substituted, node); err != nil {
+	// IMPORTANT: use gqlValidateRule (not gqlParseRuleForCascade) to compile the rule.
+	// gqlValidateRule calls validator.Validate() which populates ast.Field.Definition
+	// on every field in the AST. This is REQUIRED — without it, field.Arguments()
+	// panics at query time when ArgumentMap() is called on a nil Definition.
+	//
+	// Cascaded rules always query the authority type (e.g. queryWorkspace for
+	// Workspace authority). We pass the authority type def so gqlValidateRule's
+	// f.Name == "query"+typ.Name check matches the rule's root query field.
+	authorityTypeDef := sch.schema.Types[authorityTypeName]
+	if authorityTypeDef == nil {
+		// Authority type not found — last resort (produces unvalidated rule; may panic
+		// at query time). Should never happen in a well-formed schema.
+		if err := gqlParseRuleForCascade(sch, substituted, node); err != nil {
+			return nil, fmt.Errorf(
+				"Type %s: @cascadeAuth: expanding from authority type %s: %w",
+				childTypeName, authorityTypeName, err)
+		}
+		return node, nil
+	}
+	if err := gqlValidateRule(sch, authorityTypeDef, substituted, node); err != nil {
 		return nil, fmt.Errorf(
 			"Type %s: @cascadeAuth: expanding from authority type %s: %w",
 			childTypeName, authorityTypeName, err)
