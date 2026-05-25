@@ -1940,10 +1940,17 @@ func (authRw *authRewriter) rewriteRuleNode(
 			// authority type. The surrounding CascadeWrap var block already carries
 			// @cascade, so we do not add it here; the filter on the authority block
 			// (innerFilter) enforces the cascade constraint at the parent level.
+			//
+			// Also clear Children: rewriteAsQuery generates a body from the GQL auth
+			// query body (e.g. { dgraph.type } from __typename). For a filtered
+			// type-scan var this body is meaningless and causes Dgraph's fillVars to
+			// hit its default case, producing "reached default case in fillVars"
+			// warnings and silently dropping the var's UID set.
 			r1[0].Func = &dql.Function{
 				Name: "type",
 				Args: []dql.Arg{{Value: authRw.cascadeAuthorityType}},
 			}
+			r1[0].Children = nil
 		} else {
 			// Default: the rule belongs to the queried type itself.
 			// build
