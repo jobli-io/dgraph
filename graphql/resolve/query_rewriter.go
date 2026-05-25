@@ -1931,26 +1931,29 @@ func (authRw *authRewriter) rewriteRuleNode(
 		r1[0].Attr = "var"
 
 		if authRw.cascadeAuthorityType != "" {
-			// This Rule leaf is being compiled inside a CascadeWrap Case C context:
-			// the rule belongs to the authority type (e.g. Group's IAMResource auth),
-			// not to the child type (e.g. JobAd). We must scan authority-type nodes,
-			// not child-type nodes — Group UIDs and JobAd UIDs are disjoint.
+			// This Rule leaf is compiled inside a CascadeWrap Case C context.
+			// The rule belongs to the authority type (e.g. Group's IAMResource auth),
+			// not the child type (e.g. JobAd). We need:
 			//
-			// Use type(cascadeAuthorityType) so the var starts from all nodes of the
-			// authority type. The surrounding CascadeWrap var block already carries
-			// @cascade, so we do not add it here; the filter on the authority block
-			// (innerFilter) enforces the cascade constraint at the parent level.
+			//   Auth3 as var(func: type(Group)) @cascade {
+			//       IAMResource.hasIAMBinding @filter(uid(Role_var) AND uid(User_var) AND uid(Ws_var)) {
+			//           dgraph.type
+			//       }
+			//   }
 			//
-			// Also clear Children: rewriteAsQuery generates a body from the GQL auth
-			// query body (e.g. { dgraph.type } from __typename). For a filtered
-			// type-scan var this body is meaningless and causes Dgraph's fillVars to
-			// hit its default case, producing "reached default case in fillVars"
-			// warnings and silently dropping the var's UID set.
+			// The rewriteAsQuery output in r1[0] was rooted at the child type (uid(JobAd_1))
+			// with the traversal body in its Children. We keep those children (the hasIAMBinding
+			// traversal) but swap the root func to type(cascadeAuthorityType) and ensure @cascade.
+			// This is semantically identical to Case B (CascadeEdgePred path) for simple rules.
 			r1[0].Func = &dql.Function{
 				Name: "type",
 				Args: []dql.Arg{{Value: authRw.cascadeAuthorityType}},
 			}
-			r1[0].Children = nil
+			// Keep r1[0].Children — they contain the @cascade traversal body (hasIAMBinding etc.)
+			// that makes the inline filter work correctly. Do NOT clear them.
+			if len(r1[0].Cascade) == 0 {
+				r1[0].Cascade = append(r1[0].Cascade, "__all__")
+			}
 		} else {
 			// Default: the rule belongs to the queried type itself.
 			// build
