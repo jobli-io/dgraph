@@ -33,12 +33,13 @@ type CascadeAuthFieldConfig struct {
 type CascadeAuthPolicyConfig struct {
 	// Aggregation is "and" or "or" — how multiple incoming edges are combined.
 	Aggregation string
-	// IncludeSelf adds the child's own @auth rule as an additional OR path alongside
-	// the cascade rules, so a caller can access the child via its own auth OR via the
-	// cascade path (e.g. direct ownership in addition to workspace membership).
-	IncludeSelf bool
 	// SkipBidirectional suppresses bidirectional rule propagation for this type.
 	SkipBidirectional bool
+	// Skip suppresses all cascade auth expansion for this type. When true the
+	// expander treats the type as if it has no incoming @cascadeAuth edges.
+	// Use on audit/log types that implement a WorkspaceMember-style interface
+	// for the edge field only, without wanting auth enforcement from the authority.
+	Skip bool
 }
 
 // ---------------------------------------------------------------------------
@@ -85,13 +86,16 @@ func (t *astType) CascadeAuthPolicyConfig() CascadeAuthPolicyConfig {
 	}
 	cfg := CascadeAuthPolicyConfig{Aggregation: "and"}
 	if v := dir.Arguments.ForName("aggregation"); v != nil {
-		cfg.Aggregation = v.Value.Raw
-	}
-	if v := dir.Arguments.ForName("includeSelf"); v != nil {
-		cfg.IncludeSelf = v.Value.Raw == "true"
+		// v.Value.Raw is the raw SDL token. For a string argument like
+		// aggregation: "or", Raw is `"or"` (with surrounding double quotes).
+		// Strip them so comparisons like `cfg.Aggregation == "or"` work correctly.
+		cfg.Aggregation = strings.Trim(v.Value.Raw, `"`)
 	}
 	if v := dir.Arguments.ForName("skipBidirectional"); v != nil {
 		cfg.SkipBidirectional = v.Value.Raw == "true"
+	}
+	if v := dir.Arguments.ForName("skip"); v != nil {
+		cfg.Skip = v.Value.Raw == "true"
 	}
 	return cfg
 }

@@ -317,8 +317,8 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [String!] }
-directive @cascadeAuth(operations: [CascadeAuthOperation!], authMode: String, depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, when: String) on FIELD_DEFINITION
-directive @cascadeAuthPolicy(aggregation: String, includeSelf: Boolean, skipBidirectional: Boolean) on OBJECT | INTERFACE
+directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext) on FIELD_DEFINITION
+directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
 directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION

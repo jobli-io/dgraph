@@ -17,7 +17,6 @@ import (
 // Rules:
 //   - May only appear on edge (non-scalar, non-enum) fields
 //   - Not allowed on @remote types, @custom or @lambda fields
-//   - authMode must be "filter" or "enforce" if supplied
 //   - depth must be ≥ 1 or -1 if supplied
 //   - variableContext must be "self" or "parent" if supplied
 //   - No circular cascade chains (detected via DFS over @cascadeAuth edges)
@@ -134,16 +133,6 @@ func cascadeAuthDirectiveValidation(sch *ast.Schema,
 				"Type %s; Field %s: @cascadeAuth target type %q has no @auth(query:...) rule — "+
 					"only query auth is propagated by @cascadeAuth",
 				typ.Name, field.Name, fieldTypeName)}
-		}
-	}
-
-	// Validate authMode: must be "filter" or "enforce" if supplied.
-	if authModeArg := dir.Arguments.ForName("authMode"); authModeArg != nil && authModeArg.Value.Raw != "" {
-		mode := authModeArg.Value.Raw
-		if mode != "filter" && mode != "enforce" {
-			return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
-				`Type %s; Field %s: @cascadeAuth authMode must be "filter" or "enforce", got %q`,
-				typ.Name, field.Name, mode)}
 		}
 	}
 
