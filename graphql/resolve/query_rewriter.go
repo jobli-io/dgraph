@@ -54,6 +54,22 @@ type authRewriter struct {
 	// rewriting to avoid emitting duplicate auth var blocks within a single mutation pass.
 	// Distinct from cascadeVarCache: this is mutation-specific and uses a string key.
 	mutVarCache *map[string]string
+	// `cascadeAuthorityType` is set when rewriteRuleNode is processing the inner OR/AND tree
+	// of a CascadeWrap node (Case C). It holds the Dgraph type name of the cascade authority
+	// (e.g. "Group" for a CascadeWrap{pred: "Groupable.inGroup", type: "Group"}).
+	//
+	// Plain Rule-leaf nodes compiled inside this context must use
+	//   var(func: type(cascadeAuthorityType))
+	// rather than the default
+	//   var(func: uid(parentVarName))
+	// because the authority type's auth rules (e.g. Group's IAMResource merge) must be
+	// evaluated against Group nodes — not against the child type's nodes (JobAd).
+	// Group UIDs and JobAd UIDs are disjoint, so using uid(JobAd_1) would always produce
+	// zero results when used as a filter inside var(func: type(Group)).
+	//
+	// This field is reset to the new CascadeWrapType each time a nested CascadeWrap is
+	// entered, ensuring each level of the cascade chain uses the correct Dgraph type.
+	cascadeAuthorityType string
 }
 
 // The struct is used as a return type for buildCommonAuthQueries function.
@@ -1310,6 +1326,190 @@ func (authRw *authRewriter) evaluateStaticRules(typ schema.Type) schema.RuleResu
 	return rn.EvaluateStatic(authRw.authVariables)
 }
 
+// rewriteCascadeBundle handles a multi-level cascade AND node where
+// CascadeBundlePred is set. This node is produced by cascadeAuthRuleForEdge
+// when an authority type (e.g. Group) itself has incoming cascade edges
+// (e.g. Group→Workspace). The AND children are:
+//
+//   - The PRIMARY leaf: CascadeEdgePred == CascadeBundlePred (e.g. GroupMember.inGroup).
+//     Its Rule is the authority type's own @auth query (e.g. queryGroup {...}).
+//   - GRANDPARENT leaves: each has its own CascadeEdgePred (e.g. WorkspaceMember.inWorkspace).
+//     These must be applied as uid_in filters ON the primary authority var, NOT on the
+//     child type (Company has no WorkspaceMember.inWorkspace edge).
+//
+// Correct DQL for Company→Group→Workspace:
+//
+//	CompanyRoot @filter(uid_in(GroupMember.inGroup, uid(Company_Auth2)))
+//	Company_Auth2 as var(func: type(Group)) @filter(uid(Group_Auth) AND uid_in(WorkspaceMember.inWorkspace, uid(Workspace_Auth))) @cascade {...}
+//
+// Instead of the flat (incorrect):
+//
+//	CompanyRoot @filter(uid_in(GroupMember.inGroup, uid(A)) AND uid_in(WorkspaceMember.inWorkspace, uid(B)))
+func (authRw *authRewriter) rewriteCascadeBundle(
+	typ schema.Type,
+	rn *schema.RuleNode,
+) ([]*dql.GraphQuery, *dql.FilterTree) {
+
+	if rn.EvaluateStatic(authRw.authVariables) == schema.Negative {
+		return nil, nil
+	}
+
+	bundlePred := rn.CascadeBundlePred
+
+	// Use the authority type's @cascadeAuthPolicy(aggregation) stamped on the bundle
+	// node at expansion time. When Group declares aggregation:"or", grandparent uid_in
+	// filters (e.g. inWorkspace→Workspace) are ORed onto the Group authority var's
+	// filter instead of ANDed, correctly mirroring Group's own access policy.
+	grandparentOp := "and"
+	if rn.CascadeAuthAggregation == "or" {
+		grandparentOp = "or"
+	}
+
+	// Separate the primary leaf (CascadeEdgePred == bundlePred) from grandparent leaves.
+	var primaryLeaf *schema.RuleNode
+	var grandparentLeaves []*schema.RuleNode
+	for _, child := range rn.And {
+		if child.CascadeEdgePred == bundlePred {
+			primaryLeaf = child
+		} else {
+			grandparentLeaves = append(grandparentLeaves, child)
+		}
+	}
+
+	if primaryLeaf == nil {
+		// Fallback: no primary leaf found — process as regular AND.
+		var qrys []*dql.GraphQuery
+		var filts []*dql.FilterTree
+		for _, child := range rn.And {
+			q, f := authRw.rewriteRuleNode(typ, child)
+			qrys = append(qrys, q...)
+			if f != nil {
+				filts = append(filts, f)
+			}
+		}
+		if len(filts) == 0 {
+			return qrys, nil
+		}
+		if len(filts) == 1 {
+			return qrys, filts[0]
+		}
+		return qrys, &dql.FilterTree{Op: "and", Child: filts}
+	}
+
+	// CascadeThroughType: this is a synthetic pass-all leaf for a through-node
+	// (e.g. Company with no own @auth). Emit var(func: type(Company)) with no
+	// cascade filter; grandparent uid_in filters will be applied onto it below.
+	if primaryLeaf.CascadeThroughType != "" {
+		varName := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+		r1 := []*dql.GraphQuery{{
+			Var:  varName,
+			Attr: "var",
+			Func: &dql.Function{
+				Name: "type",
+				Args: []dql.Arg{{Value: primaryLeaf.CascadeThroughType}},
+			},
+		}}
+		// Apply grandparent uid_in filters onto this through-node var.
+		for _, gpLeaf := range grandparentLeaves {
+			if gpLeaf.EvaluateStatic(authRw.authVariables) == schema.Negative {
+				continue
+			}
+			gpQrys, gpFilter := authRw.rewriteRuleNode(typ, gpLeaf)
+			r1 = append(r1, gpQrys...)
+			if gpFilter != nil {
+				if r1[0].Filter == nil {
+					r1[0].Filter = gpFilter
+				} else {
+					r1[0].Filter = &dql.FilterTree{
+						Op:    "and",
+						Child: []*dql.FilterTree{r1[0].Filter, gpFilter},
+					}
+				}
+			}
+		}
+		if authRw.cascadeVarCache != nil {
+			authRw.cascadeVarCache[primaryLeaf] = varName
+		}
+		return r1, &dql.FilterTree{
+			Func: &dql.Function{
+				Name: "uid_in",
+				Args: []dql.Arg{
+					{Value: bundlePred},
+					{Value: "uid(" + varName + ")"},
+				},
+			},
+		}
+	}
+
+	// Check static evaluation of primary leaf (normal auth rule leaf).
+	if primaryLeaf.EvaluateStatic(authRw.authVariables) == schema.Negative {
+		return nil, nil
+	}
+
+	// Generate the primary authority var from primaryLeaf.Rule.
+	qry := primaryLeaf.Rule.AuthFor(authRw.authVariables)
+	if qry == nil {
+		return nil, nil
+	}
+
+	// Cache check — skip if already cached (fall through to generate fresh var).
+	if cached, ok := authRw.cascadeVarCache[primaryLeaf]; ok {
+		_ = cached
+	}
+
+	varName := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+	r1 := rewriteAsQuery(qry, authRw, varName)
+	r1[0].Var = varName
+	r1[0].Attr = "var"
+	r1[0].Func = &dql.Function{
+		Name: "type",
+		Args: []dql.Arg{{Value: qry.Type().DgraphName()}},
+	}
+
+	// Apply grandparent uid_in filters ONTO the primary authority var's filter.
+	// Each grandparent leaf has CascadeEdgePred for a predicate on the AUTHORITY type
+	// (e.g. WorkspaceMember.inWorkspace on Group), not on the child type (Company).
+	// The grandparentOp ("and" or "or") is read from the authority type's
+	// @cascadeAuthPolicy(aggregation): when Group declares aggregation:"or", the
+	// workspace uid_in filter is ORed with Group's own IAMResource filter on the
+	// Group var, correctly mirroring Group's own access policy.
+	for _, gpLeaf := range grandparentLeaves {
+		if gpLeaf.EvaluateStatic(authRw.authVariables) == schema.Negative {
+			continue
+		}
+		gpQrys, gpFilter := authRw.rewriteRuleNode(typ, gpLeaf)
+		r1 = append(r1, gpQrys...)
+		if gpFilter != nil {
+			if r1[0].Filter == nil {
+				r1[0].Filter = gpFilter
+			} else {
+				r1[0].Filter = &dql.FilterTree{
+					Op:    grandparentOp,
+					Child: []*dql.FilterTree{r1[0].Filter, gpFilter},
+				}
+			}
+		}
+	}
+
+	if len(r1[0].Cascade) == 0 {
+		r1[0].Cascade = append(r1[0].Cascade, "__all__")
+	}
+
+	if authRw.cascadeVarCache != nil {
+		authRw.cascadeVarCache[primaryLeaf] = varName
+	}
+
+	return r1, &dql.FilterTree{
+		Func: &dql.Function{
+			Name: "uid_in",
+			Args: []dql.Arg{
+				{Value: bundlePred},
+				{Value: "uid(" + varName + ")"},
+			},
+		},
+	}
+}
+
 func (authRw *authRewriter) rewriteRuleNode(
 	typ schema.Type,
 	rn *schema.RuleNode) ([]*dql.GraphQuery, *dql.FilterTree) {
@@ -1335,12 +1535,233 @@ func (authRw *authRewriter) rewriteRuleNode(
 	}
 
 	switch {
+	case rn.CascadeWrapPred != "":
+		// CascadeWrap node: uid_in(CascadeWrapPred, uid(authorityVar)).
+		//
+		// The authority type's full auth is in CascadeWrapInner.
+		// Three cases based on the shape of the inner tree:
+		//
+		//  (A) Leaf inner: CascadeWrapInner has a single Rule leaf with no
+		//      CascadeWrapPred / CascadeEdgePred. Build the authority var directly:
+		//        authorityVar as var(func: type(CascadeWrapType)) @cascade { <rule body> }
+		//
+		//  (B) And inner with a Rule leaf + CascadeWrap children: build the
+		//      authority var from the Rule leaf (inline @cascade body) and apply
+		//      the CascadeWrap uid_in filters as @filter on the authority block:
+		//        authorityVar as var(func: type(CascadeWrapType))
+		//          @filter(uid_in(cascPred, uid(inner_var)) [AND ...])
+		//          @cascade { <rule body> }
+		//      This produces the same DQL format as the old rewriteCascadeBundle.
+		//
+		//  (C) Or/pure-compound inner: rewrite the inner tree to get
+		//      (supportVars, innerFilter) then emit:
+		//        authorityVar as var(func: type(CascadeWrapType)) @filter(innerFilter) @cascade
+		//
+		// Each nested CascadeWrap resets cascadeAuthorityType to its own CascadeWrapType so
+		// that plain Rule-leaf nodes inside the authority's OR/AND tree produce
+		// var(func: type(Group)) rather than the incorrect var(func: uid(JobAd_1)).
+		if rn.EvaluateStatic(authRw.authVariables) == schema.Negative {
+			return nil, nil
+		}
+		if rn.CascadeWrapInner == nil {
+			return nil, nil
+		}
+
+		inner := rn.CascadeWrapInner
+
+		// Cache check: reuse authority var if already generated in this request.
+		if authRw.cascadeVarCache != nil {
+			if cached, ok := authRw.cascadeVarCache[inner]; ok {
+				return nil, &dql.FilterTree{
+					Func: &dql.Function{
+						Name: "uid_in",
+						Args: []dql.Arg{
+							{Value: rn.CascadeWrapPred},
+							{Value: "uid(" + cached + ")"},
+						},
+					},
+				}
+			}
+		}
+
+		varName := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+
+		// ── Case A: simple Rule leaf (no CascadeWrapPred / CascadeEdgePred). ──
+		if inner.Rule != nil && inner.CascadeWrapPred == "" && inner.CascadeEdgePred == "" {
+			if inner.EvaluateStatic(authRw.authVariables) == schema.Negative {
+				return nil, nil
+			}
+			qry := inner.Rule.AuthFor(authRw.authVariables)
+			if qry == nil {
+				return nil, nil
+			}
+			r1 := rewriteAsQuery(qry, authRw, varName)
+			r1[0].Var = varName
+			r1[0].Attr = "var"
+			r1[0].Func = &dql.Function{
+				Name: "type",
+				Args: []dql.Arg{{Value: rn.CascadeWrapType}},
+			}
+			if len(r1[0].Cascade) == 0 {
+				r1[0].Cascade = append(r1[0].Cascade, "__all__")
+			}
+			if authRw.cascadeVarCache != nil {
+				authRw.cascadeVarCache[inner] = varName
+			}
+			return r1, &dql.FilterTree{
+				Func: &dql.Function{
+					Name: "uid_in",
+					Args: []dql.Arg{
+						{Value: rn.CascadeWrapPred},
+						{Value: "uid(" + varName + ")"},
+					},
+				},
+			}
+		}
+
+		// ── Case B: And inner with a Rule leaf + CascadeWrap children. ──
+		// Build the authority var from the primary Rule leaf (inline @cascade body),
+		// and apply the CascadeWrap children as uid_in @filter entries.
+		// This matches the output format the old rewriteCascadeBundle produced.
+		if len(inner.And) > 0 {
+			// Split And children into: primary Rule leaf vs. CascadeWrap nodes.
+			var ruleLeaf *schema.RuleNode
+			var cascadeWrapChildren []*schema.RuleNode
+			var otherChildren []*schema.RuleNode
+			for _, child := range inner.And {
+				if child.Rule != nil && child.CascadeWrapPred == "" && child.CascadeEdgePred == "" {
+					if ruleLeaf == nil {
+						ruleLeaf = child
+					} else {
+						otherChildren = append(otherChildren, child)
+					}
+				} else if child.CascadeWrapPred != "" {
+					cascadeWrapChildren = append(cascadeWrapChildren, child)
+				} else {
+					otherChildren = append(otherChildren, child)
+				}
+			}
+
+			if ruleLeaf != nil && len(cascadeWrapChildren) > 0 && len(otherChildren) == 0 {
+				// Perfect case B: exactly one Rule leaf + CascadeWrap children.
+				if inner.EvaluateStatic(authRw.authVariables) == schema.Negative {
+					return nil, nil
+				}
+				if ruleLeaf.EvaluateStatic(authRw.authVariables) == schema.Negative {
+					return nil, nil
+				}
+				qry := ruleLeaf.Rule.AuthFor(authRw.authVariables)
+				if qry == nil {
+					return nil, nil
+				}
+				// Build base var from the rule leaf.
+				r1 := rewriteAsQuery(qry, authRw, varName)
+				r1[0].Var = varName
+				r1[0].Attr = "var"
+				r1[0].Func = &dql.Function{
+					Name: "type",
+					Args: []dql.Arg{{Value: rn.CascadeWrapType}},
+				}
+
+				// Rewrite each CascadeWrap child and apply uid_in as @filter on r1[0].
+				for _, cwChild := range cascadeWrapChildren {
+					if cwChild.EvaluateStatic(authRw.authVariables) == schema.Negative {
+						continue
+					}
+					cwQrys, cwFilter := authRw.rewriteRuleNode(typ, cwChild)
+					r1 = append(r1, cwQrys...)
+					if cwFilter != nil {
+						if r1[0].Filter == nil {
+							r1[0].Filter = cwFilter
+						} else {
+							r1[0].Filter = &dql.FilterTree{
+								Op:    "and",
+								Child: []*dql.FilterTree{r1[0].Filter, cwFilter},
+							}
+						}
+					}
+				}
+
+				if len(r1[0].Cascade) == 0 {
+					r1[0].Cascade = append(r1[0].Cascade, "__all__")
+				}
+				if authRw.cascadeVarCache != nil {
+					authRw.cascadeVarCache[inner] = varName
+				}
+				return r1, &dql.FilterTree{
+					Func: &dql.Function{
+						Name: "uid_in",
+						Args: []dql.Arg{
+							{Value: rn.CascadeWrapPred},
+							{Value: "uid(" + varName + ")"},
+						},
+					},
+				}
+			}
+		}
+
+		// ── Case C: Or/pure-compound inner. ──
+		// Rewrite the inner tree to get support vars and a filter expression.
+		//
+		// Create a copy of the rewriter with cascadeAuthorityType set to this wrap's type.
+		// This propagates to plain Rule-leaf nodes inside the inner OR/AND tree so they
+		// produce var(func: type(CascadeWrapType)) — e.g. type(Group) — instead of the
+		// default var(func: uid(parentVarName)) = var(func: uid(JobAd_1)).
+		// Group UIDs and JobAd UIDs are disjoint, so the old code always produced zero
+		// results when the inner filter was used on var(func: type(Group)).
+		innerAuthRw := *authRw
+		innerAuthRw.cascadeAuthorityType = rn.CascadeWrapType
+		innerQrys, innerFilter := innerAuthRw.rewriteRuleNode(typ, inner)
+		if innerFilter == nil && len(innerQrys) == 0 {
+			return nil, nil
+		}
+
+		// Build: varName as var(func: type(CascadeWrapType)) @filter(innerFilter) @cascade
+		authBlock := &dql.GraphQuery{
+			Var:  varName,
+			Attr: "var",
+			Func: &dql.Function{
+				Name: "type",
+				Args: []dql.Arg{{Value: rn.CascadeWrapType}},
+			},
+			Filter:  innerFilter,
+			Cascade: []string{"__all__"},
+		}
+
+		if authRw.cascadeVarCache != nil {
+			authRw.cascadeVarCache[inner] = varName
+		}
+
+		// Place authBlock first so it is rendered before its support vars.
+		allQrys := append([]*dql.GraphQuery{authBlock}, innerQrys...)
+		return allQrys, &dql.FilterTree{
+			Func: &dql.Function{
+				Name: "uid_in",
+				Args: []dql.Arg{
+					{Value: rn.CascadeWrapPred},
+					{Value: "uid(" + varName + ")"},
+				},
+			},
+		}
 	case len(rn.And) > 0:
 		// if there is atleast one RBAC rule which is false, then this
 		// whole And block needs to be ignored.
 		if rn.EvaluateStatic(authRw.authVariables) == schema.Negative {
 			return nil, nil
 		}
+
+		// CascadeBundlePred marks a multi-level cascade bundle created by
+		// cascadeAuthRuleForEdge when a parent type itself has incoming cascade
+		// edges (e.g. Company→Group→Workspace). The primary leaf has
+		// CascadeEdgePred == CascadeBundlePred; grandparent leaves have their
+		// own CascadeEdgePred values. To produce correct DQL, grandparent
+		// uid_in filters must be applied to the PRIMARY authority var (e.g.
+		// the Group var), NOT to the child type (Company) directly — Company
+		// has no WorkspaceMember.inWorkspace edge.
+		if rn.CascadeBundlePred != "" {
+			return authRw.rewriteCascadeBundle(typ, rn)
+		}
+
 		qrys, filts := nodeList(typ, rn.And)
 		if len(filts) == 0 {
 			return qrys, nil
@@ -1504,14 +1925,32 @@ func (authRw *authRewriter) rewriteRuleNode(
 		// create a copy of the auth query that's specialized for the values from the JWT
 		qry := rn.Rule.AuthFor(authRw.authVariables)
 
-		// build
-		// Todo2 as var(func: uid(Todo1)) @cascade { ...auth query 1... }
 		varName := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
 		r1 := rewriteAsQuery(qry, authRw, varName)
 		r1[0].Var = varName
 		r1[0].Attr = "var"
-		if len(r1[0].Cascade) == 0 {
-			r1[0].Cascade = append(r1[0].Cascade, "__all__")
+
+		if authRw.cascadeAuthorityType != "" {
+			// This Rule leaf is being compiled inside a CascadeWrap Case C context:
+			// the rule belongs to the authority type (e.g. Group's IAMResource auth),
+			// not to the child type (e.g. JobAd). We must scan authority-type nodes,
+			// not child-type nodes — Group UIDs and JobAd UIDs are disjoint.
+			//
+			// Use type(cascadeAuthorityType) so the var starts from all nodes of the
+			// authority type. The surrounding CascadeWrap var block already carries
+			// @cascade, so we do not add it here; the filter on the authority block
+			// (innerFilter) enforces the cascade constraint at the parent level.
+			r1[0].Func = &dql.Function{
+				Name: "type",
+				Args: []dql.Arg{{Value: authRw.cascadeAuthorityType}},
+			}
+		} else {
+			// Default: the rule belongs to the queried type itself.
+			// build
+			// Todo2 as var(func: uid(Todo1)) @cascade { ...auth query 1... }
+			if len(r1[0].Cascade) == 0 {
+				r1[0].Cascade = append(r1[0].Cascade, "__all__")
+			}
 		}
 
 		// return all queries, including the nested var queries.
