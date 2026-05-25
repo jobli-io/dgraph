@@ -122,13 +122,30 @@ func (n *fixtureNode) addEdge(pred string, targets ...uint64) *fixtureNode {
 // vars map. Uses fixed-point iteration so dependency ordering doesn't matter.
 func (db *fixtureDB) evalVars(parsedQuery *dql.Result) (map[string]uidSet, error) {
 	vars := make(map[string]uidSet)
-	for {
-		prevSize := len(vars)
+	const maxPasses = 20
+	for pass := 0; pass < maxPasses; pass++ {
+		// Snapshot current values so we can detect value changes, not just count changes.
+		// Multi-level cascade DQL has inter-var dependencies (Company_Auth2 depends on
+		// Company_Auth3) that require multiple passes to stabilize.
+		snapshot := make(map[string]int, len(vars))
+		for k, v := range vars {
+			snapshot[k] = len(v)
+		}
 		if err := db.evalVarsOnce(parsedQuery, vars); err != nil {
 			return nil, err
 		}
-		if len(vars) == prevSize {
-			break // stable: no new vars were added this pass.
+		// Check if any variable's size changed.
+		changed := len(vars) != len(snapshot)
+		if !changed {
+			for k, v := range vars {
+				if snapshot[k] != len(v) {
+					changed = true
+					break
+				}
+			}
+		}
+		if !changed {
+			break // stable: no vars changed this pass.
 		}
 	}
 	return vars, nil
@@ -932,9 +949,6 @@ func TestCascadeAuthExec_Variable_MultiVar_WrongDomain_SeesNothing(t *testing.T)
 //
 // Schema: cascadeAuthMultiVarSchema (authority declares $DOMAIN as String!).
 // JWT:    only EMAIL present — DOMAIN absent.
-//
-// The closed-by-default logic collapses the query when a required variable
-// ($DOMAIN String!) is missing from the JWT → no entity is visible.
 // ---------------------------------------------------------------------------
 func TestCascadeAuthExec_Variable_MultiVar_PartialJWT_SeesNothing(t *testing.T) {
 	gqlSchema, metaInfo := cascadeAuthSchemaAndMeta(t, cascadeAuthMultiVarSchema)
@@ -947,4 +961,132 @@ func TestCascadeAuthExec_Variable_MultiVar_PartialJWT_SeesNothing(t *testing.T) 
 	)
 	require.Empty(t, got,
 		"Missing required $DOMAIN variable should hide all entities (closed-by-default)")
+}
+
+// ---------------------------------------------------------------------------
+// 4-level cascade: AdPostRecord → Company → Group → Workspace
+//
+// Schema: AdPostRecord has a @cascadeAuth edge to Company (which is already
+// a GroupMember, itself a WorkspaceMember). This exercises the recursive
+// rewriteCascadeBundle path: each node links to its parent's bundle.
+//
+// Data:
+//   AdPostRecord uid=40 name=Ad1 inCompany=CompA (uid=30)  ← Alice's chain
+//   AdPostRecord uid=41 name=Ad2 inCompany=CompB (uid=31)  ← Bob's chain
+//   (CompA→GrpA→WsA, CompB→GrpB→WsB from baseThreeLevelFixture)
+//
+// Expected:
+//   Alice (EMAIL=alice@example.com) → sees Ad1 only
+//   Bob   (EMAIL=bob@example.com)   → sees Ad2 only
+// ---------------------------------------------------------------------------
+
+const cascadeAuthFourLevelSchema = `
+type User {
+  email: String! @id
+}
+
+type Workspace @auth(
+  query: { rule: """
+    query($EMAIL: String!) {
+      queryWorkspace {
+        inUsers(filter: { email: { eq: $EMAIL } }) { __typename }
+      }
+    }
+  """ }
+) {
+  name: String
+  inUsers: [User]
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth()
+}
+
+type Group implements WorkspaceMember @auth(
+  query: { rule: """
+    query($EMAIL: String!) {
+      queryGroup {
+        inUsers(filter: { email: { eq: $EMAIL } }) { __typename }
+      }
+    }
+  """ }
+) {
+  name: String
+  inUsers: [User]
+  hasCompanies: [Company] @hasInverse(field: inGroup)
+}
+
+interface GroupMember {
+  inGroup: Group @cascadeAuth()
+}
+
+type Company implements GroupMember {
+  name: String
+  hasAdPosts: [AdPostRecord] @hasInverse(field: inCompany)
+}
+
+interface CompanyMember {
+  inCompany: Company @cascadeAuth()
+}
+
+type AdPostRecord implements CompanyMember {
+  name: String
+}
+`
+
+func fourLevelFixture() *fixtureDB {
+	db := baseThreeLevelFixture()
+
+	// Back-edges from Company to AdPostRecord
+	db.nodes[30].addEdge("Company.hasAdPosts", 40)
+	db.nodes[31].addEdge("Company.hasAdPosts", 41)
+
+	db.addNode(40, "AdPostRecord").
+		setScalar("AdPostRecord.name", "Ad1").
+		addEdge("CompanyMember.inCompany", 30) // → CompA
+
+	db.addNode(41, "AdPostRecord").
+		setScalar("AdPostRecord.name", "Ad2").
+		addEdge("CompanyMember.inCompany", 31) // → CompB
+
+	return db
+}
+
+func TestCascadeAuthExec_FourLevel_AND_AliceSeesAd1(t *testing.T) {
+	gqlSchema, metaInfo := cascadeAuthSchemaAndMeta(t, cascadeAuthFourLevelSchema)
+	db := fourLevelFixture()
+
+	got := resolveWithFixture(t, gqlSchema, metaInfo,
+		map[string]interface{}{"EMAIL": "alice@example.com"},
+		`query { queryAdPostRecord { name } }`,
+		db, "AdPostRecord.name",
+	)
+	require.Equal(t, []string{"Ad1"}, got,
+		"Alice should see only Ad1 through CompA→GrpA→WsA auth chain")
+}
+
+func TestCascadeAuthExec_FourLevel_AND_BobSeesAd2(t *testing.T) {
+	gqlSchema, metaInfo := cascadeAuthSchemaAndMeta(t, cascadeAuthFourLevelSchema)
+	db := fourLevelFixture()
+
+	got := resolveWithFixture(t, gqlSchema, metaInfo,
+		map[string]interface{}{"EMAIL": "bob@example.com"},
+		`query { queryAdPostRecord { name } }`,
+		db, "AdPostRecord.name",
+	)
+	require.Equal(t, []string{"Ad2"}, got,
+		"Bob should see only Ad2 through CompB→GrpB→WsB auth chain")
+}
+
+func TestCascadeAuthExec_FourLevel_AND_UnauthorizedSeesNothing(t *testing.T) {
+	gqlSchema, metaInfo := cascadeAuthSchemaAndMeta(t, cascadeAuthFourLevelSchema)
+	db := fourLevelFixture()
+
+	got := resolveWithFixture(t, gqlSchema, metaInfo,
+		map[string]interface{}{"EMAIL": "nobody@example.com"},
+		`query { queryAdPostRecord { name } }`,
+		db, "AdPostRecord.name",
+	)
+	require.Empty(t, got, "Unknown user should see no ad post records")
 }

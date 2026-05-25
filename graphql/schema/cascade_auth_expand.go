@@ -175,11 +175,19 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 		}
 		policy := childAstType.CascadeAuthPolicyConfig()
 
+		// @cascadeAuthPolicy(skip: true) — type explicitly opts out of all cascade
+		// auth expansion (e.g. audit/log types that implement WorkspaceMember only
+		// for the inWorkspace field, not for auth enforcement from the authority).
+		if policy.Skip {
+			continue
+		}
+
 		// Build per-parent-edge RuleNodes, reading from the snapshot so that
 		// cascade rules are derived only from each authority's declared @auth.
 		var perEdgeRules []*RuleNode // used only for preCascadeQueryAuth / bidir setup
 		for _, edge := range edges {
-			ruleNode, err := cascadeAuthRuleForEdge(edge, childTypeName, "query", incomingEdges,
+			// At depth=0 the immediate child IS the outermost queried child.
+			ruleNode, err := buildCascadeRule(edge, childTypeName, childTypeName, "query", incomingEdges,
 				authRulesForCascade, make(map[string]bool), 0, sch)
 			if err != nil {
 				return err
@@ -189,7 +197,7 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 			}
 		}
 
-		if len(perEdgeRules) == 0 && !policy.IncludeSelf {
+		if len(perEdgeRules) == 0 {
 			continue
 		}
 
@@ -233,7 +241,8 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 			// Build per-op per-edge rules (op-specific authority rule selection).
 			var perOpEdgeRules []*RuleNode
 			for _, edge := range edges {
-				ruleNode, err := cascadeAuthRuleForEdge(edge, childTypeName, op, incomingEdges,
+				// At depth=0 the immediate child IS the outermost queried child.
+				ruleNode, err := buildCascadeRule(edge, childTypeName, childTypeName, op, incomingEdges,
 					authRulesForCascade, make(map[string]bool), 0, sch)
 				if err != nil {
 					return err
@@ -245,26 +254,11 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 			if len(perOpEdgeRules) == 0 {
 				continue
 			}
-			// Combine per-edge rules according to aggregation policy.
-			var cascadeRule *RuleNode
-			switch {
-			case len(perOpEdgeRules) == 1:
-				cascadeRule = perOpEdgeRules[0]
-			case policy.Aggregation == "or":
-				cascadeRule = &RuleNode{Or: perOpEdgeRules}
-			default:
-				cascadeRule = &RuleNode{And: perOpEdgeRules}
-			}
-			// includeSelf: OR the child's own pre-cascade @auth(query:...) alongside the
-			// cascade rule so a caller can reach the child via its own auth OR the cascade
-			// path. Only applied when policy.IncludeSelf is true.
-			if policy.IncludeSelf {
-				ownRule := childOwnQueryRule(childTypeName, authRulesForCascade)
-				if ownRule != nil {
-					cascadeRule = mergeAuthNodeWithOr(ownRule, cascadeRule)
-				}
-			}
-			mergeIntoOp(authRules[childTypeName], op, cascadeRule, policy.Aggregation)
+			// Compose: AND-aggregate cascade edges first, then merge the cascade
+			// block into the child's existing (TypeAuth + InterfaceAuth) base rule.
+			// Aggregation is resolved from @cascadeAuthPolicy(aggregation:) on the
+			// child type; defaults to "and" when no type-level policy is set.
+			composeCascadeWithBase(authRules[childTypeName], op, perOpEdgeRules, policy.Aggregation)
 		}
 
 		// Bidirectional: reverse-visibility rules on parent (Pass 0).
@@ -463,11 +457,180 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 	return nil
 }
 
+// buildCascadeRule is the new canonical cascade-auth rule builder.
+//
+// It replaces the cascadeAuthRuleForEdge + CascadeBundlePred mechanism with a
+// cleaner two-step approach:
+//
+//  1. Compute the authority type's FULL auth rule — its own @auth rule (if any)
+//     combined with the auth rules from ITS OWN cascade parents, merged using
+//     the authority's own @cascadeAuthPolicy(aggregation).
+//
+//  2. Wrap the result in a CascadeWrap node so the DQL rewriter can emit:
+//     var(func: type(AuthorityType)) @filter(authorityFullAuth) @cascade
+//     and return uid_in(edge.dgraphPred, uid(authorityVar)) as the filter for
+//     the child type.
+//
+// Key invariant: each type's full auth is computed from ITS OWN policy, not the
+// child's. This means Group's aggregation:"or" correctly produces
+// OR(G_iam_rule, uid_in(inWorkspace, Workspace_auth)) on the Group var, which
+// is then referenced via uid_in(inGroup, uid(Group_var)) by JobAd.
+//
+// outerChildTypeName: the outermost queried type (provides @authVariables context).
+// immediateChildTypeName: the type declaring @cascadeAuth at this depth.
+// op: "query" | "add" | "update" | "delete".
+func buildCascadeRule(
+	edge cascadeAuthIncomingEdge,
+	outerChildTypeName, immediateChildTypeName string,
+	op string,
+	incomingEdges map[string][]cascadeAuthIncomingEdge,
+	authRulesSnapshot map[string]*TypeAuth,
+	visited map[string]bool,
+	depth int,
+	sch *schema,
+) (*RuleNode, error) {
+	if visited[edge.parentTypeName] {
+		return nil, nil
+	}
+	if edge.cfg.Depth != -1 && depth >= edge.cfg.Depth {
+		return nil, nil
+	}
+
+	authorityDef := sch.schema.Types[edge.parentTypeName]
+	if authorityDef == nil {
+		return nil, nil
+	}
+
+	ta := authRulesSnapshot[edge.parentTypeName]
+
+	// ── Case 1: authority is an interface with no direct @auth — collect implementors.
+	if (ta == nil || ta.Rules == nil) && authorityDef.Kind == ast.Interface {
+		implRule := interfaceImplementorAuthRules(sch, edge.parentTypeName, authRulesSnapshot)
+		if implRule == nil {
+			return nil, nil
+		}
+		implRule, err := resolveAuthVarsInRuleNode(implRule, edge, outerChildTypeName, immediateChildTypeName, sch)
+		if err != nil {
+			return nil, err
+		}
+		if implRule == nil {
+			return nil, nil
+		}
+		return &RuleNode{
+			CascadeWrapPred:  edge.dgraphPred,
+			CascadeWrapType:  edge.parentTypeName,
+			CascadeWrapInner: implRule,
+		}, nil
+	}
+
+	// ── Resolve authority's own @auth rule for this op (with @authVariables substitution).
+	var authorityOwnRule *RuleNode
+	if ta != nil && ta.Rules != nil {
+		switch op {
+		case "add":
+			authorityOwnRule = ta.Rules.Add
+		case "update":
+			authorityOwnRule = ta.Rules.Update
+		case "delete":
+			authorityOwnRule = ta.Rules.Delete
+		}
+		if authorityOwnRule == nil {
+			authorityOwnRule = ta.Rules.Query // fallback
+		}
+	}
+	if authorityOwnRule != nil {
+		var err error
+		authorityOwnRule, err = resolveAuthVarsInRuleNode(authorityOwnRule, edge, outerChildTypeName, immediateChildTypeName, sch)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// ── Recurse into authority's own cascade parents.
+	visited[edge.parentTypeName] = true
+	defer func() { visited[edge.parentTypeName] = false }()
+
+	authorityAstType := &astType{
+		typ:             &ast.Type{NamedType: edge.parentTypeName},
+		inSchema:        sch,
+		dgraphPredicate: sch.dgraphPredicate,
+	}
+	authorityPolicy := authorityAstType.CascadeAuthPolicyConfig()
+
+	parentEdges := incomingEdges[edge.parentTypeName]
+	var parentCascadeRules []*RuleNode
+	for _, parentEdge := range parentEdges {
+		// immediateChildTypeName for the recursive call = edge.parentTypeName:
+		// the authority at this depth becomes the immediate child at depth+1.
+		gpRule, err := buildCascadeRule(
+			parentEdge, outerChildTypeName, edge.parentTypeName, op,
+			incomingEdges, authRulesSnapshot, visited, depth+1, sch,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if gpRule != nil {
+			parentCascadeRules = append(parentCascadeRules, gpRule)
+		}
+	}
+
+	// ── Combine authority's own rule + parent cascade rules per authority's OWN policy.
+	var authorityFullAuth *RuleNode
+	switch {
+	case len(parentCascadeRules) == 0:
+		// No cascade parents — just the authority's own rule.
+		authorityFullAuth = authorityOwnRule
+
+	case authorityOwnRule == nil:
+		// Through-type: no own @auth, but has cascade parents.
+		if len(parentCascadeRules) == 1 {
+			authorityFullAuth = parentCascadeRules[0]
+		} else if authorityPolicy.Aggregation == "or" {
+			authorityFullAuth = &RuleNode{Or: parentCascadeRules}
+		} else {
+			authorityFullAuth = &RuleNode{And: parentCascadeRules}
+		}
+
+	default:
+		// Both own @auth AND cascade parents — combine per authority's policy.
+		var parentCascade *RuleNode
+		if len(parentCascadeRules) == 1 {
+			parentCascade = parentCascadeRules[0]
+		} else if authorityPolicy.Aggregation == "or" {
+			parentCascade = &RuleNode{Or: parentCascadeRules}
+		} else {
+			parentCascade = &RuleNode{And: parentCascadeRules}
+		}
+		if authorityPolicy.Aggregation == "or" {
+			authorityFullAuth = mergeAuthNodeWithOr(authorityOwnRule, parentCascade)
+		} else {
+			authorityFullAuth = &RuleNode{And: []*RuleNode{authorityOwnRule, parentCascade}}
+		}
+	}
+
+	if authorityFullAuth == nil {
+		return nil, nil
+	}
+
+	return &RuleNode{
+		CascadeWrapPred:  edge.dgraphPred,
+		CascadeWrapType:  edge.parentTypeName,
+		CascadeWrapInner: authorityFullAuth,
+	}, nil
+}
+
 // cascadeAuthRuleForEdge builds the RuleNode for a single incoming cascade edge.
 // op is the operation being processed ("query", "add", "update", "delete").
 // For add/update/delete it prefers the authority's op-specific @auth rule,
 // falling back to @auth(query:...) when no op-specific rule is declared.
-func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string, op string,
+//
+// childTypeName is the OUTERMOST queried type — @authVariables from this type
+// propagate down through all depths for substitution.
+// immediateChildTypeName is the type declaring the @cascadeAuth field at THIS
+// specific depth — used only to validate variableContext:"self" requirements.
+// At depth=0 both are the same; at deeper depths immediateChildTypeName is the
+// intermediate type (the authority from the calling frame).
+func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName, immediateChildTypeName string, op string,
 	incomingEdges map[string][]cascadeAuthIncomingEdge,
 	authRules map[string]*TypeAuth,
 	visited map[string]bool, depth int, sch *schema) (*RuleNode, error) {
@@ -481,18 +644,67 @@ func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string, 
 
 	ta := authRules[edge.parentTypeName]
 	if ta == nil || ta.Rules == nil {
-		// Authority has no own @auth. If it's an interface, collect auth
-		// rules from all concrete implementors and use their union instead.
+		// Authority has no own @auth.
+		//
+		// Case 1: it's an interface — collect auth rules from all concrete
+		// implementors and use their union instead.
 		authorityDef := sch.schema.Types[edge.parentTypeName]
-		if authorityDef == nil || authorityDef.Kind != ast.Interface {
+		if authorityDef != nil && authorityDef.Kind == ast.Interface {
+			implRule := interfaceImplementorAuthRules(sch, edge.parentTypeName, authRules)
+			if implRule == nil {
+				return nil, nil
+			}
+			// Wrap with the cascade edge pred (child→parent traversal predicate).
+			return withCascadeEdgePred(implRule, edge.dgraphPred), nil
+		}
+
+		// Case 2: it's a concrete type with no own auth but it has incoming
+		// cascade edges (e.g. Company has no @auth but Company←Group←Workspace).
+		// Build a bundle where the PRIMARY leaf is a synthetic "pass-all" CascadeThroughType
+		// node (emitting var(func: type(Company)) with no filter), and the grandparent
+		// rules are applied onto that var as uid_in filters.
+		// This enables 4+-level chains: AdPostRecord→Company→Group→Workspace.
+		if authorityDef == nil {
 			return nil, nil
 		}
-		implRule := interfaceImplementorAuthRules(sch, edge.parentTypeName, authRules)
-		if implRule == nil {
+		parentEdgesThrough := incomingEdges[edge.parentTypeName]
+		if len(parentEdgesThrough) == 0 {
+			return nil, nil // no own auth and no cascade to inherit — nothing to emit
+		}
+		visited[edge.parentTypeName] = true
+		defer func() { visited[edge.parentTypeName] = false }()
+		var throughRules []*RuleNode
+		for _, parentEdge := range parentEdgesThrough {
+			// Pass the outermost childTypeName (not the intermediate through-type)
+			// so that @authVariables substitution at every depth uses the original
+			// queried type's vars — e.g. JobAd.QRY_PERMISSIONS propagates into
+			// Group's and Workspace's auth rules, not Group.QRY_PERMISSIONS.
+			// immediateChildTypeName = edge.parentTypeName (through-node is the immediate child).
+			gpRule, err := cascadeAuthRuleForEdge(parentEdge, childTypeName, edge.parentTypeName, op,
+				incomingEdges, authRules, visited, depth+1, sch)
+			if err != nil {
+				return nil, err
+			}
+			if gpRule != nil {
+				throughRules = append(throughRules, gpRule)
+			}
+		}
+		if len(throughRules) == 0 {
 			return nil, nil
 		}
-		// Wrap with the cascade edge pred (child→parent traversal predicate).
-		return withCascadeEdgePred(implRule, edge.dgraphPred), nil
+		// Synthetic primary leaf: represents the through-node (e.g. Company)
+		// with no auth filter — just a type scan. The DQL rewriter emits:
+		//   Var as var(func: type(Company))  [with grandparent uid_in filters on it]
+		primaryLeaf := &RuleNode{
+			CascadeEdgePred:    edge.dgraphPred,
+			CascadeThroughType: edge.parentTypeName,
+		}
+		// Build the AND bundle: [primary, ...grandparents]
+		andChildren := append([]*RuleNode{primaryLeaf}, throughRules...)
+		return &RuleNode{
+			And:               andChildren,
+			CascadeBundlePred: edge.dgraphPred,
+		}, nil
 	}
 
 	// Select the op-specific authority rule, falling back to query.
@@ -514,7 +726,15 @@ func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string, 
 	}
 
 	// Clone the authority rule and apply @authVariables substitution.
-	parentRule, err := resolveAuthVarsInRuleNode(authorityRule, edge, childTypeName, sch)
+	// immediateChildTypeName (the type at THIS depth declaring the @cascadeAuth field)
+	// is edge.parentTypeName of the calling frame. At depth=0 it equals childTypeName.
+	// We use edge.dgraphPred to identify the field; the immediate child is whoever
+	// declared it — tracked by the caller as the previous edge.parentTypeName.
+	// Here we compute it: at the point of this call, childTypeName is the outermost
+	// queried type. The immediate child is the type that HAS the @cascadeAuth field
+	// pointing to edge.parentTypeName (the authority). That type was passed as
+	// immediateChildTypeName from the outer frame.
+	parentRule, err := resolveAuthVarsInRuleNode(authorityRule, edge, childTypeName, immediateChildTypeName, sch)
 	if err != nil {
 		return nil, err
 	}
@@ -530,7 +750,12 @@ func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string, 
 
 		var grandparentRules []*RuleNode
 		for _, parentEdge := range parentEdges {
-			gpRule, err := cascadeAuthRuleForEdge(parentEdge, edge.parentTypeName, op,
+			// Pass the outermost childTypeName (not the intermediate edge.parentTypeName)
+			// so substitution at every depth uses the originally queried type's
+			// @authVariables — the full chain A→B→C all use A's QRY_PERMISSIONS.
+			// immediateChildTypeName for the recursive call = edge.parentTypeName
+			// (the authority at THIS depth becomes the immediate child at depth+1).
+			gpRule, err := cascadeAuthRuleForEdge(parentEdge, childTypeName, edge.parentTypeName, op,
 				incomingEdges, authRules, visited, depth+1, sch)
 			if err != nil {
 				return nil, err
@@ -540,9 +765,23 @@ func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName string, 
 			}
 		}
 		if len(grandparentRules) > 0 {
-			// AND the parent's own rule with its grandparent rules.
+			// Always build an And bundle node here — the CascadeBundlePred structure
+			// ensures rewriteCascadeBundle is invoked, which applies grandparent
+			// uid_in filters ONTO the primary authority var (not onto the child type).
+			// CascadeAuthAggregation carries the authority type's @cascadeAuthPolicy
+			// so rewriteCascadeBundle can use OR instead of AND where declared.
+			parentAstType := &astType{
+				typ:             &ast.Type{NamedType: edge.parentTypeName},
+				inSchema:        sch,
+				dgraphPredicate: sch.dgraphPredicate,
+			}
+			parentPolicy := parentAstType.CascadeAuthPolicyConfig()
 			allRules := append([]*RuleNode{parentRule}, grandparentRules...)
-			parentRule = &RuleNode{And: allRules}
+			parentRule = &RuleNode{
+				And:                    allRules,
+				CascadeRootType:        edge.parentTypeName,
+				CascadeAuthAggregation: parentPolicy.Aggregation,
+			}
 		}
 	}
 
@@ -606,33 +845,42 @@ func withCascadeEdgePred(rn *RuleNode, pred string) *RuleNode {
 // rule template with the appropriate @authVariables applied.
 //
 //   - variableContext: ""        — unset; treated as "adaptive" (the doc default).
-//   - variableContext: "adaptive" — uses child's @authVariables if present (self
-//     path); silently falls back to authority's rule if not. No schema error.
-//   - variableContext: "self"    — re-substitutes using child's @authVariables.
-//     REQUIRES @authVariables on child; schema load error if missing.
+//   - variableContext: "adaptive" — uses outermost child's @authVariables if present;
+//     silently falls back to authority's rule if not. No schema error.
+//   - variableContext: "self"    — re-substitutes using the IMMEDIATE child's
+//     @authVariables (the type declaring the @cascadeAuth field at this depth).
+//     REQUIRES @authVariables on immediateChildTypeName; schema load error if missing.
 //   - variableContext: "parent"  — returns authority's already-substituted rule as-is.
+//
+// childTypeName is the outermost queried type (used for @authVariables substitution).
+// immediateChildTypeName is the type declaring @cascadeAuth at this specific depth
+// (used only for variableContext:self validation).
 func resolveAuthVarsInRuleNode(parentRule *RuleNode, edge cascadeAuthIncomingEdge,
-	childTypeName string, sch *schema) (*RuleNode, error) {
+	childTypeName, immediateChildTypeName string, sch *schema) (*RuleNode, error) {
 
 	switch edge.cfg.VariableContext {
 	case "self":
-		// "self" requires @authVariables on the child — schema load error if absent.
-		childTypeDef := sch.schema.Types[childTypeName]
-		if childTypeDef == nil || childTypeDef.Directives.ForName(authVariablesDirective) == nil {
+		// "self" validates that the IMMEDIATE child (not the outermost queried type)
+		// has @authVariables — it's the type that explicitly declared the @cascadeAuth
+		// field with variableContext:self that must opt in with @authVariables.
+		immediateTypeDef := sch.schema.Types[immediateChildTypeName]
+		if immediateTypeDef == nil || immediateTypeDef.Directives.ForName(authVariablesDirective) == nil {
 			return nil, gqlerror.Errorf(
 				"Type %s: @cascadeAuth field %s has variableContext: self but "+
 					"type %s has no @authVariables directive. "+
 					"Either add @authVariables to %s or change variableContext to adaptive.",
-				childTypeName, edge.fieldName, childTypeName, childTypeName)
+				immediateChildTypeName, edge.fieldName, immediateChildTypeName, immediateChildTypeName)
 		}
+		// Substitution uses the outermost childTypeName (may differ from immediateChild
+		// when the chain A→B→C uses A's vars throughout).
 		return resubstituteRuleNode(parentRule, edge, childTypeName, sch)
 	case "adaptive", "": // "" = unset; adaptive is the documented default
-		// Use self path only if child has @authVariables defined.
+		// Use the outermost child's @authVariables for substitution if present.
 		childTypeDef := sch.schema.Types[childTypeName]
 		if childTypeDef != nil && childTypeDef.Directives.ForName(authVariablesDirective) != nil {
 			return resubstituteRuleNode(parentRule, edge, childTypeName, sch)
 		}
-		// No @authVariables on child — fall back to authority's rule as-is.
+		// No @authVariables on outermost child — fall back to authority's rule as-is.
 		return parentRule, nil
 	default: // "parent" or unrecognised value
 		return parentRule, nil
@@ -740,10 +988,14 @@ func resubstituteRuleNode(rn *RuleNode, edge cascadeAuthIncomingEdge,
 func parseRuleNodeFromTemplate(template string, authorityVars, childVars map[string][]string,
 	childTypeName, authorityTypeName string, sch *schema) (*RuleNode, error) {
 
-	// Step 1: resolve authority compile-time constants ({{QRY_PERMISSIONS}}, etc.).
-	substituted := substitutAuthVars(template, authorityVars)
-	// Step 2: overlay child @authVariables (may further expand child-specific keys).
-	substituted = substitutAuthVars(substituted, childVars)
+	// Step 1: apply child @authVariables FIRST so child-specific values take
+	// precedence over the authority's own values for overlapping keys.
+	// Example: JobAd.QRY_PERMISSIONS = [_ALL _JOBAD ...] must override
+	// Group.QRY_PERMISSIONS = [_ALL _GROUP ...] when JobAd cascades through Group.
+	substituted := substitutAuthVars(template, childVars)
+	// Step 2: resolve any remaining authority compile-time constants that the
+	// child did NOT override (e.g. {{ADM_PERMISSIONS}} if child lacks that key).
+	substituted = substitutAuthVars(substituted, authorityVars)
 	if strings.HasPrefix(substituted, RBACQueryPrefix) {
 		return nil, nil
 	}
@@ -985,6 +1237,43 @@ func mergeIntoOp(ta *TypeAuth, op string, rule *RuleNode, aggregation string) {
 	case "delete":
 		ta.Rules.Delete = merge(ta.Rules.Delete, rule)
 	}
+}
+
+// composeCascadeWithBase is the Stage-3 composition step for auth rule building.
+// It combines cascade edge rules and merges the result into the child type's
+// existing base rule (which already contains Stage-1 TypeAuth + Stage-2 InterfaceAuth).
+//
+// Composition order (AND-before-OR):
+//  1. AND-aggregate all cascade edge rules when aggregation is "and".
+//     OR-aggregate all cascade edge rules when aggregation is "or".
+//     This forms the cascade block from the raw per-edge contributions.
+//  2. Merge the cascade block into the base rule using the same aggregation:
+//     "and" → final = AND(base, cascadeBlock)  — cascade restricts access
+//     "or"  → final = OR(base,  cascadeBlock)  — cascade adds an access path
+//
+// The aggregation value comes from @cascadeAuthPolicy(aggregation:) on the child
+// type. When no type-level policy is declared, CascadeAuthPolicyConfig defaults
+// to "and" — this is the effective per-edge fallback.
+func composeCascadeWithBase(ta *TypeAuth, op string, edgeRules []*RuleNode, aggregation string) {
+	if len(edgeRules) == 0 {
+		return
+	}
+
+	// Step 1 — aggregate cascade edge rules (AND first, OR second).
+	// When aggregation is "and": AND-combine all edges into a single cascade block.
+	// When aggregation is "or":  OR-combine  all edges into a single cascade block.
+	var cascadeBlock *RuleNode
+	switch {
+	case len(edgeRules) == 1:
+		cascadeBlock = edgeRules[0]
+	case aggregation == "or":
+		cascadeBlock = &RuleNode{Or: edgeRules}
+	default: // "and" — AND-aggregate first
+		cascadeBlock = &RuleNode{And: edgeRules}
+	}
+
+	// Step 2 — merge cascade block into the base rule per aggregation policy.
+	mergeIntoOp(ta, op, cascadeBlock, aggregation)
 }
 
 // mergeAuthNodeWithOr is the OR counterpart to mergeAuthNodeWithAnd.

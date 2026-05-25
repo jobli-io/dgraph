@@ -58,6 +58,25 @@ type RuleNode struct {
 	// CascadeRootType is the Dgraph type name of the authority (root) node for a
 	// cascade bundle (e.g. "Workspace"). Used by formatRuleNode for diagnostics.
 	CascadeRootType string
+	// CascadeAuthAggregation is the @cascadeAuthPolicy(aggregation) value of the
+	// authority type for this bundle node (e.g. "or" when Group declares
+	// aggregation:"or"). Set by cascadeAuthRuleForEdge; read by rewriteCascadeBundle
+	// to decide whether grandparent uid_in filters are ANDed or ORed onto the
+	// authority var's filter (e.g. Group's own IAMResource filter OR inWorkspace).
+	CascadeAuthAggregation string
+	// CascadeWrapPred is set on a CascadeWrap node representing:
+	//   uid_in(CascadeWrapPred, uid(var that satisfies CascadeWrapInner))
+	// This is the replacement for the CascadeBundlePred / rewriteCascadeBundle mechanism.
+	// When the DQL rewriter encounters this node it:
+	//   1. Rewrites CascadeWrapInner to obtain (supportVars, innerFilter)
+	//   2. Allocates: "varN as var(func: type(CascadeWrapType)) @filter(innerFilter) @cascade"
+	//   3. Returns uid_in(CascadeWrapPred, uid(varN)) as the child-type filter.
+	CascadeWrapPred string
+	// CascadeWrapType is the Dgraph type name for the authority var block (e.g. "Group").
+	CascadeWrapType string
+	// CascadeWrapInner is the authority type's full compiled auth rule tree
+	// (own @auth merged with its own cascade parents per its aggregation policy).
+	CascadeWrapInner *RuleNode
 	// CascadeInversePred is the Dgraph predicate that the uid_in filter traverses
 	// to scope the child type from the authority's side. On leaf cascade nodes this
 	// mirrors CascadeEdgePred; on bundle nodes CascadeBundlePred takes precedence.
@@ -66,6 +85,13 @@ type RuleNode struct {
 	// Each entry is a predicate name in the forward traversal order (e.g.
 	// ["inGroup", "inWorkspace"] for a Company→Group→Workspace chain).
 	CascadeEdgeForwardPath []string
+	// CascadeThroughType marks a synthetic "pass-all" leaf node produced for
+	// through-nodes: intermediate types with no own @auth that sit in a multi-level
+	// cascade chain (e.g. Company in AdPostRecord→Company→Group→Workspace).
+	// Value is the Dgraph type name (e.g. "Company"). The DQL rewriter emits:
+	//   var(func: type(Company))   with no @cascade filter
+	// and applies grandparent uid_in filters onto that var.
+	CascadeThroughType string
 }
 
 type AuthContainer struct {
@@ -208,6 +234,16 @@ func (node *RuleNode) EvaluateStatic(av map[string]interface{}) RuleResult {
 	if node.Rule != nil {
 		return node.staticEvaluation(av)
 	}
+
+	// CascadeWrap node: defer to the inner rule for static evaluation.
+	// This preserves the "closed-by-default" invariant: if the cascade
+	// authority's required variables are absent from the JWT, the whole
+	// CascadeWrap evaluates as Negative so that any parent AND also
+	// evaluates as Negative (deny-all) rather than dropping the arm.
+	if node.CascadeWrapPred != "" && node.CascadeWrapInner != nil {
+		return node.CascadeWrapInner.EvaluateStatic(av)
+	}
+
 	return Uncertain
 }
 
@@ -285,19 +321,81 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 	// only a type's own declared @auth bidirectionally (not the interface-level auth).
 	authRulesOwnOnly := snapshotTypeAuthMap(authRules)
 
-	// Merge the Auth rules on interfaces into the implementing types
+	// ── Auth rule composition ─────────────────────────────────────────────────
+	// The final auth rule for each type is the composition of three stages:
+	//
+	// Stage 1 — Own @auth (completed above):
+	//   Each type's @auth directive is parsed into per-op rules (query, add,
+	//   update, delete). @authVariables substitution is applied at this stage.
+	//
+	// Stage 2 — Interface auth merge (this loop):
+	//   For each interface the type implements, its auth rule is merged into
+	//   the type's own rule. Merge-op priority (highest → lowest):
+	//     (a) @auth(interfacePolicy: [{interface: "X", merge: "or"}]) on the
+	//         concrete type — per-interface override.
+	//     (b) @auth(mergeInto: "or") on the interface — default for all
+	//         implementors of that interface.
+	//     (c) "and" — hard-coded fallback.
+	//   Result after this loop: base = mergeOp(typeAuth, interfaceAuth)
+	//   for each implemented interface.
+	//
+	// Stage 3 — Cascade auth combination (expandCascadeAuth below):
+	//   For each incoming @cascadeAuth edge, buildCascadeRule() constructs a
+	//   CascadeWrap node representing the authority type's full auth. Multiple
+	//   edge rules are AND-aggregated first (or OR-aggregated when policy is
+	//   "or") to form a single cascade block, which is then merged into the
+	//   Stage-2 base:
+	//     "and" policy: final = AND(base, cascadeBlock)  — restricts access
+	//     "or"  policy: final = OR(base,  cascadeBlock)  — adds an access path
+	//   Aggregation is resolved from @cascadeAuthPolicy(aggregation:) on the
+	//   child type, defaulting to "and" when no type-level policy is declared.
+	// ─────────────────────────────────────────────────────────────────────────
+
+	// Merge the Auth rules on interfaces into the implementing types.
+	// The merge operator is determined by a two-level priority system:
+	//  1. interfacePolicy on the concrete type (highest priority):
+	//       @auth(interfacePolicy: [{ interface: "X", merge: "or" }])
+	//  2. mergeInto on the interface (default for all implementors):
+	//       interface X @auth(mergeInto: "or")
+	//  3. AND (hard-coded default — lowest priority).
 	for _, typ := range s.Types {
 		name := typeName(typ)
 		if typ.Kind == ast.Object {
+			// Build the per-interface merge-op override map from interfacePolicy.
+			concreteInterfacePolicy := parseInterfacePolicy(typ)
+
 			for _, intrface := range typ.Interfaces {
-				interfaceName := typeName(s.Types[intrface])
-				if authRules[interfaceName] != nil && authRules[interfaceName].Rules != nil {
-					authRules[name].Rules = mergeAuthRules(
-						authRules[name].Rules,
-						authRules[interfaceName].Rules,
-						mergeAuthNodeWithAnd,
-					)
+				interfaceDef := s.Types[intrface]
+				if interfaceDef == nil {
+					continue
 				}
+				interfaceName := typeName(interfaceDef)
+				if authRules[interfaceName] == nil || authRules[interfaceName].Rules == nil {
+					continue
+				}
+
+				// Determine the merge function for this (concrete type, interface) pair.
+				mergeOp := "and" // default
+				if iface := interfaceDef.Directives.ForName(authDirective); iface != nil {
+					if mi := iface.Arguments.ForName("mergeInto"); mi != nil {
+						mergeOp = mi.Value.Raw // "or" or "and"
+					}
+				}
+				// interfacePolicy on the concrete type overrides mergeInto.
+				if policy, ok := concreteInterfacePolicy[interfaceName]; ok {
+					mergeOp = policy
+				}
+
+				mergeFn := mergeAuthNodeWithAnd
+				if mergeOp == "or" {
+					mergeFn = mergeAuthNodeWithOr
+				}
+
+				authRules[name].Rules = mergeAuthRules(
+					authRules[name].Rules,
+					authRules[interfaceName].Rules,
+					mergeFn,
+				)
 			}
 		}
 	}
@@ -420,6 +518,52 @@ func mergeAuthNodeWithAnd(objectAuth, interfaceAuth *RuleNode) *RuleNode {
 	ruleNode := &RuleNode{}
 	ruleNode.And = append(ruleNode.And, objectAuth, interfaceAuth)
 	return ruleNode
+}
+
+// parseInterfacePolicy reads the @auth(interfacePolicy: [...]) argument on a
+// concrete type definition and returns a map from interface name to merge op
+// ("or" or "and").  Used by authRules() to override the interface's default
+// mergeInto value on a per-(concrete type, interface) basis.
+//
+// Example schema:
+//
+//	type Group implements WorkspaceMember
+//	  @auth(interfacePolicy: [{ interface: "WorkspaceMember", merge: "or" }]) { … }
+//
+// Returns: {"WorkspaceMember": "or"}
+func parseInterfacePolicy(typDef *ast.Definition) map[string]string {
+	auth := typDef.Directives.ForName(authDirective)
+	if auth == nil {
+		return nil
+	}
+	ip := auth.Arguments.ForName("interfacePolicy")
+	if ip == nil || ip.Value == nil {
+		return nil
+	}
+	result := make(map[string]string)
+	// ip.Value is a list literal; each child is an InterfaceMergePolicy object literal.
+	for _, item := range ip.Value.Children {
+		if item.Value == nil {
+			continue
+		}
+		var iface, mergeOp string
+		// item.Value is an object literal with fields "interface" and "merge".
+		for _, field := range item.Value.Children {
+			if field.Value == nil {
+				continue
+			}
+			switch field.Name {
+			case "interface":
+				iface = field.Value.Raw
+			case "merge":
+				mergeOp = field.Value.Raw
+			}
+		}
+		if iface != "" && mergeOp != "" {
+			result[iface] = mergeOp
+		}
+	}
+	return result
 }
 
 func mergeAuthRules(

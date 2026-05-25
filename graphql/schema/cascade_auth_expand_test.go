@@ -51,6 +51,10 @@ func countLeaves(rn *RuleNode) int {
 	if rn.Rule != nil || rn.DQLRule != nil || rn.RBACRule != nil {
 		return 1
 	}
+	// CascadeWrap node: count leaves inside the inner auth rule.
+	if rn.CascadeWrapPred != "" {
+		return countLeaves(rn.CascadeWrapInner)
+	}
 	total := 0
 	for _, child := range rn.Or {
 		total += countLeaves(child)
@@ -161,6 +165,13 @@ func collectCascadeInversePreds(rn *RuleNode) map[string]bool {
 		// And/Or children), so we check it unconditionally before any leaf guard.
 		addPred(n.CascadeBundlePred)
 
+		// CascadeWrap node: record the wrap pred and recurse into inner.
+		if n.CascadeWrapPred != "" {
+			addPred(n.CascadeWrapPred)
+			walk(n.CascadeWrapInner)
+			return
+		}
+
 		if n.Rule != nil {
 			// Leaf node: also check inverse pred and scan legacy template text.
 			addPred(n.CascadeInversePred)
@@ -211,6 +222,9 @@ func formatRuleNode(rn *RuleNode, depth int) string {
 	}
 
 	switch {
+	case rn.CascadeWrapPred != "":
+		fmt.Fprintf(&sb, "%sCascadeWrap(pred=%q type=%q):\n", indent, rn.CascadeWrapPred, rn.CascadeWrapType)
+		sb.WriteString(formatRuleNode(rn.CascadeWrapInner, depth+1))
 	case len(rn.And) > 0:
 		fmt.Fprintf(&sb, "%sAND (%d children):\n", indent, len(rn.And))
 		appendCascadeMeta()
@@ -426,10 +440,16 @@ type Company implements GroupMember {
 		q := companyAuth.Rules.Query
 
 		// Company has no own @auth — its entire auth comes from cascading Group.
-		// Group's combined auth (G + W_via_inWorkspace) is pulled down and wrapped
-		// in a bundle node carrying inGroup, preserving the full lineage.
+		// With the new buildCascadeRule algorithm, Company gets a CascadeWrap node
+		// (not an And bundle). The wrap carries the full Group auth (AND of G+W).
 		t.Run("is composite (AND)", func(t *testing.T) {
-			assert.True(t, isAnd(q), "Company query should be AND composite")
+			// With the new algorithm, Company.query is a CascadeWrap node —
+			// either CascadeWrapPred set (single edge) or And/Or (multi-edge).
+			// Accept either form: a CascadeWrap OR an AND composite.
+			isValidShape := isAnd(q) || q.CascadeWrapPred != ""
+			assert.True(t, isValidShape,
+				"Company query should be AND composite or a CascadeWrap node;\ngot:\n%s",
+				formatRuleNode(q, 1))
 		})
 
 		t.Run("carries exactly 2 leaf rules (Group and Workspace)", func(t *testing.T) {
@@ -1157,6 +1177,11 @@ func collectLeafTemplates(rn *RuleNode) []string {
 			}
 			return
 		}
+		// CascadeWrap node: templates live inside the inner auth rule.
+		if n.CascadeWrapPred != "" {
+			walk(n.CascadeWrapInner)
+			return
+		}
 		for _, c := range n.And {
 			walk(c)
 		}
@@ -1432,5 +1457,226 @@ type Group implements WorkspaceMember
 		ownLeafs := templatesContaining(templates, "queryGroup", "inUsers", "$USER_EMAIL")
 		assert.NotEmpty(t, ownLeafs,
 			"Group's own leaf rule must use $USER_EMAIL; templates: %v", templates)
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression test: OR aggregation with TWO independent cascade edges.
+//
+// This reproduces the production bug where a type implementing BOTH
+// GroupMember (→ Group) and WorkspaceMember (→ Workspace) with
+// @cascadeAuthPolicy(aggregation: "or") produced AND between the two paths
+// instead of OR.
+//
+// Schema topology (mirrors JobAd):
+//
+//	Workspace @auth(W) { hasMembers [Ad] @hasInverse(field:inWorkspace) }
+//	WorkspaceMember interface { inWorkspace: Workspace @cascadeAuth() }
+//	Group @auth(G) { hasAds [Ad] @hasInverse(field: inGroup) }
+//	GroupMember interface { inGroup: Group @cascadeAuth() }
+//	Ad implements WorkspaceMember & GroupMember @cascadeAuthPolicy(aggregation:"or") {}
+//
+// Expected: Ad.query top-level node = OR (one arm per independent cascade edge).
+// The old code produced AND between the two paths regardless of the policy.
+// ─────────────────────────────────────────────────────────────────────────────
+func TestCascadeAuth_ORPolicy_TwoIndependentEdges(t *testing.T) {
+	const input = `
+type Workspace @auth(
+  query: { rule: """
+    query {
+      queryWorkspace { __typename }
+    }
+  """ }
+) {
+  name: String
+  hasMembers: [Ad] @hasInverse(field: inWorkspace)
+  hasGroups:  [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth()
+}
+
+type Group implements WorkspaceMember @auth(
+  query: { rule: """
+    query {
+      queryGroup { __typename }
+    }
+  """ }
+) {
+  name: String
+  hasAds: [Ad] @hasInverse(field: inGroup)
+}
+
+interface GroupMember {
+  inGroup: Group @cascadeAuth()
+}
+
+type Ad implements WorkspaceMember & GroupMember
+  @cascadeAuthPolicy(aggregation: "or")
+{
+  name: String
+}
+`
+	s := buildSchema(t, input)
+	logAuthRules(t, s, "Workspace")
+	logAuthRules(t, s, "Group")
+	logAuthRules(t, s, "Ad")
+
+	adAuth := s.authRules["Ad"]
+	require.NotNil(t, adAuth, "Ad must have auth rules (from cascade)")
+	require.NotNil(t, adAuth.Rules)
+	require.NotNil(t, adAuth.Rules.Query)
+	q := adAuth.Rules.Query
+
+	// The two independent cascade edges (inGroup and inWorkspace) must be
+	// combined at the top level with OR because aggregation: "or".
+	t.Run("Ad.query top-level is OR (not AND) of the two cascade paths", func(t *testing.T) {
+		assert.True(t, isOr(q),
+			"with aggregation:\"or\" and two independent cascade edges (inGroup, inWorkspace), "+
+				"Ad.query must be OR at the top level;\ngot:\n%s", formatRuleNode(q, 1))
+	})
+
+	t.Run("Ad.query has exactly 2 OR arms (one per cascade edge)", func(t *testing.T) {
+		require.True(t, isOr(q))
+		assert.Equal(t, 2, len(q.Or),
+			"expected one OR arm per independent cascade edge (inGroup, inWorkspace)")
+	})
+
+	t.Run("each OR arm carries its respective cascade edge pred", func(t *testing.T) {
+		require.True(t, isOr(q))
+		allPreds := map[string]bool{}
+		for _, arm := range q.Or {
+			for k, v := range collectCascadeInversePreds(arm) {
+				allPreds[k] = v
+			}
+		}
+		assert.True(t, allPreds["inGroup"],
+			"inGroup pred must appear in one of the OR arms; preds: %v", allPreds)
+		assert.True(t, allPreds["inWorkspace"],
+			"inWorkspace pred must appear in one of the OR arms; preds: %v", allPreds)
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression test: three-level chain with OR at BOTH intermediate levels.
+//
+// Topology (Workspace → Group(OR) → Ad(OR)):
+//
+//	Workspace @auth(W) { hasGroups [Group] @hasInverse(field:inWorkspace) }
+//	WorkspaceMember { inWorkspace: Workspace @cascadeAuth() }
+//	Group implements WorkspaceMember @auth(G) @cascadeAuthPolicy(aggregation:"or") {
+//	  hasAds: [Ad] @hasInverse(field: inGroup)
+//	}
+//	GroupMember { inGroup: Group @cascadeAuth() }
+//	Ad implements GroupMember @cascadeAuthPolicy(aggregation:"or") {}
+//
+// Group.query = OR(G, W via inWorkspace)   [Group's own policy applies to itself]
+//
+// For Ad, the single incoming cascade edge is inGroup → Group.
+// The cascade expander builds the authority rule for Group and its grandparent chain:
+//
+//	When building Ad's auth via inGroup, the expander sees Group's @auth(G) AND
+//	Group's grandparent (Workspace via inWorkspace). But Group's own
+//	@cascadeAuthPolicy(aggregation:"or") means Group itself is accessible via
+//	G OR W.  The question is: does Ad's cascade produce:
+//	  (a) uid_in(inGroup, OR(G, W))  ← correct: respects Group's OR policy
+//	  (b) uid_in(inGroup, AND(G, W)) ← wrong: ignores Group's OR policy
+//
+// ─────────────────────────────────────────────────────────────────────────────
+func TestCascadeAuth_ORPolicy_NestedChain_GroupORtoAdOR(t *testing.T) {
+	const input = `
+type Workspace @auth(
+  query: { rule: """
+    query {
+      queryWorkspace { __typename }
+    }
+  """ }
+) {
+  name: String
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth()
+}
+
+type Group implements WorkspaceMember
+  @auth(
+    query: { rule: """
+      query {
+        queryGroup { __typename }
+      }
+    """ }
+  )
+  @cascadeAuthPolicy(aggregation: "or")
+{
+  name: String
+  hasAds: [Ad] @hasInverse(field: inGroup)
+}
+
+interface GroupMember {
+  inGroup: Group @cascadeAuth()
+}
+
+type Ad implements GroupMember
+  @cascadeAuthPolicy(aggregation: "or")
+{
+  name: String
+}
+`
+	s := buildSchema(t, input)
+	logAuthRules(t, s, "Workspace")
+	logAuthRules(t, s, "Group")
+	logAuthRules(t, s, "Ad")
+
+	// ── Group: sanity check ───────────────────────────────────────────────────
+	groupAuth := s.authRules["Group"]
+	require.NotNil(t, groupAuth)
+	require.NotNil(t, groupAuth.Rules)
+	require.NotNil(t, groupAuth.Rules.Query)
+	groupQ := groupAuth.Rules.Query
+
+	t.Run("Group.query is OR(G, W) with aggregation:or", func(t *testing.T) {
+		assert.True(t, isOr(groupQ),
+			"Group has aggregation:\"or\" so its query rule should be OR;\ngot:\n%s",
+			formatRuleNode(groupQ, 1))
+		assert.Equal(t, 2, countLeaves(groupQ))
+	})
+
+	// ── Ad ────────────────────────────────────────────────────────────────────
+	adAuth := s.authRules["Ad"]
+	require.NotNil(t, adAuth, "Ad must have auth rules (via inGroup cascade)")
+	require.NotNil(t, adAuth.Rules)
+	require.NotNil(t, adAuth.Rules.Query)
+	adQ := adAuth.Rules.Query
+
+	// With the new buildCascadeRule algorithm, Ad.query is a CascadeWrap node:
+	//   CascadeWrap(pred=inGroup, type=Group, inner=Group's full auth)
+	// Group's full auth is OR(G_iam_rule, CascadeWrap(pred=inWorkspace, type=Workspace, inner=W_rule))
+	// because Group declares aggregation:"or".
+	// This means the DQL rewriter emits:
+	//   Group_var as var(func: type(Group)) @filter(G_IAM OR uid_in(inWorkspace, uid(W_var))) @cascade
+	//   @filter(uid_in(inGroup, uid(Group_var)))
+	t.Run("Ad.query is a CascadeWrap node (new algorithm)", func(t *testing.T) {
+		assert.NotEmpty(t, adQ.CascadeWrapPred,
+			"Ad.query should be a CascadeWrap node with CascadeWrapPred set;\ngot:\n%s",
+			formatRuleNode(adQ, 1))
+		assert.Equal(t, "Group", adQ.CascadeWrapType,
+			"Ad.query CascadeWrap must reference Group as the authority type")
+	})
+
+	t.Run("Ad.query inner (Group's full auth) is OR(G, W) not AND", func(t *testing.T) {
+		require.NotEmpty(t, adQ.CascadeWrapPred)
+		groupFullAuth := adQ.CascadeWrapInner
+		require.NotNil(t, groupFullAuth, "CascadeWrapInner (Group's full auth) must not be nil")
+		assert.True(t, isOr(groupFullAuth),
+			"Group's full auth must be OR(G, W) because Group has aggregation:\"or\";\ngot:\n%s",
+			formatRuleNode(groupFullAuth, 1))
+	})
+
+	t.Run("Ad.query carries exactly 2 leaf rules (G and W)", func(t *testing.T) {
+		assert.Equal(t, 2, countLeaves(adQ),
+			"Ad should inherit exactly 2 leaves from the Group cascade chain")
 	})
 }
