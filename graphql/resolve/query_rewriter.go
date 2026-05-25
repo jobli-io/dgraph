@@ -1258,6 +1258,16 @@ func (authRw *authRewriter) addAuthQueries(
 		Args: []dql.Arg{{Value: authRw.parentVarName}},
 	}
 
+	// Deduplicate semantically identical auth var blocks (e.g. multiple
+	// branches each emitting the same IAMRole / User / Workspace filter).
+	// The substitution map returned here is applied to `filter` so that
+	// any root auth var names that were deduplicated are also updated in
+	// the top-level filter before it is attached to rootQry.
+	fldAuthQueries, authVarSubst := deduplicateAuthVarBlocks(fldAuthQueries)
+	if len(authVarSubst) > 0 {
+		applyAuthVarSubst(filter, authVarSubst)
+	}
+
 	// The final query that includes the user's filter and auth processing is thus like
 	//
 	// queryTodo(func: uid(Todo1)) @filter(uid(Todo2) AND uid(Todo3)) { ... }
