@@ -400,6 +400,58 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 		}
 	}
 
+	// Second resolveTemplateLeaves pass — re-sweep concrete types after interface
+	// auth has been merged in.
+	//
+	// Interface @auth rules use {{KEY}} templates with empty placeholder values
+	// (e.g. IAMResource declares @authVariables(vars: [{key:"QRY_PERMISSIONS", value:[]}]))
+	// as stubs for implementing types to override. The first resolveTemplateLeaves
+	// pass (pre-merge, above) ran with each type's OWN @authVariables, so interface
+	// rules stayed unresolved (empty vals were skipped). Now that each concrete type's
+	// auth tree contains the merged interface rules, we can re-resolve them using the
+	// concrete type's non-empty @authVariables — e.g. JobAd's QRY_PERMISSIONS
+	// = [_ALL _JOBAD UPDATE ...] fills in IAMResource's empty placeholder.
+	//
+	// We only target concrete types (Kind == Object) with non-empty authVariables,
+	// and only nodes that are STILL unresolved (Rule == nil, RuleTemplate != "").
+	for _, typ := range s.Types {
+		if typ.Kind != ast.Object {
+			continue
+		}
+		name := typeName(typ)
+		ta := authRules[name]
+		if ta == nil {
+			continue
+		}
+		concreteAstType := &astType{
+			typ:             &ast.Type{NamedType: name},
+			inSchema:        sch,
+			dgraphPredicate: sch.dgraphPredicate,
+		}
+		concreteVars := concreteAstType.AuthVariables()
+		if len(concreteVars) == 0 {
+			continue
+		}
+		if ta.Rules != nil {
+			ta.Rules.Query = resolveTemplateLeaves(sch, ta.Rules.Query, concreteVars, name)
+			ta.Rules.Add = resolveTemplateLeaves(sch, ta.Rules.Add, concreteVars, name)
+			ta.Rules.Update = resolveTemplateLeaves(sch, ta.Rules.Update, concreteVars, name)
+			ta.Rules.Delete = resolveTemplateLeaves(sch, ta.Rules.Delete, concreteVars, name)
+		}
+		for field, ac := range ta.Fields {
+			if ac == nil {
+				continue
+			}
+			ta.Fields[field] = &AuthContainer{
+				Query:    resolveTemplateLeaves(sch, ac.Query, concreteVars, name),
+				Add:      resolveTemplateLeaves(sch, ac.Add, concreteVars, name),
+				Update:   resolveTemplateLeaves(sch, ac.Update, concreteVars, name),
+				Delete:   resolveTemplateLeaves(sch, ac.Delete, concreteVars, name),
+				Password: resolveTemplateLeaves(sch, ac.Password, concreteVars, name),
+			}
+		}
+	}
+
 	// Expand @cascadeAuth directives: propagate parent @auth rules into child
 	// TypeAuth entries. This runs after interface auth has been merged into
 	// concrete types (so each type has its full rule set) but before interfaces
@@ -482,11 +534,16 @@ func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string][]string, 
 		// The resubstituteRuleNode fallback (rn.Rule != nil) handles this correctly:
 		// it skips re-substitution and returns nil for this cascade arm, which is safe.
 		node := &RuleNode{RuleTemplate: rn.RuleTemplate}
-		typ := sch.schema.Types[typeName]
-		if typ == nil {
+		// Use inferQueriedTypeDef rather than sch.schema.Types[typeName] directly.
+		// Interface auth rules (e.g. IAMResource's "queryIAMResource(...)")
+		// query a different type than the concrete type they've been merged into.
+		// gqlValidateRule checks f.Name == "query"+typ.Name, so we must pass the
+		// type the rule actually queries — inferred from the root field name.
+		typDef := inferQueriedTypeDef(sch, substituted, typeName)
+		if typDef == nil {
 			return rn
 		}
-		if err := gqlValidateRule(sch, typ, substituted, node); err != nil {
+		if err := gqlValidateRule(sch, typDef, substituted, node); err != nil {
 			return rn // leave as-is; resubstituteRuleNode will handle the nil Rule case
 		}
 		return node
