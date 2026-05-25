@@ -1299,6 +1299,13 @@ func substitutAuthVars(ruleStr string, vars map[string][]string) string {
 		return ruleStr
 	}
 	for key, vals := range vars {
+		// Skip empty placeholder values — they indicate the key is declared on
+		// an interface (e.g. IAMResource.QRY_PERMISSIONS = []) as a stub for
+		// implementing types to override. Substituting an empty list would
+		// produce {in: []} which yields an invalid DQL "eq(pred)" with no args.
+		if len(vals) == 0 {
+			continue
+		}
 		placeholder := "{{" + key + "}}"
 		ruleStr = strings.ReplaceAll(ruleStr, placeholder, "["+strings.Join(vals, ", ")+"]")
 	}

@@ -1746,7 +1746,8 @@ func (authRw *authRewriter) rewriteRuleNode(
 	case len(rn.And) > 0:
 		// if there is atleast one RBAC rule which is false, then this
 		// whole And block needs to be ignored.
-		if rn.EvaluateStatic(authRw.authVariables) == schema.Negative {
+		andStatic := rn.EvaluateStatic(authRw.authVariables)
+		if andStatic == schema.Negative {
 			return nil, nil
 		}
 
@@ -1776,7 +1777,8 @@ func (authRw *authRewriter) rewriteRuleNode(
 	case len(rn.Or) > 0:
 		// First, check if any of the children are statically Positive.
 		// If so, this OR condition is already satisfied and needs no filter.
-		if rn.EvaluateStatic(authRw.authVariables) == schema.Positive {
+		orStatic := rn.EvaluateStatic(authRw.authVariables)
+		if orStatic == schema.Positive {
 			return nil, nil
 		}
 		qrys, filts := nodeList(typ, rn.Or)
@@ -1918,7 +1920,8 @@ func (authRw *authRewriter) rewriteRuleNode(
 			},
 		}
 	case rn.Rule != nil:
-		if rn.EvaluateStatic(authRw.authVariables) == schema.Negative {
+		ruleStatic := rn.EvaluateStatic(authRw.authVariables)
+		if ruleStatic == schema.Negative {
 			return nil, nil
 		}
 

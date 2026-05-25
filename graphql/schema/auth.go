@@ -455,7 +455,12 @@ func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string][]string, 
 	// Leaf with a template: substitute own vars and re-parse.
 	if rn.RuleTemplate != "" && rn.Rule == nil && rn.DQLRule == nil && rn.RBACRule == nil {
 		substituted := substitutAuthVars(rn.RuleTemplate, vars)
-		if strings.Contains(substituted, RBACQueryPrefix) {
+		// RBAC rules are compact single-line forms that start with "{" (e.g.
+		// { $scope: { eq: "_all" } }). Full GQL query rules start with the
+		// "query" keyword. Use HasPrefix on the trimmed string so that
+		// GQL query bodies (which contain many "{" characters) are not
+		// mistakenly routed through the RBAC parse path.
+		if strings.HasPrefix(strings.TrimSpace(substituted), RBACQueryPrefix) {
 			// Became an RBAC rule — parse it.
 			typ := sch.schema.Types[typeName]
 			if typ == nil {
