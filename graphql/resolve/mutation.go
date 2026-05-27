@@ -313,6 +313,20 @@ func (mr *dgraphResolver) rewriteAndExecute(
 			},
 		},
 	}
+	// Strip trace entries that were never started (Duration == 0). This keeps the
+	// canonical 3-entry shape {preMutationQuery, mutation, query} for Add/Update while
+	// still recording the 4th "preQuery" entry for delete mutations that fetch a query
+	// field before the delete executes.
+	defer func() {
+		res := ext.Tracing.Execution.Resolvers[0]
+		active := res.Dgraph[:0]
+		for _, d := range res.Dgraph {
+			if d.Duration > 0 {
+				active = append(active, d)
+			}
+		}
+		res.Dgraph = active
+	}()
 
 	emptyResult := func(err error) *Resolved {
 		return &Resolved{
@@ -888,7 +902,7 @@ func authorizeNewNodes(
 				Name: "uid",
 				Args: []dql.Arg{{Value: varName}}},
 			Filter:   authFilter,
-			Children: []*dql.GraphQuery{{Attr: "uid"}}}
+			Children: []*dql.GraphQuery{{Attr: "uid"}, {Attr: "dgraph.type"}}}
 
 		nodes := newByType[typeName]
 		sort.Slice(nodes, func(i, j int) bool { return nodes[i] < nodes[j] })

@@ -380,14 +380,19 @@ func (urw *UpdateRewriter) RewriteQueries(
 	var retTypes []string
 	var retErrors error
 
-	// Write query for filter
-	if filterArg != nil {
+	// Write query for filter: fetch current field values so that @validate, @default,
+	// and @oldValue CEL expressions can access before.* fields.
+	// Only emit this extra pre-query when the mutated type has @oldValue, @immutable
+	// inverse fields, or @validate/@default that reference pre-existing node state
+	// (i.e. getFieldsForExistsQuery returns more than the baseline {uid, dgraph.type}).
+	filterQueryFields := getFieldsForExistsQuery(mutatedType)
+	if filterArg != nil && len(filterQueryFields) > 2 {
 		obj := filterArg.(map[string]interface{})
 		if len(obj) != 0 {
 			dgQuery := &dql.GraphQuery{
 				Attr: UpdateMutationFilterVar,
 			}
-			dgQuery.Children = getFieldsForExistsQuery(mutatedType)
+			dgQuery.Children = filterQueryFields
 			addTypeFunc(dgQuery, mutatedType.DgraphName())
 
 			customClaims, err := m.GetAuthMeta().ExtractCustomClaims(ctx)
@@ -847,24 +852,42 @@ func (urw *UpdateRewriter) Rewrite(
 	}
 
 	if urw.setFrag != nil {
-		urw.setFrag.conditions = append(urw.setFrag.conditions, updateMutationCondition)
-		mutSet, errSet := mutationFromFragment(
-			urw.setFrag,
-			func(frag *mutationFragment) ([]byte, error) {
-				return json.Marshal(frag.fragment)
-			},
-			func(frag *mutationFragment) ([]byte, error) {
-				if len(frag.deletes) > 0 {
-					return json.Marshal(frag.deletes)
+		// Only generate the set mutation if the fragment carries at least one real
+		// field update beyond the mandatory "uid" key. When setArg is nil but delArg
+		// is present (e.g. a geo remove-only mutation), rewriteObject still runs
+		// for @default computation but produces a trivial {"uid": "uid(x)"} fragment.
+		// Emitting that as a set mutation is a no-op but breaks tests expecting only
+		// the delete mutation.
+		fragMap, _ := urw.setFrag.fragment.(map[string]interface{})
+		hasRealUpdate := len(urw.setFrag.deletes) > 0
+		if !hasRealUpdate {
+			for k := range fragMap {
+				if k != "uid" {
+					hasRealUpdate = true
+					break
 				}
-				return nil, nil
-			})
-
-		if mutSet != nil {
-			mutations = append(mutations, mutSet)
+			}
 		}
-		retErrors = schema.AppendGQLErrs(retErrors, errSet)
-		queries = append(queries, urw.setFrag.queries...)
+		if hasRealUpdate {
+			urw.setFrag.conditions = append(urw.setFrag.conditions, updateMutationCondition)
+			mutSet, errSet := mutationFromFragment(
+				urw.setFrag,
+				func(frag *mutationFragment) ([]byte, error) {
+					return json.Marshal(frag.fragment)
+				},
+				func(frag *mutationFragment) ([]byte, error) {
+					if len(frag.deletes) > 0 {
+						return json.Marshal(frag.deletes)
+					}
+					return nil, nil
+				})
+
+			if mutSet != nil {
+				mutations = append(mutations, mutSet)
+			}
+			retErrors = schema.AppendGQLErrs(retErrors, errSet)
+			queries = append(queries, urw.setFrag.queries...)
+		}
 	}
 
 	if urw.delFrag != nil {
@@ -1230,7 +1253,9 @@ func (drw *deleteRewriter) Rewrite(
 		parentVarName: m.MutatedType().Name() + "Root",
 		mutVarCache:   &deleteAuthVarCache,
 	}
-	authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
+	// Delete root queries don't have nested auth traversals referencing the root var;
+	// the result pre-query (queryAuthRw below) handles its own auth separately.
+	authRw.hasAuthRules = false
 
 	dgQry := RewriteUpsertQueryFromMutation(m, authRw, MutationQueryVar, m.Name(), "")
 	qry := dgQry[0]
@@ -1257,6 +1282,18 @@ func (drw *deleteRewriter) Rewrite(
 	// be deleted before they are deleted. Let's add a query to do that.
 	if queryField := m.QueryField(); queryField != nil {
 		deleteQryAuthVarCache := make(map[string]string)
+		// hasAuthRules should reflect whether any CHILD field (not the root type itself) has
+		// query auth that will emit traversal vars referencing the parent root var (parentVarName).
+		// Checking the root type's own auth (Log, Tweets) would incorrectly set this to true —
+		// those rules are handled by the root-var scaffolding that addAuthQueries generates for
+		// itself, not by a child traversal that references parentVarName.
+		childHasQueryAuth := false
+		for _, f := range queryField.SelectionSet() {
+			if hasAuthRules(f, &authRewriter{selector: queryAuthSelector}) {
+				childHasQueryAuth = true
+				break
+			}
+		}
 		queryAuthRw := &authRewriter{
 			authVariables: customClaims.AuthVariables,
 			varGen:        drw.VarGen,
@@ -1264,7 +1301,7 @@ func (drw *deleteRewriter) Rewrite(
 			filterByUid:   true,
 			parentVarName: drw.VarGen.Next(queryField.Type(), "", "", false),
 			varName:       MutationQueryVar,
-			hasAuthRules:  hasAuthRules(queryField, authRw),
+			hasAuthRules:  childHasQueryAuth,
 			mutVarCache:   &deleteQryAuthVarCache,
 		}
 
@@ -2200,6 +2237,13 @@ func rewriteObject(
 
 		fieldDef := typ.Field(field)
 		if fieldDef == nil {
+			// The @secret directive injects a password field (e.g. "pwd") into
+			// AddXxxInput but NOT into the type's field list, so typ.Field() returns nil.
+			// Detect it via PasswordField() and emit the scalar using the type-level
+			// DgraphPredicate() which has the correct predicate map populated.
+			if pwdFld := typ.PasswordField(); pwdFld != nil && pwdFld.Name() == field {
+				newObj[typ.DgraphPredicate(field)] = val
+			}
 			continue
 		}
 		fieldName := typ.DgraphPredicate(field)
@@ -2894,14 +2938,14 @@ func addDelete(
 			Func: &dql.Function{
 				Name: "uid",
 				Args: []dql.Arg{{Value: targetVar}}},
-			Children: []*dql.GraphQuery{{Attr: "uid"}}},
+			Children: []*dql.GraphQuery{{Attr: "uid"}, {Attr: "dgraph.type"}}},
 		&dql.GraphQuery{
 			Attr: targetVar + ".auth",
 			Func: &dql.Function{
 				Name: "uid",
 				Args: []dql.Arg{{Value: targetVar}}},
 			Filter:   authFilter,
-			Children: []*dql.GraphQuery{{Attr: "uid"}}})
+			Children: []*dql.GraphQuery{{Attr: "uid"}, {Attr: "dgraph.type"}}})
 
 	frag.queries = append(frag.queries, authQueries...)
 

@@ -566,8 +566,7 @@ invalid_schemas:
         },
       ]
 
-  -
-    name: "Search will error on type that require @hasInverse directive"
+  - name: "Search will error on type that require @hasInverse directive"
     input: |
       type X {
         y: Y @search
@@ -575,13 +574,16 @@ invalid_schemas:
       type Y {
         y: String
       }
-    errlist: [
-      {"message": "Type X; Field y: has the @search directive for type Y but also requires
-          the @hasInverse directive.",
-      "locations":[{"line":2, "column":9}]}
+    errlist:
+      [
+        {
+          "message":
+            "Type X; Field y: has the @search directive for type Y but also requires the @hasInverse
+            directive.",
+          "locations": [{ "line": 2, "column": 9 }],
+        },
       ]
-  -
-    name: "Search will error on interface that require @hasInverse directive"
+  - name: "Search will error on interface that require @hasInverse directive"
     input: |
       type X {
         y: Y @search
@@ -589,10 +591,14 @@ invalid_schemas:
       interface Y {
         y: String
       }
-    errlist: [
-      {"message": "Type X; Field y: has the @search directive for type Y but also requires
-          the @hasInverse directive.",
-      "locations":[{"line":2, "column":9}]}
+    errlist:
+      [
+        {
+          "message":
+            "Type X; Field y: has the @search directive for type Y but also requires the @hasInverse
+            directive.",
+          "locations": [{ "line": 2, "column": 9 }],
+        },
       ]
 
   - name: Search (with arg) will error that can't have the @search
@@ -3212,7 +3218,7 @@ invalid_schemas:
       [
         {
           "message": Type Product; @remote directive cannot be defined with @key directive,
-          "locations": [{ "line": 181, "column": 12 }],
+          "locations": [{ "line": 220, "column": 12 }],
         },
       ]
 
@@ -3614,51 +3620,6 @@ invalid_schemas:
         },
       ]
 
-  - name: "@default validates field type is scalar"
-    input: |
-      type X {
-        field: Y @default(add:{value:"1"})
-      }
-      type Y {
-        field: String
-      }
-    errlist:
-      [
-        {
-          "message":
-            "Type X; Field field: cannot use @default directive on field with non-scalar type Y",
-          "locations": [{ "line": 2, "column": 13 }],
-        },
-      ]
-
-  - name: "@default validates field type is not list"
-    input: |
-      type X {
-        field: [String] @default(add:{value:"1"})
-      }
-    errlist:
-      [
-        {
-          "message":
-            "Type X; Field field: cannot use @default directive on field with list type [String]",
-          "locations": [{ "line": 2, "column": 20 }],
-        },
-      ]
-
-  - name: "@default validates field type is not @id"
-    input: |
-      type X {
-        field: String! @id @default(add:{value:"foo"})
-      }
-    errlist:
-      [
-        {
-          "message":
-            "Type X; Field field: cannot use @default directive on field with @id directive",
-          "locations": [{ "line": 2, "column": 23 }],
-        },
-      ]
-
   - name: "@default validates field type is not ID"
     input: |
       type X {
@@ -3707,6 +3668,27 @@ invalid_schemas:
       ]
 
 valid_schemas:
+  - name: "@default allows non-scalar field type"
+    input: |
+      type X {
+        field: Y @default(add:{value:"1"})
+      }
+      type Y {
+        field: String
+      }
+
+  - name: "@default allows list field type"
+    input: |
+      type X {
+        field: [String] @default(add:{value:"1"})
+      }
+
+  - name: "@default allows @id field"
+    input: |
+      type X {
+        field: String! @id @default(add:{value:"foo"})
+      }
+
   - name: Multiple fields with @id directive should be allowed
     input: |
       type X {
@@ -3871,8 +3853,7 @@ valid_schemas:
         A
       }
 
-  -
-    name: "Correct search on object type"
+  - name: "Correct search on object type"
     input: |
       type X {
         y: Y @hasInverse(field: x) @search
@@ -3885,8 +3866,7 @@ valid_schemas:
         x3: X @hasInverse(field: y3) @search
       }
 
-  -
-    name: "Correct search on interface type"
+  - name: "Correct search on interface type"
     input: |
       type X {
         y: Y @hasInverse(field: x) @search

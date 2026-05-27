@@ -22,8 +22,7 @@
   error:
     {
       "message":
-        mutation failed because authorization failed because a valid JWT is required but was not
-        provided,
+        couldn't rewrite mutation addComplexLog because a valid JWT is required but was not provided,
     }
 
 - name: Query with missing jwt token - Type without Auth
@@ -46,6 +45,5 @@
   error:
     {
       "message":
-        mutation failed because authorization failed because a valid JWT is required but was not
-        provided,
+        couldn't rewrite mutation addTodo because a valid JWT is required but was not provided,
     }

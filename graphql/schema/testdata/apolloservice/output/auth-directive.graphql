@@ -115,6 +115,30 @@ input CustomHTTP {
 input DgraphDefault {
 	value: String
 	expr: String
+	evaluationOrder: Int
+}
+
+input DgraphTransform {
+	expr: String
+	evaluationOrder: Int
+}
+
+input DgraphValidate {
+	rule: String
+	expr: String
+	reason: String
+}
+
+input DgraphPostValidate {
+	expr:   String
+	reason: String
+}
+
+input DgraphCascadeDelete {
+	onlyIfOrphan: Boolean
+	onlyIfOrphanScope: String
+	filter: String
+	depth: Int
 }
 
 type Point {
@@ -195,12 +219,17 @@ input GenerateMutationParams {
 	delete: Boolean
 }
 
-directive @hasInverse(field: String!) on FIELD_DEFINITION
+directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
 directive @search(by: [String!]) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
-directive @default(add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
+directive @default(value: String, expr: String, evaluationOrder: Int, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
+directive @transform(expr: String, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
+directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int) on FIELD_DEFINITION
+directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
+directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
+directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @remote on OBJECT | INTERFACE | UNION | INPUT_OBJECT | ENUM
@@ -277,6 +306,18 @@ input StringHashFilter {
 	in: [String]
 }
 
+input SimilarToVector {
+	vector: [Float!]!
+	topK: Int
+	distance: Float
+}
+
+input SimilarToText {
+	text: String!
+	topK: Int
+	distance: Float
+}
+
 #######################
 # Generated Types
 #######################
@@ -335,6 +376,19 @@ type UserAggregateResult {
 # Generated Enums
 #######################
 
+enum CascadeAuthOperation {
+	query
+	add
+	update
+	delete
+}
+
+enum CascadeAuthVariableContext {
+	self
+	parent
+	adaptive
+}
+
 enum TodoHasFilter {
 	title
 	text
@@ -379,6 +433,17 @@ input AddTodoInput {
 input AddUserInput {
 	username: String!
 	todos: [TodoRef]
+}
+
+input AuthVariable {
+	key: String!
+	value: [String!]!
+}
+
+input InterfaceMergePolicy {
+	interface: String!
+	merge: String!
+	operations: [String!]
 }
 
 input TodoFilter {

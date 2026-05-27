@@ -21,6 +21,7 @@
     query {
       UserSecret(func: uid(UserSecret_1)) @filter(uid(UserSecret_Auth2)) {
         uid
+        dgraph.type
       }
       UserSecret_1 as var(func: uid(0x123))
       UserSecret_Auth2 as var(func: uid(UserSecret_1)) @filter(eq(UserSecret.ownedBy, "user1")) @cascade
@@ -57,6 +58,7 @@
     query {
       UserSecret(func: uid(UserSecret_1)) @filter(uid(UserSecret_Auth2)) {
         uid
+        dgraph.type
       }
       UserSecret_1 as var(func: uid(0x123, 0x456))
       UserSecret_Auth2 as var(func: uid(UserSecret_1)) @filter(eq(UserSecret.ownedBy, "user1")) @cascade
@@ -93,6 +95,7 @@
     query {
       UserSecret(func: uid(UserSecret_1)) @filter(uid(UserSecret_Auth2)) {
         uid
+        dgraph.type
       }
       UserSecret_1 as var(func: uid(0x123))
       UserSecret_Auth2 as var(func: uid(UserSecret_1)) @filter(eq(UserSecret.ownedBy, "user1")) @cascade
@@ -130,6 +133,7 @@
     query {
       UserSecret(func: uid(UserSecret_1)) @filter(uid(UserSecret_Auth2)) {
         uid
+        dgraph.type
       }
       UserSecret_1 as var(func: uid(0x123, 0x456))
       UserSecret_Auth2 as var(func: uid(UserSecret_1)) @filter(eq(UserSecret.ownedBy, "user1")) @cascade
@@ -178,6 +182,7 @@
     query {
       Column(func: uid(Column_1)) @filter(uid(Column_Auth2)) {
         uid
+        dgraph.type
       }
       Column_1 as var(func: uid(0x456))
       Column_Auth2 as var(func: uid(Column_1)) @cascade {
@@ -189,6 +194,7 @@
       }
       Ticket(func: uid(Ticket_3)) @filter(uid(Ticket_Auth4)) {
         uid
+        dgraph.type
       }
       Ticket_3 as var(func: uid(0x789))
       Ticket_Auth4 as var(func: uid(Ticket_3)) @cascade {
@@ -246,6 +252,7 @@
     query {
       Column(func: uid(Column_1)) @filter(uid(Column_Auth2)) {
         uid
+        dgraph.type
       }
       Column_1 as var(func: uid(0x456))
       Column_Auth2 as var(func: uid(Column_1)) @cascade {
@@ -257,6 +264,7 @@
       }
       Ticket(func: uid(Ticket_3)) @filter(uid(Ticket_Auth4)) {
         uid
+        dgraph.type
       }
       Ticket_3 as var(func: uid(0x789))
       Ticket_Auth4 as var(func: uid(Ticket_3)) @cascade {
@@ -320,6 +328,7 @@
     query {
       Column(func: uid(Column_1)) @filter(uid(Column_Auth2)) {
         uid
+        dgraph.type
       }
       Column_1 as var(func: uid(0x456, 0x459))
       Column_Auth2 as var(func: uid(Column_1)) @cascade {
@@ -331,6 +340,7 @@
       }
       Ticket(func: uid(Ticket_3)) @filter(uid(Ticket_Auth4)) {
         uid
+        dgraph.type
       }
       Ticket_3 as var(func: uid(0x789, 0x799))
       Ticket_Auth4 as var(func: uid(Ticket_3)) @cascade {
@@ -394,6 +404,7 @@
     query {
       Column(func: uid(Column_1)) @filter(uid(Column_Auth2)) {
         uid
+        dgraph.type
       }
       Column_1 as var(func: uid(0x456, 0x459))
       Column_Auth2 as var(func: uid(Column_1)) @cascade {
@@ -405,6 +416,7 @@
       }
       Ticket(func: uid(Ticket_3)) @filter(uid(Ticket_Auth4)) {
         uid
+        dgraph.type
       }
       Ticket_3 as var(func: uid(0x789, 0x799))
       Ticket_Auth4 as var(func: uid(Ticket_3)) @cascade {
@@ -470,9 +482,11 @@
       }
       Column_4(func: uid(Column_4)) {
         uid
+        dgraph.type
       }
       Column_4.auth(func: uid(Column_4)) @filter(uid(Column_Auth5)) {
         uid
+        dgraph.type
       }
       Column_Auth5 as var(func: uid(Column_4)) @cascade {
         Column.inProject : Column.inProject {
@@ -495,6 +509,7 @@
     query {
       Column(func: uid(Column_1)) @filter(uid(Column_Auth2)) {
         uid
+        dgraph.type
       }
       Column_1 as var(func: uid(0x456))
       Column_Auth2 as var(func: uid(Column_1)) @cascade {
@@ -551,9 +566,11 @@
       }
       Column_4(func: uid(Column_4)) {
         uid
+        dgraph.type
       }
       Column_4.auth(func: uid(Column_4)) @filter(uid(Column_Auth5)) {
         uid
+        dgraph.type
       }
       Column_Auth5 as var(func: uid(Column_4)) @cascade {
         Column.inProject : Column.inProject {
@@ -575,6 +592,7 @@
     query {
       Column(func: uid(Column_1)) @filter(uid(Column_Auth2)) {
         uid
+        dgraph.type
       }
       Column_1 as var(func: uid(0x456))
       Column_Auth2 as var(func: uid(Column_1)) @cascade {
@@ -631,9 +649,11 @@
       }
       Column_4(func: uid(Column_4)) {
         uid
+        dgraph.type
       }
       Column_4.auth(func: uid(Column_4)) @filter(uid(Column_Auth5)) {
         uid
+        dgraph.type
       }
       Column_Auth5 as var(func: uid(Column_4)) @cascade {
         Column.inProject : Column.inProject {
@@ -657,6 +677,7 @@
     query {
       Column(func: uid(Column_1)) @filter(uid(Column_Auth2)) {
         uid
+        dgraph.type
       }
       Column_1 as var(func: uid(0x456))
       Column_Auth2 as var(func: uid(Column_1)) @cascade {
@@ -668,6 +689,7 @@
       }
       Project(func: uid(Project_3)) @filter(uid(Project_Auth4)) {
         uid
+        dgraph.type
       }
       Project_3 as var(func: uid(0x123))
       Project_Auth4 as var(func: uid(Project_3)) @cascade {
@@ -722,9 +744,11 @@
       }
       Column_4(func: uid(Column_4)) {
         uid
+        dgraph.type
       }
       Column_4.auth(func: uid(Column_4)) @filter(uid(Column_Auth5)) {
         uid
+        dgraph.type
       }
       Column_Auth5 as var(func: uid(Column_4)) @cascade {
         Column.inProject : Column.inProject {
@@ -747,6 +771,7 @@
     query {
       Column(func: uid(Column_1)) @filter(uid(Column_Auth2)) {
         uid
+        dgraph.type
       }
       Column_1 as var(func: uid(0x456))
       Column_Auth2 as var(func: uid(Column_1)) @cascade {
@@ -758,6 +783,7 @@
       }
       Project(func: uid(Project_3)) @filter(uid(Project_Auth4)) {
         uid
+        dgraph.type
       }
       Project_3 as var(func: uid(0x123))
       Project_Auth4 as var(func: uid(Project_3)) @cascade {
@@ -874,6 +900,7 @@
     query {
       Project(func: uid(Project_1)) @filter(uid(Project_Auth2)) {
         uid
+        dgraph.type
       }
       Project_1 as var(func: uid(0x123))
       Project_Auth2 as var(func: uid(Project_1)) @cascade {
@@ -927,6 +954,7 @@
     query {
       Issue(func: uid(Issue_1)) @filter(uid(Issue_Auth2)) {
         uid
+        dgraph.type
       }
       Issue_1 as var(func: uid(0x789))
       Issue_Auth2 as var(func: uid(Issue_1)) @cascade {
@@ -978,6 +1006,7 @@
     query {
       Issue(func: uid(Issue_1)) @filter(uid(Issue_2)) {
         uid
+        dgraph.type
       }
       Issue_1 as var(func: uid(0x789))
       Issue_2 as var(func: uid(Issue_1)) @cascade {
@@ -1070,6 +1099,7 @@
     query {
       Question(func: uid(Question_1)) @filter((uid(Question_Auth2) AND uid(Question_Auth3))) {
         uid
+        dgraph.type
       }
       Question_1 as var(func: uid(0x123))
       Question_Auth2 as var(func: uid(Question_1)) @filter(eq(Question.answered, true)) @cascade {
@@ -1123,6 +1153,7 @@
     query {
       Question(func: uid(Question_1)) @filter((uid(Question_Auth2) AND uid(Question_Auth3))) {
         uid
+        dgraph.type
       }
       Question_1 as var(func: uid(0x123))
       Question_Auth2 as var(func: uid(Question_1)) @filter(eq(Question.answered, true)) @cascade {
@@ -1175,6 +1206,7 @@
     query {
       FbPost(func: uid(FbPost_1)) @filter(uid(FbPost_Auth2)) {
         uid
+        dgraph.type
       }
       FbPost_1 as var(func: uid(0x123))
       FbPost_Auth2 as var(func: uid(FbPost_1)) @cascade {
@@ -1252,10 +1284,11 @@
     }
   dgquerysec: |-
     query {
-      Tweets_1 as Tweets_1(func: uid(TweetsRoot)) {
+      Tweets_1 as Tweets_1(func: uid(TweetsRoot_0)) {
         uid
+        dgraph.type
       }
-      TweetsRoot as var(func: uid(Tweets_2))
+      TweetsRoot_0 as var(func: uid(Tweets_2))
       Tweets_2 as var(func: uid(0x123)) @filter(type(Tweets))
     }
 
@@ -1338,10 +1371,11 @@
     }
   dgquerysec: |-
     query {
-      State_1 as State_1(func: uid(StateRoot)) {
+      State_1 as State_1(func: uid(StateRoot_0)) {
         uid
+        dgraph.type
       }
-      StateRoot as var(func: uid(State_3)) @filter(uid(State_Auth4))
+      StateRoot_0 as var(func: uid(State_3)) @filter(uid(State_Auth4))
       State_3 as var(func: uid(0x123)) @filter(type(State))
       State_Auth4 as var(func: uid(State_3)) @filter(eq(State.ownedBy, "user1")) @cascade
     }
@@ -1358,6 +1392,7 @@
     query {
       Country(func: uid(Country_1)) @filter(uid(Country_Auth2)) {
         uid
+        dgraph.type
       }
       Country_1 as var(func: uid(0x456))
       Country_Auth2 as var(func: uid(Country_1)) @filter(eq(Country.ownedBy, "user1")) @cascade

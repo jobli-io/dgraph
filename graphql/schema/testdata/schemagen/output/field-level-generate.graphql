@@ -5,6 +5,7 @@
 type Post {
 	id: ID!
 	title: String!
+	updatedAt: DateTime @generate(mutation: {add:false,update:false}, query: false) @default(add: {expr:"now()"}, update: {expr:"now()"})
 	createdAt: DateTime @generate(mutation: {update:false}) @default(add: {expr:"now()"})
 	score: Int @generate(mutation: {update:false}) @default(add: {value:"0"})
 }
@@ -215,21 +216,21 @@ directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFI
 directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(value: String, expr: String, evaluationOrder: Int, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
 directive @transform(expr: String, evaluationOrder: Int, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
-directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int, authMode: String = "skip") on FIELD_DEFINITION
+directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int, authMode: String) on FIELD_DEFINITION
 input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
-input InterfaceMergePolicy { interface: String! merge: String! operations: [String!] }
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+input InterfaceMergePolicy { interface: String! merge: String! operations: [String!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext) on FIELD_DEFINITION
-directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean) on OBJECT | INTERFACE
+directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
 directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @auth(
-	mergeInto:       String
+	mergeInto: String
 	password: AuthRule
 	query: AuthRule,
 	add: AuthRule,
@@ -348,6 +349,8 @@ type PostAggregateResult {
 	count: Int
 	titleMin: String
 	titleMax: String
+	updatedAtMin: DateTime
+	updatedAtMax: DateTime
 	createdAtMin: DateTime
 	createdAtMax: DateTime
 	scoreMin: Int
@@ -367,12 +370,14 @@ type UpdatePostPayload {
 
 enum PostHasFilter {
 	title
+	updatedAt
 	createdAt
 	score
 }
 
 enum PostOrderable {
 	title
+	updatedAt
 	createdAt
 	score
 }

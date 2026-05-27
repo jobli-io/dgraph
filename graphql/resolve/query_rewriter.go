@@ -902,22 +902,18 @@ func rewriteAsSimilarByEmbeddingQuery(
 	// Create similar_to as the root function, passing $search_vector as
 	// the search vector
 	dgQuery[0].Attr = "var"
+	similarToArgs := []dql.Arg{
+		{Value: pred},
+		{Value: fmt.Sprintf("%v", topK)},
+		{Value: "$search_vector"},
+	}
+	// Only include the distance threshold when explicitly set by the user (non-zero).
+	if distanceThreshold != 0 {
+		similarToArgs = append(similarToArgs, dql.Arg{Value: fmt.Sprintf("%v", distanceThreshold)})
+	}
 	dgQuery[0].Func = &dql.Function{
 		Name: "similar_to",
-		Args: []dql.Arg{
-			{
-				Value: pred,
-			},
-			{
-				Value: fmt.Sprintf("%v", topK),
-			},
-			{
-				Value: "$search_vector",
-			},
-			{
-				Value: fmt.Sprintf("%v", distanceThreshold),
-			},
-		},
+		Args: similarToArgs,
 	}
 
 	// Compute the euclidean distance between the neighbor
@@ -1187,8 +1183,12 @@ func (authRw *authRewriter) addAuthQueries(
 
 	// If static evaluation already determined the result is Positive,
 	// no dynamic auth queries or scaffolding are needed. Return the original query.
-	// This prevents the creation of unused DQL variables.
-	if rbacEval == schema.Positive {
+	// However, we must NOT skip the scaffolding (e.g. ContactRoot / Contact_N vars)
+	// when child fields have their own auth rules (hasAuthRules == true): those
+	// nested auth queries reference parentVarName which must be defined even though
+	// the top-level RBAC has no restriction.
+	// In that case we fall through and build the scaffolding with filter=nil.
+	if rbacEval == schema.Positive && !authRw.hasAuthRules {
 		return dgQuery
 	}
 
@@ -2664,9 +2664,16 @@ func buildFilter(typ schema.Type,
 				varQry = append(varQry, qs...)
 			case []interface{}:
 				for i, obj := range v {
-					// Create a unique query name for each element in the array by appending its index.
-					// This ensures that nested filters generate unique DQL variables.
-					childQueryName := fmt.Sprintf("%s_%d", qn, i)
+					// For a single-element list (GraphQL coerces bare objects to [obj])
+					// keep the parent qn unchanged to preserve stable variable names like
+					// queryNested_X_and_y instead of queryNested_X_and_0_y.
+					// Multiple elements get a numeric suffix for uniqueness.
+					var childQueryName string
+					if len(v) == 1 {
+						childQueryName = qn
+					} else {
+						childQueryName = fmt.Sprintf("%s_%d", qn, i)
+					}
 					ft, qs := buildFilter(typ, obj.(map[string]interface{}), auth, childQueryName)
 					ands = append(ands, ft)
 					varQry = append(varQry, qs...)
@@ -2690,9 +2697,15 @@ func buildFilter(typ schema.Type,
 			case []interface{}:
 				ors := make([]*dql.FilterTree, 0, len(v))
 				for i, obj := range v {
-					// Create a unique query name for each element in the array by appending its index.
-					// This ensures that nested filters generate unique DQL variables.
-					childQueryName := fmt.Sprintf("%s_%d", qn, i)
+					// For a single-element list (GraphQL coerces bare objects to [obj])
+					// keep the parent qn unchanged to preserve stable variable names like
+					// queryNested_X_or_y instead of queryNested_X_or_0_y.
+					var childQueryName string
+					if len(v) == 1 {
+						childQueryName = qn
+					} else {
+						childQueryName = fmt.Sprintf("%s_%d", qn, i)
+					}
 					ft, qs := buildFilter(typ, obj.(map[string]interface{}), auth, childQueryName)
 					ors = append(ors, ft)
 					varQry = append(varQry, qs...)

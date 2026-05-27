@@ -363,7 +363,13 @@ func BuildCascadePreQuery(queryBlocks []*dql.GraphQuery, rootVar, rootTypeName s
 			collectVars(b.Children)
 		}
 	}
-	collectVars(queryBlocks)
+	// Collect variable names defined in the ROOT block and its children only.
+	// Additional blocks in queryBlocks (e.g. auth var blocks like Root_Auth4) must NOT
+	// be included — their vars are scoped to the auth filter and would pollute the
+	// cascadeRoots uid() argument with non-root-type UIDs.
+	if len(queryBlocks) > 0 {
+		collectVars([]*dql.GraphQuery{queryBlocks[0]})
+	}
 
 	if len(allVars) == 0 {
 		return queryBlocks

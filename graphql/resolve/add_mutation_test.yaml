@@ -865,9 +865,11 @@
     query {
       State_1 as State_1(func: uid(0x11)) @filter(type(State)) {
         uid
+        dgraph.type
       }
       State_3 as State_3(func: uid(0x13)) @filter(type(State)) {
         uid
+        dgraph.type
       }
       var(func: uid(State_1)) {
         Country_5 as State.country @filter(NOT (uid(0x12)))
@@ -962,6 +964,7 @@
     query {
       Book_2 as Book_2(func: uid(0x11)) @filter(type(Book)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1015,6 +1018,7 @@
     query {
       Book_2 as Book_2(func: uid(0x11)) @filter(type(Book)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1077,6 +1081,7 @@
     query {
       State_1 as State_1(func: uid(0x11)) @filter(type(State)) {
         uid
+        dgraph.type
       }
       var(func: uid(State_1)) {
         Country_4 as State.country @filter(NOT (uid(0x12)))
@@ -1323,6 +1328,7 @@
     query {
       LibraryMember_1 as LibraryMember_1(func: uid(0x11)) @filter(type(LibraryMember)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -5307,6 +5313,7 @@
     query {
       Book_2 as Book_2(func: uid(0x11)) @filter(type(Book)) {
         uid
+        dgraph.type
       }
       var(func: uid(Book_2)) {
         author_4 as Book.author @filter(NOT (uid(0x12)))
@@ -5632,6 +5639,7 @@
     query {
       BookingXID_1 as BookingXID_1(func: uid(0x11)) @filter(type(BookingXID)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:

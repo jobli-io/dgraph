@@ -179,10 +179,34 @@ func fingerprintAuthVarBlock(q *dql.GraphQuery, subst map[string]string) string 
 	// Cascade markers: @cascade or @cascade(fields:[...])
 	b.WriteString(strings.Join(q.Cascade, ","))
 	b.WriteByte('|')
-	// Child edge attributes (NEVER the child Var — that is what we're deduplicating).
+	// Child subtrees — recursively fingerprint so that structurally different
+	// children (different filters, different sub-children) produce different
+	// fingerprints. We deliberately exclude child Var fields (those are the
+	// generated names we are deduplicating).
 	for _, c := range q.Children {
-		b.WriteString(c.Attr)
-		b.WriteByte(',')
+		b.WriteString(fingerprintSubtree(c, subst))
+		b.WriteByte(';')
+	}
+	return b.String()
+}
+
+// fingerprintSubtree recursively fingerprints a query node's structure
+// (Attr, Filter, Cascade, Children) but deliberately excludes Var so that
+// differently-named but structurally identical subtrees compare equal.
+func fingerprintSubtree(q *dql.GraphQuery, subst map[string]string) string {
+	if q == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(q.Attr)
+	b.WriteByte('|')
+	b.WriteString(fingerprintAuthFilter(q.Filter, subst))
+	b.WriteByte('|')
+	b.WriteString(strings.Join(q.Cascade, ","))
+	b.WriteByte('|')
+	for _, c := range q.Children {
+		b.WriteString(fingerprintSubtree(c, subst))
+		b.WriteByte(';')
 	}
 	return b.String()
 }

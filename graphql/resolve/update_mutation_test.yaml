@@ -26,6 +26,7 @@
     query {
       x as updateHotel(func: type(Hotel)) @filter(near(Hotel.location, [22.22,11.11], 33.33)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -66,6 +67,7 @@
     query {
       x as updateHotel(func: uid(0x123, 0x124)) @filter(type(Hotel)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -134,6 +136,7 @@
     query {
       x as updateHotel(func: uid(0x123, 0x124)) @filter(type(Hotel)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -218,6 +221,7 @@
     query {
       x as updateHotel(func: uid(0x123, 0x124)) @filter(type(Hotel)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -254,6 +258,7 @@
     query {
       x as updatePost(func: uid(0x123, 0x124)) @filter(type(Post)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -287,6 +292,7 @@
     query {
       x as updatePost(func: uid(0x123, 0x124)) @filter(type(Post)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -320,6 +326,7 @@
     query {
       x as updatePost(func: uid(0x123, 0x124)) @filter(type(Post)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -358,6 +365,7 @@
     query {
       x as updateHuman(func: uid(0x123)) @filter(type(Human)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -385,6 +393,7 @@
     query {
       x as updateCharacter(func: uid(0x123)) @filter(type(Character)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -418,6 +427,7 @@
     query {
       x as updatePost(func: type(Post)) @filter(eq(Post.tags, "foo")) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -451,6 +461,7 @@
     query {
       x as updateState(func: type(State)) @filter(eq(State.code, "nsw")) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -485,6 +496,7 @@
     query {
       x as updateEditor(func: uid(0x1, 0x2)) @filter((eq(Editor.code, "editor") AND type(Editor))) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -528,9 +540,10 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
       var(func: uid(0x456)) {
-        Author_4 as Post.author @filter(NOT (uid(x)))
+        Author_3 as Post.author @filter(NOT (uid(x)))
       }
     }
   dgmutations:
@@ -546,7 +559,7 @@
       deletejson: |
         [
           {
-            "uid": "uid(Author_4)",
+            "uid": "uid(Author_3)",
             "Author.posts": [{"uid": "0x456"}]
           }
         ]
@@ -613,6 +626,7 @@
     query {
       x as updateComputer(func: type(Computer)) @filter(eq(Computer.name, "computerName")) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -662,6 +676,7 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -711,6 +726,7 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -793,9 +809,10 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
       var(func: uid(0x456)) {
-        Author_5 as Post.author @filter(NOT (uid(x)))
+        Author_4 as Post.author @filter(NOT (uid(x)))
       }
     }
   dgmutations:
@@ -811,7 +828,7 @@
       deletejson: |
         [
           {
-            "uid": "uid(Author_5)",
+            "uid": "uid(Author_4)",
             "Author.posts": [{"uid": "0x456"}]
           }
         ]
@@ -866,9 +883,10 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
       var(func: uid(0x456)) {
-        Author_4 as Post.author @filter(NOT (uid(x)))
+        Author_3 as Post.author @filter(NOT (uid(x)))
       }
     }
   dgmutations:
@@ -884,7 +902,7 @@
       deletejson: |
         [
           {
-            "uid": "uid(Author_4)",
+            "uid": "uid(Author_3)",
             "Author.posts": [{"uid": "0x456"}]
           }
         ]
@@ -916,13 +934,14 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
     - setjson: |
         { "uid" : "uid(x)",
           "Author.country": {
-            "uid": "_:Country_3",
+            "uid": "_:Country_2",
             "dgraph.type": ["Country"],
             "Country.name": "New Country"
           }
@@ -966,13 +985,14 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
     - setjson: |
         { "uid" : "uid(x)",
           "Author.country": {
-            "uid": "_:Country_4",
+            "uid": "_:Country_3",
             "dgraph.type": ["Country"],
             "Country.name": "New Country",
             "Country.states": [ {
@@ -983,7 +1003,7 @@
               ],
               "uid": "_:State_1",
               "State.country": {
-                "uid": "_:Country_4"
+                "uid": "_:Country_3"
               }
             } ]
           }
@@ -1031,22 +1051,23 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
       var(func: uid(0x987)) {
-        Country_5 as State.country
+        Country_4 as State.country
       }
     }
   dgmutations:
     - setjson: |
         { "uid" : "uid(x)",
           "Author.country": {
-            "uid": "_:Country_4",
+            "uid": "_:Country_3",
             "dgraph.type": ["Country"],
             "Country.name": "New Country",
             "Country.states": [ {
               "uid": "0x987",
               "State.country": {
-                "uid": "_:Country_4"
+                "uid": "_:Country_3"
               }
             } ]
           }
@@ -1054,7 +1075,7 @@
       deletejson: |
         [
           {
-            "uid": "uid(Country_5)",
+            "uid": "uid(Country_4)",
             "Country.states": [{"uid": "0x987"}]
           }
         ]
@@ -1100,22 +1121,23 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
       var(func: uid(0x234)) {
-        Country_5 as State.country
+        Country_4 as State.country
       }
     }
   dgmutations:
     - setjson: |
         { "uid" : "uid(x)",
           "Author.country": {
-            "uid": "_:Country_4",
+            "uid": "_:Country_3",
             "dgraph.type": ["Country"],
             "Country.name": "New Country",
             "Country.states": [ {
               "uid": "0x234",
               "State.country": {
-                "uid": "_:Country_4"
+                "uid": "_:Country_3"
               }
             } ]
           }
@@ -1123,7 +1145,7 @@
       deletejson: |
         [
           {
-            "uid": "uid(Country_5)",
+            "uid": "uid(Country_4)",
             "Country.states": [{"uid": "0x234"}]
           }
         ]
@@ -1166,12 +1188,13 @@
     query {
       x as updateOwner(func: uid(0x123)) @filter(type(Owner)) {
         uid
+        dgraph.type
       }
       var(func: uid(0x456)) {
-        Owner_4 as House.owner @filter(NOT (uid(x)))
+        Owner_3 as House.owner @filter(NOT (uid(x)))
       }
       var(func: uid(x)) {
-        House_5 as Owner.house @filter(NOT (uid(0x456)))
+        House_4 as Owner.house @filter(NOT (uid(0x456)))
       }
     }
   dgmutations:
@@ -1185,11 +1208,11 @@
       deletejson: |
         [
           {
-            "uid": "uid(Owner_4)",
+            "uid": "uid(Owner_3)",
             "Owner.house": {"uid": "0x456"}
           },
           {
-            "uid": "uid(House_5)",
+            "uid": "uid(House_4)",
             "House.owner": {"uid": "uid(x)"}
           }
         ]
@@ -1229,6 +1252,7 @@
     query {
       x as updateMovieDirector(func: uid(0x123)) @filter(type(MovieDirector)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1276,6 +1300,7 @@
     query {
       x as updateMovieDirector(func: uid(0x123)) @filter(type(MovieDirector)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1332,6 +1357,7 @@
     query {
       x as updateStudent(func: uid(0x123)) @filter(type(Student)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1543,9 +1569,10 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
       var(func: uid(0x456)) {
-        Author_4 as Post.author @filter(NOT (uid(x)))
+        Author_3 as Post.author @filter(NOT (uid(x)))
       }
     }
   dgmutations:
@@ -1562,7 +1589,7 @@
       deletejson: |
         [
           {
-            "uid": "uid(Author_4)",
+            "uid": "uid(Author_3)",
             "Author.posts": [{"uid": "0x456"}]
           }
         ]
@@ -1603,9 +1630,10 @@
     query {
       x as updatePost(func: uid(0x123)) @filter(type(Post)) {
         uid
+        dgraph.type
       }
       var(func: uid(x)) {
-        Author_4 as Post.author @filter(NOT (uid(0x456)))
+        Author_3 as Post.author @filter(NOT (uid(0x456)))
       }
     }
   dgmutations:
@@ -1620,7 +1648,7 @@
       deletejson: |
         [
           {
-            "uid": "uid(Author_4)",
+            "uid": "uid(Author_3)",
             "Author.posts": [ { "uid": "uid(x)" } ]
           }
         ]
@@ -1657,6 +1685,7 @@
     query {
       x as updateCountry(func: uid(0x123)) @filter(type(Country)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1731,6 +1760,7 @@
     query {
       x as updateComputerOwner(func: type(ComputerOwner)) @filter(eq(ComputerOwner.name, "A.N. Owner")) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1799,6 +1829,7 @@
     query {
       x as updateHome(func: uid(0x123)) @filter(type(Home)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1812,17 +1843,17 @@
             "Animal.category": "Mammal",
             "Dog.breed": "German Shephard",
             "dgraph.type": ["Dog", "Animal"],
-            "uid": "_:Dog_5"
+            "uid": "_:Dog_4"
           }, {
             "Animal.category": "Bird",
             "Parrot.repeatsWords": ["squawk"],
             "dgraph.type": ["Parrot", "Animal"],
-            "uid": "_:Parrot_6"
+            "uid": "_:Parrot_5"
           }, {
             "Character.name": "Han Solo",
             "Employee.ename": "Han_emp",
             "dgraph.type": ["Human", "Character", "Employee"],
-            "uid": "_:Human_7"
+            "uid": "_:Human_6"
           }],
           "uid": "uid(x)"
         }
@@ -1875,6 +1906,7 @@
     query {
       x as updateBook(func: type(Book)) @filter((eq(Book.title, "Sapiens") OR eq(Book.ISBN, "2QSAT"))) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1908,6 +1940,7 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -1941,6 +1974,7 @@
     query {
       x as updateAuthor(func: uid(0x123)) @filter(type(Author)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -2004,6 +2038,7 @@
     query {
       x as updateBook(func: type(Book)) @filter((eq(Book.title, "Sapiens") OR eq(Book.ISBN, "2QSAT"))) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -2122,6 +2157,7 @@
     query {
       x as updatePost1(func: type(Post1)) @filter(eq(Post1.id, "P02")) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -2231,6 +2267,7 @@
     query {
       x as updateLibraryMember(func: type(LibraryMember)) @filter(eq(Member.refID, "101")) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -2405,6 +2442,7 @@
     query {
       x as updateLibraryManager(func: type(LibraryManager)) @filter(eq(LibraryManager.name, "Alice")) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -2446,6 +2484,7 @@
     query {
       x as updateBooking(func: uid(0x123, 0x124)) @filter(type(Booking)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:
@@ -2492,6 +2531,7 @@
     query {
       x as updateBooking(func: uid(0x123, 0x124)) @filter(type(Booking)) {
         uid
+        dgraph.type
       }
     }
   dgmutations:

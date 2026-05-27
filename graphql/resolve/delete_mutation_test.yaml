@@ -23,6 +23,7 @@
     query {
       x as deleteAuthor(func: uid(0x1, 0x2)) @filter(type(Author)) {
         uid
+        dgraph.type
         Post_2 as Author.posts
       }
     }
@@ -65,6 +66,7 @@
     query {
       x as deleteAuthor(func: uid(0x1, 0x2)) @filter(type(Author)) {
         uid
+        dgraph.type
         Post_2 as Author.posts
       }
     }
@@ -115,6 +117,7 @@
     query {
       x as deleteAuthor(func: uid(0x1, 0x2)) @filter((eq(Author.name, "A.N. Author") AND type(Author))) {
         uid
+        dgraph.type
         Post_2 as Author.posts
       }
     }
@@ -147,6 +150,7 @@
     query {
       x as deleteAuthor(func: type(Author)) @filter((eq(Author.dob, "2000-01-01") AND eq(Author.name, "A.N. Author"))) {
         uid
+        dgraph.type
         Post_2 as Author.posts
       }
     }
@@ -176,6 +180,7 @@
     query {
       x as deleteState(func: type(State)) @filter(eq(State.code, "abc")) {
         uid
+        dgraph.type
         Country_2 as State.country
       }
     }
@@ -209,6 +214,7 @@
     query {
       x as deletePost(func: uid(0x1, 0x2)) @filter(type(Post)) {
         uid
+        dgraph.type
         Author_2 as Post.author
         Category_3 as Post.category
       }
@@ -239,6 +245,7 @@
     query {
       x as deleteMovie(func: uid(0x1, 0x2)) @filter(type(Movie)) {
         uid
+        dgraph.type
         MovieDirector_2 as ~directed.movies
       }
     }
@@ -255,6 +262,7 @@
     query {
       x as deleteA(func: type(A)) @filter(eq(A.name, "xyz")) {
         uid
+        dgraph.type
       }
     }
   dgquerysec: |-
@@ -313,6 +321,7 @@
     query {
       x as deleteBook(func: type(Book)) @filter((eq(Book.title, "Sapiens") OR eq(Book.ISBN, "2SB1Q"))) {
         uid
+        dgraph.type
         author_2 as Book.author
       }
     }

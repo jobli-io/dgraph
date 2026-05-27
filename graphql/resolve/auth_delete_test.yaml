@@ -18,6 +18,7 @@
     query {
       x as deleteUserSecret(func: uid(UserSecretRoot)) {
         uid
+        dgraph.type
       }
       UserSecretRoot as var(func: uid(UserSecret_1)) @filter(uid(UserSecret_Auth2))
       UserSecret_1 as var(func: type(UserSecret)) @filter(anyofterms(UserSecret.aSecret, "auth is applied"))
@@ -50,24 +51,19 @@
         ]
   dgquery: |-
     query {
-      x as deleteTweets(func: uid(TweetsRoot)) {
+      x as deleteTweets(func: type(Tweets)) @filter(anyoftext(Tweets.text, "abc")) {
         uid
+        dgraph.type
         User_2 as Tweets.user
       }
-      TweetsRoot as var(func: uid(Tweets_1))
-      Tweets_1 as var(func: type(Tweets)) @filter(anyoftext(Tweets.text, "abc"))
     }
   dgquerysec: |-
     query {
-      x as var(func: uid(TweetsRoot))
-      TweetsRoot as var(func: uid(Tweets_1))
-      Tweets_1 as var(func: type(Tweets)) @filter(anyoftext(Tweets.text, "abc"))
-      DeleteTweetsPayload.tweets(func: uid(Tweets_3)) {
+      x as var(func: type(Tweets)) @filter(anyoftext(Tweets.text, "abc"))
+      DeleteTweetsPayload.tweets(func: uid(x)) {
         Tweets.text : Tweets.text
         dgraph.uid : uid
       }
-      Tweets_3 as var(func: uid(Tweets_4))
-      Tweets_4 as var(func: uid(x))
     }
 
 - name: Delete with inverse field and RBAC false
@@ -96,12 +92,10 @@
   dgquerysec: |-
     query {
       x as var()
-      DeleteTweetsPayload.tweets(func: uid(Tweets_1)) {
+      DeleteTweetsPayload.tweets(func: uid(x)) {
         Tweets.text : Tweets.text
         dgraph.uid : uid
       }
-      Tweets_1 as var(func: uid(Tweets_2))
-      Tweets_2 as var(func: uid(x))
     }
 
 - name: Delete with deep auth
@@ -132,6 +126,7 @@
     query {
       x as deleteTicket(func: uid(TicketRoot)) {
         uid
+        dgraph.type
         Column_3 as Ticket.onColumn
         User_4 as Ticket.assignedTo
       }
@@ -190,6 +185,7 @@
     query {
       x as deleteTicket(func: uid(TicketRoot)) {
         uid
+        dgraph.type
         Column_3 as Ticket.onColumn
         User_4 as Ticket.assignedTo
       }
@@ -308,6 +304,7 @@
     query {
       x as deleteProject(func: uid(0x1, 0x2)) @filter(type(Project)) {
         uid
+        dgraph.type
         Column_2 as Project.columns
       }
     }
@@ -379,6 +376,7 @@
     query {
       x as deleteUser(func: uid(UserRoot)) {
         uid
+        dgraph.type
         Ticket_4 as User.tickets
         Tweets_5 as User.tweets
       }
@@ -412,6 +410,7 @@
     query {
       x as deleteRegion(func: uid(RegionRoot)) {
         uid
+        dgraph.type
       }
       RegionRoot as var(func: uid(Region_1)) @filter(uid(Region_Auth2))
       Region_1 as var(func: uid(0x1, 0x2)) @filter(type(Region))
@@ -471,24 +470,19 @@
          }]
   dgquery: |-
     query {
-      x as deleteLog(func: uid(LogRoot)) {
+      x as deleteLog(func: uid(0x1, 0x2)) @filter(type(Log)) {
         uid
+        dgraph.type
       }
-      LogRoot as var(func: uid(Log_1))
-      Log_1 as var(func: uid(0x1, 0x2)) @filter(type(Log))
     }
   dgquerysec: |-
     query {
-      x as var(func: uid(LogRoot))
-      LogRoot as var(func: uid(Log_1))
-      Log_1 as var(func: uid(0x1, 0x2)) @filter(type(Log))
-      DeleteLogPayload.log(func: uid(Log_2), orderasc: Log.logs) {
+      x as var(func: uid(0x1, 0x2)) @filter(type(Log))
+      DeleteLogPayload.log(func: uid(x), orderasc: Log.logs) {
         Log.logs : Log.logs
         Log.random : Log.random
         dgraph.uid : uid
       }
-      Log_2 as var(func: uid(Log_3), orderasc: Log.logs)
-      Log_3 as var(func: uid(x))
     }
 
 - name: Delete with top level OR RBAC true
@@ -510,11 +504,10 @@
         [{ "uid": "uid(x)" }]
   dgquery: |-
     query {
-      x as deleteComplexLog(func: uid(ComplexLogRoot)) {
+      x as deleteComplexLog(func: uid(0x1, 0x2)) @filter(type(ComplexLog)) {
         uid
+        dgraph.type
       }
-      ComplexLogRoot as var(func: uid(ComplexLog_1))
-      ComplexLog_1 as var(func: uid(0x1, 0x2)) @filter(type(ComplexLog))
     }
 
 - name: Delete with top level OR RBAC false
@@ -537,6 +530,7 @@
     query {
       x as deleteComplexLog(func: uid(ComplexLogRoot)) {
         uid
+        dgraph.type
       }
       ComplexLogRoot as var(func: uid(ComplexLog_1)) @filter(uid(ComplexLog_Auth2))
       ComplexLog_1 as var(func: uid(0x1, 0x2)) @filter(type(ComplexLog))
@@ -566,6 +560,7 @@
     query {
       x as deleteIssue(func: uid(IssueRoot)) {
         uid
+        dgraph.type
       }
       IssueRoot as var(func: uid(Issue_1)) @filter(uid(Issue_Auth2))
       Issue_1 as var(func: uid(0x1, 0x2)) @filter(type(Issue))
@@ -645,6 +640,7 @@
     query {
       x as deleteRole(func: uid(0x1, 0x2)) @filter(type(Role)) {
         uid
+        dgraph.type
       }
     }
 
@@ -678,6 +674,7 @@
     query {
       x as deletePost(func: uid(PostRoot)) {
         uid
+        dgraph.type
         Author_7 as Post.author
       }
       PostRoot as var(func: uid(Post_1)) @filter(((uid(Question_Auth3) AND uid(Question_Auth4)) OR uid(Answer_Auth6)))
@@ -749,6 +746,7 @@
     query {
       x as deleteA(func: uid(ARoot)) {
         uid
+        dgraph.type
       }
       ARoot as var(func: uid(A_1)) @filter((uid(B_2)))
       A_1 as var(func: uid(0x1, 0x2)) @filter(type(A))
@@ -783,6 +781,7 @@
     query {
       x as deleteQuestion(func: uid(QuestionRoot)) {
         uid
+        dgraph.type
         Author_4 as Post.author
       }
       QuestionRoot as var(func: uid(Question_1)) @filter((uid(Question_Auth2) AND uid(Question_Auth3)))
@@ -873,6 +872,7 @@
     query {
       x as deleteFbPost(func: uid(FbPostRoot)) {
         uid
+        dgraph.type
         Author_3 as Post.author
       }
       FbPostRoot as var(func: uid(FbPost_1)) @filter(uid(FbPost_Auth2))
@@ -906,6 +906,7 @@
     query {
       x as deleteNested_X(func: type(Nested_X)) @filter((uid(deleteNested_X_y))) {
         uid
+        dgraph.type
         Nested_Y_3 as Nested_X.y
       }
       var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "-")) {
