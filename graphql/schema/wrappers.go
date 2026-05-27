@@ -28,6 +28,7 @@ import (
 	"github.com/dgraph-io/gqlparser/v2/parser"
 	"github.com/expr-lang/expr" // For expression evaluation
 	"github.com/go-playground/validator/v10"
+	"github.com/golang/glog"
 	"github.com/google/uuid"
 	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
 	"github.com/hypermodeinc/dgraph/v25/x"
@@ -3144,6 +3145,7 @@ type ExprFuncs struct {
 	MapDiff           func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error) `expr:"mapDiff"`
 	MapWithoutKeys    func(map[string]interface{}, []interface{}) map[string]interface{}                   `expr:"mapWithoutKeys"`
 	MapInsert         func(map[string]any, map[string]any) map[string]any                                  `expr:"mapInsert"`
+	Log               func(interface{}) interface{}                                                        `expr:"log"`
 	Error             func(interface{}) (interface{}, error)                                               `expr:"error"`
 }
 
@@ -3164,6 +3166,10 @@ func NewExprFuncs(auth AuthCtx) ExprFuncs {
 		MapDiff:        diffMapInterface,
 		MapWithoutKeys: mapWithoutKeys,
 		MapInsert:      mapInsert[string, any],
+		Log: func(v interface{}) interface{} {
+			glog.V(2).Infof("[expr log] %v", v)
+			return v
+		},
 		Error: func(v interface{}) (interface{}, error) {
 			b, _ := json.Marshal(v)
 			return nil, errors.New(string(b))
