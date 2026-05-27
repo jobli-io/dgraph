@@ -13,11 +13,9 @@ per-request overhead.
 ```graphql
 directive @cascadeAuth(
   operations: [CascadeAuthOperation!] # default: [query, add, update, delete]
-  authMode: String # "filter" (default) | "enforce"
-  depth: Int # 1 (default) | -1 (full chain)
-  bidirectional: Boolean # also expose parent when child is accessible
-  variableContext: CascadeAuthVariableContext # "self" (default) | "parent" | "adaptive"
-  when: String # CEL guard; skip when false
+  depth: Int # default: 1; -1 = unlimited chain
+  bidirectional: Boolean # default: false
+  variableContext: CascadeAuthVariableContext # default: adaptive
 ) on FIELD_DEFINITION
 
 enum CascadeAuthOperation {
@@ -33,25 +31,26 @@ enum CascadeAuthVariableContext {
 }
 ```
 
-Place on **edge fields** of the parent type, or on a **parent-reference field** of an interface.
+Place on **edge fields** that point to an authority type. The authority type must declare `@auth`
+rules (or be an interface whose concrete implementors do).
 
-The authority (edge target) may be a **concrete type** or an **interface**. When pointing to an
-interface, the engine collects `@auth` rules from all concrete implementors and OR-merges them,
-adding a `@filter(type(X))` discriminator per implementor so the DQL filter is type-safe.
+The authority may be a **concrete type** or an **interface**. When pointing to an interface, the
+engine collects `@auth` rules from all concrete implementors and OR-merges them, adding a
+`@filter(type(X))` discriminator per implementor so the DQL filter is type-safe.
 
 ### `@authVariables` — on the child type or interface
 
 ```graphql
-input AuthVariable { key: String!; value: [String!]! }
+input AuthVariable {
+  key: String!
+  value: [String!]!
+}
 
-directive @authVariables(
-  vars: [AuthVariable!]!
-) on OBJECT | INTERFACE
+directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 ```
 
-Declares named substitution values injected into the parent's `@auth` rule template at **schema
-compile-time**. Keys are referenced in the rule as `{{KEY}}`. The built-in `{TYPE}` placeholder is
-always substituted with the concrete child type name.
+Declares named substitution values injected into the authority's `@auth` rule template at **schema
+compile-time**. Keys are referenced in the rule as `{{KEY}}`.
 
 > **Substitution happens before GraphQL parsing.** `{{KEY}}` is not valid GraphQL syntax — it must
 > be replaced before the rule string is fed to the validator. Rules without `@authVariables` on
@@ -66,19 +65,19 @@ always substituted with the concrete child type name.
 ```graphql
 directive @cascadeAuthPolicy(
   aggregation: String # "and" (default) | "or"
-  includeSelf: Boolean # default: false
   skipBidirectional: Boolean # default: false
+  skip: Boolean # default: false
 ) on OBJECT | INTERFACE
 ```
 
-Controls how multiple incoming cascade edges are combined and whether this type contributes
-reverse-visibility rules to its authority.
+Controls how multiple incoming cascade edges are combined and whether this type participates in
+cascade auth at all.
 
-| Argument                  | Effect                                                                                                                                 |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `aggregation: "or"`       | Access via **any** authorized parent path is sufficient (default: `"and"` — all paths required)                                        |
-| `includeSelf: true`       | Adds the child's own `@auth` rule as an additional OR path alongside the cascade rules                                                 |
-| `skipBidirectional: true` | This type will **not** contribute reverse-visibility rules to its authority type (see [Bidirectional Pitfall](#bidirectional-pitfall)) |
+| Argument                  | Effect                                                                                                                                      |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `aggregation: "or"`       | Access via **any** authorized parent path is sufficient (default: `"and"` — all parent paths must be satisfied simultaneously)              |
+| `skipBidirectional: true` | This type will **not** contribute reverse-visibility rules back to its authority type (see [Bidirectional Pitfall](#bidirectional-pitfall)) |
+| `skip: true`              | Completely opt this type out of cascade auth expansion — it receives no auth rules from authority types                                     |
 
 ---
 
@@ -86,7 +85,7 @@ reverse-visibility rules to its authority.
 
 ### `variableContext`
 
-Controls which type's `@authVariables` are substituted into the parent's rule template:
+Controls which type's `@authVariables` are substituted into the authority's rule template:
 
 | Value                    | Behaviour                                                                                                                                                      |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -131,11 +130,20 @@ automatic.
 
 ---
 
-### Operation-Aware Auth Rules
+### `operations`
 
-By default, `@cascadeAuth` reads the authority type's **`query`** `@auth` rule and propagates it
-into the child for all operations (add, update, delete, query). When the authority type declares
-operation-specific `@auth` rules, the cascade engine now reads the matching rule:
+Controls which mutation operations the cascade auth rule is applied to. Omitting `operations`
+applies cascade auth to **all four operations** (query, add, update, delete).
+
+```graphql
+# Only protect reads — add/update/delete bypass cascade auth on this edge
+forJobAd: JobAd @cascadeAuth(operations: [query], variableContext: self, bidirectional: true)
+
+# Protect reads and writes but not deletes
+inWorkspace: Workspace! @cascadeAuth(operations: [query, add, update])
+```
+
+For each operation that IS in the list, the engine reads the authority type's matching `@auth` rule:
 
 | Child operation | Authority rule used  | Fallback            |
 | --------------- | -------------------- | ------------------- |
@@ -144,49 +152,87 @@ operation-specific `@auth` rules, the cascade engine now reads the matching rule
 | `update`        | `@auth(update: ...)` | `@auth(query: ...)` |
 | `delete`        | `@auth(delete: ...)` | `@auth(query: ...)` |
 
-This means a child type that cascades from `IAMResourceProtected` will use `ADM_PERMISSIONS` for its
-`add` cascade and `QRY_PERMISSIONS` for its `query` cascade — matching the intent of the parent's
-auth design.
-
 **Graceful fallback:** If the authority's op-specific rule uses `{{KEY}}` placeholders that the
 child's `@authVariables` doesn't declare, the engine falls back to the `query` rule for that
-cascade. The child remains protected (query-level auth is always the minimum permission set) and the
-schema deploys without error. To opt into op-specific cascades, the child must declare matching
-`@authVariables` keys.
+operation. The child remains protected and the schema deploys without error.
 
 ---
-
-### `authMode`
-
-| Value                  | Behaviour                                                               |
-| ---------------------- | ----------------------------------------------------------------------- |
-| `"filter"` _(default)_ | Silently exclude child nodes the caller cannot reach                    |
-| `"enforce"`            | Return an authorization error if any child node fails the cascade check |
 
 ### `depth`
 
 | Value           | Effect                                        |
 | --------------- | --------------------------------------------- |
-| `1` _(default)_ | Direct parent only                            |
-| `N > 1`         | Walk up to N hops                             |
+| `1` _(default)_ | Direct authority only                         |
+| `N > 1`         | Walk up to N hops through the cascade chain   |
 | `-1`            | Full chain until no more `@cascadeAuth` edges |
+
+---
 
 ### `bidirectional`
 
-When `true`, also generates **reverse** rules in addition to the forward cascade:
+When `true`, also generates **reverse** rules so that the authority type becomes visible when the
+caller can access any child:
 
-1. **Reverse visibility** — OR-merges a rule into the parent's `@auth(query:...)` so the parent
-   becomes visible when the caller can access any child.
-2. **Edge scoping** — Adds a field-level auth rule on the edge so traversing it only returns
-   children the caller is authorized to see.
+1. **Reverse visibility** — OR-merges a rule into the authority's `@auth(query:...)` so the
+   authority is visible when the caller can reach any child.
+2. **Edge scoping** — Adds a field-level auth rule on the inverse edge so traversing from authority
+   to child only returns children the caller is authorized to see.
 
-The reverse direction always uses the child's own complete `@auth` rule (evaluated **before** the
-cascade expansion runs). It only generates `query` rules — it **never** grants add/update/delete
-access to the parent.
+The reverse direction always uses the child's own **pre-cascade** `@auth` rule (before cascade
+expansion runs). It only generates `query` rules — it **never** grants add/update/delete access to
+the authority.
 
-> **Note:** The rule fed back to the parent is the child's _own pre-cascade_ `@auth`, not the
-> cascade-substituted form. This is intentional — using the cascade-substituted rule would create a
-> circular dependency where the parent's auth depends on itself.
+> **Note:** The rule fed back to the authority is the child's _own_ `@auth`, not the
+> cascade-substituted form. This prevents circular dependencies.
+
+---
+
+## `@cascadeAuthPolicy` in Depth
+
+### `aggregation`
+
+When a type has **multiple** incoming `@cascadeAuth` edges (implements multiple cascade-auth
+interfaces), `aggregation` controls how those paths are combined:
+
+```graphql
+# Company reachable from both Workspace (inWorkspace) and Group (inGroup)
+type Company
+  @cascadeAuthPolicy(aggregation: "or")   # either path suffices
+  @authVariables(vars: [{ key: "PERMISSIONS", value: ["READ_COMPANY"] }])
+  { ... }
+```
+
+| Value               | Behaviour                                                         |
+| ------------------- | ----------------------------------------------------------------- |
+| `"and"` _(default)_ | Caller must be authorized via **all** parent paths simultaneously |
+| `"or"`              | Caller needs authorization via **any** one path                   |
+
+> **Common pitfall:** A type that implements two cascade-auth interfaces but is not always linked to
+> both authority types (e.g. optional group membership) must use `aggregation: "or"`. With the
+> default `"and"`, a node that has only `inWorkspace` set (no `inGroup`) will always fail auth
+> because the engine requires both paths to be satisfied.
+
+### `skip`
+
+```graphql
+type AuditLog implements WorkspaceMember @cascadeAuthPolicy(skip: true) {
+  id: ID!
+  inWorkspace: Workspace!
+}
+```
+
+Completely opts this type out of cascade auth expansion. The type receives **no** propagated auth
+rules from any authority type, even if it implements cascade-auth interfaces. Use when:
+
+- The type is a structural-only member of an interface (audit logs, through-nodes, internal records)
+- Auth is intentionally handled entirely by the type's own explicit `@auth` directive
+- Adding cascade auth to this type would produce incorrect DQL (e.g. authority's filter does not
+  apply to this type's use case)
+
+### `skipBidirectional`
+
+Prevents this type from contributing reverse-visibility rules back to its authority. See
+[Bidirectional Pitfall](#bidirectional-pitfall) below.
 
 ---
 
@@ -212,40 +258,46 @@ type Group
 
 type Candidate
   @authVariables(vars: [{ key: "PERMISSIONS", value: ["_ALL", "READ_CANDIDATE", "_CANDIDATE"] }])
-  @cascadeAuthPolicy(aggregation: "or", includeSelf: false)
+  @cascadeAuthPolicy(aggregation: "or")
   { ... }
+```
+
+With `depth: -1`, the engine recursively builds the full auth chain:
+
+```dql
+Workspace_var as var(func: type(Workspace)) @filter(workspaceAuth) @cascade
+Group_var     as var(func: type(Group))     @filter(groupAuth AND uid_in(inWorkspace, uid(Workspace_var))) @cascade
+Candidate     @filter(uid_in(inGroup, uid(Group_var)))
 ```
 
 ---
 
 ## Multiple Parent Paths (Diamond Pattern)
 
+When a type is reachable via multiple authority types, use `aggregation: "or"` to require only one
+path:
+
 ```graphql
-# Company reachable from both Workspace and Group
-type Company
-  @cascadeAuthPolicy(aggregation: "or")   # either path suffices
-  @authVariables(vars: [{ key: "PERMISSIONS", value: ["READ_COMPANY"] }])
-  { ... }
+type AdPostRecord
+  @cascadeAuthPolicy(aggregation: "or", skipBidirectional: true)
+  @authVariables(vars: [{ key: "PERMISSIONS", value: ["_ALL", "READ"] }]) {
+  forJobAd: JobAd @cascadeAuth(operations: [query], variableContext: self, bidirectional: true)
+  forJobBoard: JobBoard
+    @cascadeAuth(operations: [query], variableContext: self, bidirectional: true)
+}
 ```
 
-`aggregation: "and"` (default): caller must be authorized via **all** parent paths.
-`aggregation: "or"`: caller needs authorization via **any** one path. `includeSelf: true`: adds the
-child's own `@auth` as an additional OR path.
+The caller can see the record if they can access either the job ad OR the job board. With default
+`"and"`, they would need access to both simultaneously.
 
 ---
 
 ## Bidirectional Pitfall
 
 When `bidirectional: true` is used on an edge, the engine generates a reverse-visibility rule on the
-authority type using the child's **own pre-cascade** `@auth`. If the child has **no own `@auth`
+authority using the child's **own pre-cascade** `@auth`. If the child has **no own `@auth`
 directive** (only inheriting from an interface), that pre-cascade rule may contain no user-specific
 predicate — causing the authority to become visible to any caller in scope.
-
-**Example:** `BillingAccount` implements `WorkspaceMember` (which has
-`inWorkspace @cascadeAuth(bidirectional: true)`). If `BillingAccount` has no own `@auth`, its
-inherited interface auth only checks the workspace header — no `$sub` check. The bidirectional
-engine would then OR-merge a workspace condition with no user check into `Workspace.query`, allowing
-any token in scope to see the workspace.
 
 **Fix:** Apply `@cascadeAuthPolicy(skipBidirectional: true)` to any type that should **not**
 contribute reverse rules to its authority:
@@ -263,7 +315,7 @@ This is the right fix when:
 - The type has no own `@auth(query:...)` with a user-specific predicate, **and**
 - Its inherited interface auth is intentionally permissive (workspace-scoped but not user-scoped),
   **and**
-- Parent access should only be granted via other children with proper user checks.
+- Authority access should only be granted via other children with proper user checks.
 
 ---
 
@@ -274,9 +326,20 @@ This is the right fix when:
 | Used on a scalar or enum field                                                                     | `@cascadeAuth can only be used on edge fields`           |
 | Used on a `@remote` type                                                                           | `@cascadeAuth cannot be used on a @remote type`          |
 | Target type has no `@auth` rules and is not an interface with implementing types that have `@auth` | `@cascadeAuth: target type "T" has no @auth rules`       |
-| `authMode` not `"filter"` or `"enforce"`                                                           | Validation error                                         |
 | `depth` not ≥ 1 or -1                                                                              | `@cascadeAuth: depth must be ≥ 1 or -1`                  |
 | `variableContext` not `"self"`, `"parent"`, or `"adaptive"`                                        | Validation error                                         |
 | `variableContext: "self"` used but child has no `@authVariables`                                   | Schema load error                                        |
 | `{{KEY}}` referenced in template has no matching entry in `@authVariables`                         | Left as literal string — likely a parse error downstream |
 | Circular cascade chain (A → B → A)                                                                 | `@cascadeAuth forms a cycle through type B`              |
+
+---
+
+## Migration from Previous API
+
+The following arguments were **removed** from `@cascadeAuth`:
+
+| Removed argument | Was on               | Replacement                                                                                                                                 |
+| ---------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `authMode`       | `@cascadeAuth`       | No replacement — cascade auth always uses filter mode (silent exclusion)                                                                    |
+| `when`           | `@cascadeAuth`       | No replacement — use `operations: [...]` to restrict which ops are protected                                                                |
+| `includeSelf`    | `@cascadeAuthPolicy` | No replacement — dropped entirely. To mix cascade + self auth, give the type its own `@auth` rule and use `aggregation: "or"` on the policy |

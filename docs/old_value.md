@@ -2,7 +2,7 @@
 
 Marks a field so that its **pre-mutation value** is fetched from the database before an `add` or
 `update` mutation runs. The captured value is then available inside `@default`, `@transform`,
-`@validate`, and `@cascadeDelete` CEL expressions as the `before` variable.
+`@validate`, `@postValidate`, and `@cascadeDelete` CEL expressions as the `before` variable.
 
 ---
 
@@ -46,8 +46,8 @@ received — it is independent of the incoming `input`.
 
 ## CEL Variables
 
-Inside any `@default`, `@transform`, `@validate`, or `@cascadeDelete(filter:…)` expression, the
-following variables relate to `@oldValue`:
+Inside any `@default`, `@transform`, `@validate`, `@postValidate`, or `@cascadeDelete(filter:…)`
+expression, the following variables relate to `@oldValue`:
 
 | Variable | Type  | Description                                                                                                                    |
 | -------- | ----- | ------------------------------------------------------------------------------------------------------------------------------ |
@@ -413,6 +413,8 @@ before.<field1>.<field2>.<field3>...<leafField>
 
 ## See also
 
+- [`@postValidate`](./post_validate.md) — type-level post-mutation validation; `before`, `after`,
+  and `new` inside each `nodes` element are populated from `@oldValue` fields
 - [`@hasInverse(immutable: true)`](./immutable_inverse.md) — write-once enforcement for edge fields;
   uses the same pre-query mechanism internally
 - [Field-level `@generate`](./field_level_generate.md) — hide scalar fields from mutation inputs or
