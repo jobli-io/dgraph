@@ -2,9 +2,9 @@
 
 ## Overview
 
-`@postValidate` is a **type-level** directive that runs a CEL expression **after** a mutation has
-been written to Dgraph but **before** the transaction is committed. If the expression evaluates to
-`false`, the transaction is aborted and a validation error is returned — no data is persisted.
+`@postValidate` is a **type-level** directive that runs an expr-lang expression **after** a mutation
+has been written to Dgraph but **before** the transaction is committed. If the expression evaluates
+to `false`, the transaction is aborted and a validation error is returned — no data is persisted.
 
 This complements `@validate`, which runs at the **field level** before the mutation executes.
 
@@ -32,7 +32,7 @@ input DgraphPostValidate {
 
 | Argument | Type                 | Description                                                                                                                                                                                                                           |
 | -------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `expr`   | `String`             | CEL expression applied to **both** `add` and `update` mutations.                                                                                                                                                                      |
+| `expr`   | `String`             | expr-lang expression applied to **both** `add` and `update` mutations.                                                                                                                                                                |
 | `reason` | `String`             | Error message returned when validation fails. Supports Go [`text/template`](https://pkg.go.dev/text/template) syntax — embed `{{.count}}`, `{{.action}}`, `{{index (index .nodes 0) "after"}}` etc. Plain strings are returned as-is. |
 | `add`    | `DgraphPostValidate` | Operation-specific `expr`/`reason` for **add** only. Takes precedence over the top-level `expr`.                                                                                                                                      |
 | `update` | `DgraphPostValidate` | Operation-specific `expr`/`reason` for **update** only. Takes precedence over the top-level `expr`.                                                                                                                                   |
@@ -410,8 +410,8 @@ The schema loader enforces at load time:
 
 - `@postValidate` is **not allowed** on `@remote` types.
 - At least one `expr` must be present (top-level or inside `add`/`update`).
-- Every `expr` must compile as a valid CEL expression checked against the same typed env used at
-  runtime (`nodes: []map`, `action: string`, `auth: map`).
+- Every `expr` must compile as a valid expr-lang expression checked against the same typed env used
+  at runtime (`nodes: []map`, `action: string`, `auth: map`).
 
 ---
 

@@ -13,7 +13,7 @@ per-field guard.
 ```graphql
 directive @validate(
   rule: String # go-playground/validator tag string
-  expr: String # CEL boolean expression
+  expr: String # expr-lang boolean expression
   reason: String # human-readable message on failure
   add: DgraphValidate
   update: DgraphValidate
@@ -71,10 +71,10 @@ phone: String
 When the field is `nil` (not provided), `rule` validation is **skipped**. Use `required` in the tag
 to make the field mandatory.
 
-### `expr:` — CEL expression
+### `expr:` — expr-lang expression
 
-A CEL boolean expression evaluated against the mutation context. Returns `true` = valid, `false` =
-fail.
+An expr-lang boolean expression evaluated against the mutation context. Returns `true` = valid,
+`false` = fail.
 
 ```graphql
 createdBy: String!
@@ -118,7 +118,7 @@ When operation-specific arms are present, they take **precedence** over any root
 
 ---
 
-## CEL Evaluation Context
+## expr-lang Evaluation Context
 
 | Variable   | Description                                                                |
 | ---------- | -------------------------------------------------------------------------- |
@@ -152,7 +152,7 @@ name: String!
 ## Schema Validation
 
 - `@validate` may not be used on `@remote` types.
-- `expr` must compile as a valid CEL boolean expression.
+- `expr` must compile as a valid expr-lang boolean expression.
 - At least one of `rule`, `expr`, `add`, `update` must be present.
 
 ---

@@ -203,4 +203,4 @@ mutation {
 
 - [Field-level `@generate`](./field_level_generate.md) — hide scalar fields from mutation inputs or
   query output while keeping them writable internally via `@default`
-- [`@oldValue`](./old_value.md) — access pre-mutation field values in CEL expressions
+- [`@oldValue`](./old_value.md) — access pre-mutation field values in expr-lang expressions

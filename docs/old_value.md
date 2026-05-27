@@ -2,7 +2,7 @@
 
 Marks a field so that its **pre-mutation value** is fetched from the database before an `add` or
 `update` mutation runs. The captured value is then available inside `@default`, `@transform`,
-`@validate`, `@postValidate`, and `@cascadeDelete` CEL expressions as the `before` variable.
+`@validate`, `@postValidate`, and `@cascadeDelete` expr-lang expressions as the `before` variable.
 
 ---
 
@@ -29,13 +29,13 @@ directive @oldValue(
 
 When any field tagged with `@oldValue` is present on a type, the mutation pipeline issues an **extra
 pre-query** against Dgraph to retrieve those field values for every node being mutated. The data is
-then injected into the CEL evaluation context as `before`, a `map[string]interface{}` keyed by field
-name.
+then injected into the expr-lang evaluation context as `before`, a `map[string]interface{}` keyed by
+field name.
 
 ```
 Mutation arrives
   └─> pre-query all @oldValue fields           ← extra Dgraph read
-  └─> CEL expressions evaluate (before is now populated)
+  └─> expr-lang expressions evaluate (before is now populated)
   └─> DQL write mutation executes
 ```
 
@@ -44,7 +44,7 @@ received — it is independent of the incoming `input`.
 
 ---
 
-## CEL Variables
+## expr-lang Variables
 
 Inside any `@default`, `@transform`, `@validate`, `@postValidate`, or `@cascadeDelete(filter:…)`
 expression, the following variables relate to `@oldValue`:
@@ -68,7 +68,7 @@ type User {
 }
 ```
 
-`before.status` and `before.email` are available in all CEL expressions on this type.
+`before.status` and `before.email` are available in all expr-lang expressions on this type.
 
 ---
 
@@ -85,7 +85,7 @@ type Company {
 }
 ```
 
-Inside a CEL expression on `Company`, `before.hasAddress` is a list of maps:
+Inside an expr-lang expression on `Company`, `before.hasAddress` is a list of maps:
 
 ```cel
 # true if the first address's city changed
@@ -114,7 +114,7 @@ before.owner = {
 }
 ```
 
-CEL access at every level uses the bare GraphQL field name:
+expr-lang access at every level uses the bare GraphQL field name:
 
 ```cel
 before.owner.profile.firstName   // "Alice"
@@ -145,7 +145,7 @@ owner : Workspace.owner {
 }
 ```
 
-So in CEL, all levels use bare GraphQL field names:
+So in expr-lang, all levels use bare GraphQL field names:
 
 ```cel
 before.owner.billing.contact.email
@@ -188,7 +188,7 @@ before.company = {
 }
 ```
 
-CEL access at all levels is via bare GraphQL field names:
+expr-lang access at all levels is via bare GraphQL field names:
 
 ```cel
 before.company.name                        // "Acme"
@@ -220,7 +220,7 @@ type Candidate {
 ```
 
 The resulting `before.applicationHistory` array will contain at most 5 entries, ordered
-newest-first, usable in any CEL expression:
+newest-first, usable in any expr-lang expression:
 
 ```cel
 # True if the most-recent history entry was "APPLIED"
@@ -351,8 +351,8 @@ The pattern for any depth:
 before.<field1>.<field2>.<field3>...<leafField>
 ```
 
-> **List fields:** If any edge in the path is a list type, that level is a CEL list and requires
-> indexing:
+> **List fields:** If any edge in the path is a list type, that level is an expr-lang list and
+> requires indexing:
 >
 > ```cel
 > # owner is a scalar edge, addresses is a list edge

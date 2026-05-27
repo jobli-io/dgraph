@@ -16,7 +16,7 @@ Both run during mutation rewriting, **before** the DQL write is submitted to Dgr
 ```graphql
 directive @default(
   value: String # literal value or "$now"
-  expr: String # CEL expression
+  expr: String # expr-lang expression
   evaluationOrder: Int # execution priority (lower = earlier)
   add: DgraphDefault # add-specific override
   update: DgraphDefault # update-specific override
@@ -45,11 +45,11 @@ type Document {
 
 ### Value Forms
 
-| Form                 | Example                    | Description                |
-| -------------------- | -------------------------- | -------------------------- |
-| `value: "$now"`      | `@default(value: "$now")`  | Server timestamp (RFC3339) |
-| `value: "<literal>"` | `@default(value: "DRAFT")` | Literal string constant    |
-| `expr: "<CEL>"`      | `@default(expr: "uuid()")` | CEL expression result      |
+| Form                 | Example                    | Description                 |
+| -------------------- | -------------------------- | --------------------------- |
+| `value: "$now"`      | `@default(value: "$now")`  | Server timestamp (RFC3339)  |
+| `value: "<literal>"` | `@default(value: "DRAFT")` | Literal string constant     |
+| `expr: "<expr>"`     | `@default(expr: "uuid()")` | expr-lang expression result |
 
 ### Operation-Specific Arms
 
@@ -113,7 +113,7 @@ type User {
 
 ```graphql
 directive @transform(
-  expr: String # CEL expression (applied to both add & update)
+  expr: String # expr-lang expression (applied to both add & update)
   evaluationOrder: Int
   add: DgraphTransform
   update: DgraphTransform
@@ -140,16 +140,16 @@ type Tag {
 }
 ```
 
-### CEL Context
+### expr-lang Context
 
 Same as `@default` — all
-[shared CEL variables](directives_reference.md#shared-cel-evaluation-context) are available. In
-`@transform`, `value` refers to the **user-supplied input value** (before the transform). After
-transformation, the result replaces the field value in the mutation.
+[shared expr-lang variables](directives_reference.md#shared-expr-lang-evaluation-context) are
+available. In `@transform`, `value` refers to the **user-supplied input value** (before the
+transform). After transformation, the result replaces the field value in the mutation.
 
 ---
 
-## CEL Evaluation Order During Rewriting
+## expr-lang Evaluation Order During Rewriting
 
 ```
 Pre-query: @oldValue fields fetched → before populated
@@ -171,5 +171,5 @@ Post-mutation:
 - `@default` and `@transform` may not be used on `@remote` types.
 - `@default` may not be used on `@custom` or `@lambda` fields.
 - At least one of `value`, `expr`, `add`, `update` must be present on `@default`.
-- `expr` must compile as a valid CEL expression.
+- `expr` must compile as a valid expr-lang expression.
 - `$now` is only valid as a `value` token, not inside `expr`.

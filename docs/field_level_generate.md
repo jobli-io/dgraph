@@ -99,14 +99,14 @@ type User {
 1. The mutation rewriter calls `@default` when `obj[field] == nil`.
 2. Since a field hidden from `AddXxxInput` can never be in the client payload, it is always `nil` —
    so `@default` always fires, writing the generated value into the DQL nquads.
-3. The field is stored in Dgraph and can be used in subsequent CEL expressions.
+3. The field is stored in Dgraph and can be used in subsequent expr-lang expressions.
 
 **Guarantee:** `@generate` on a field does **not** prevent internal mechanisms from writing to that
 field. It only restricts what API clients can do.
 
 > **Note on `query: false`:** hiding a field from the GraphQL output type does not delete it from
 > Dgraph storage. The data remains in the database and can still be read via DQL or used in
-> `@transform` / `@postValidate` CEL expressions.
+> `@transform` / `@postValidate` expr-lang expressions.
 
 ## Validation Rules
 

@@ -8,18 +8,18 @@ are in addition to Dgraph's built-in directives (`@auth`, `@search`, `@id`, `@dg
 
 ## Quick Reference
 
-| Directive                                          | Placement             | Purpose                                                | Doc                                          |
-| -------------------------------------------------- | --------------------- | ------------------------------------------------------ | -------------------------------------------- |
-| [`@cascadeAuth`](#cascadeauth)                     | `FIELD_DEFINITION`    | Propagate auth from authority type to child            | [cascade_auth.md](cascade_auth.md)           |
-| [`@cascadeAuthPolicy`](#cascadeauthpolicy)         | `OBJECT \| INTERFACE` | Control cascade auth aggregation and opt-outs          | [cascade_auth.md](cascade_auth.md)           |
-| [`@authVariables`](#authvariables)                 | `OBJECT \| INTERFACE` | Declare template substitution values for `@auth` rules | [cascade_auth.md](cascade_auth.md)           |
-| [`@cascadeDelete`](#cascadedelete)                 | `FIELD_DEFINITION`    | Auto-delete linked nodes when parent is deleted        | [cascade_delete.md](cascade_delete.md)       |
-| [`@postValidate`](#postvalidate)                   | `OBJECT \| INTERFACE` | Run CEL expression after mutation commits              | [post_validate.md](post_validate.md)         |
-| [`@validate`](#validate)                           | `FIELD_DEFINITION`    | Field-level validation before mutation commits         | [validate.md](validate.md)                   |
-| [`@default`](#default)                             | `FIELD_DEFINITION`    | Set default field value on add/update                  | [default_transform.md](default_transform.md) |
-| [`@transform`](#transform)                         | `FIELD_DEFINITION`    | Transform a field value via CEL on add/update          | [default_transform.md](default_transform.md) |
-| [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`    | Fetch pre-mutation field values for CEL expressions    | [old_value.md](old_value.md)                 |
-| [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`    | Make a bidirectional edge write-once                   | [immutable_inverse.md](immutable_inverse.md) |
+| Directive                                          | Placement             | Purpose                                                   | Doc                                          |
+| -------------------------------------------------- | --------------------- | --------------------------------------------------------- | -------------------------------------------- |
+| [`@cascadeAuth`](#cascadeauth)                     | `FIELD_DEFINITION`    | Propagate auth from authority type to child               | [cascade_auth.md](cascade_auth.md)           |
+| [`@cascadeAuthPolicy`](#cascadeauthpolicy)         | `OBJECT \| INTERFACE` | Control cascade auth aggregation and opt-outs             | [cascade_auth.md](cascade_auth.md)           |
+| [`@authVariables`](#authvariables)                 | `OBJECT \| INTERFACE` | Declare template substitution values for `@auth` rules    | [cascade_auth.md](cascade_auth.md)           |
+| [`@cascadeDelete`](#cascadedelete)                 | `FIELD_DEFINITION`    | Auto-delete linked nodes when parent is deleted           | [cascade_delete.md](cascade_delete.md)       |
+| [`@postValidate`](#postvalidate)                   | `OBJECT \| INTERFACE` | Run expr-lang expression after mutation commits           | [post_validate.md](post_validate.md)         |
+| [`@validate`](#validate)                           | `FIELD_DEFINITION`    | Field-level validation before mutation commits            | [validate.md](validate.md)                   |
+| [`@default`](#default)                             | `FIELD_DEFINITION`    | Set default field value on add/update                     | [default_transform.md](default_transform.md) |
+| [`@transform`](#transform)                         | `FIELD_DEFINITION`    | Transform a field value via expr-lang on add/update       | [default_transform.md](default_transform.md) |
+| [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`    | Fetch pre-mutation field values for expr-lang expressions | [old_value.md](old_value.md)                 |
+| [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`    | Make a bidirectional edge write-once                      | [immutable_inverse.md](immutable_inverse.md) |
 
 ---
 
@@ -75,7 +75,7 @@ input AuthVariable {
 directive @cascadeDelete(
   onlyIfOrphan: Boolean # default: false
   onlyIfOrphanScope: String # "type" (default) | "all"
-  filter: String # CEL expression
+  filter: String # expr-lang expression
   depth: Int # max hops (default: unlimited)
   authMode: String # "skip" (default) | "enforce" | "filter"
 ) on FIELD_DEFINITION
@@ -85,7 +85,7 @@ directive @cascadeDelete(
 
 ```graphql
 directive @postValidate(
-  expr: String # top-level CEL (both add & update)
+  expr: String # top-level expr-lang (both add & update)
   reason: String
   add: DgraphPostValidate # add-specific override
   update: DgraphPostValidate # update-specific override
@@ -102,7 +102,7 @@ input DgraphPostValidate {
 ```graphql
 directive @validate(
   rule: String # go-playground/validator tag
-  expr: String # CEL expression
+  expr: String # expr-lang expression
   reason: String
   add: DgraphValidate
   update: DgraphValidate
@@ -120,7 +120,7 @@ input DgraphValidate {
 ```graphql
 directive @default(
   value: String # literal value or "$now"
-  expr: String # CEL expression
+  expr: String # expr-lang expression
   evaluationOrder: Int # execution priority (lower = first)
   add: DgraphDefault
   update: DgraphDefault
@@ -171,9 +171,9 @@ directive @hasInverse(
 
 ---
 
-## Shared CEL Evaluation Context
+## Shared expr-lang Evaluation Context
 
-All CEL expressions (in `@default`, `@transform`, `@validate`, `@postValidate`) share the same
+All expr-lang expressions (in `@default`, `@transform`, `@validate`, `@postValidate`) share the same
 evaluation environment. Variables available at expression evaluation time:
 
 | Variable     | Type     | Description                                                               |

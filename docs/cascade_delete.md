@@ -11,7 +11,7 @@ recursively — deleting `A` deletes `B`, which deletes `C`, all in one atomic t
 directive @cascadeDelete(
   onlyIfOrphan: Boolean # only delete child if no other node references it
   onlyIfOrphanScope: String # "type" (default) | "all"
-  filter: String # CEL expression; cascade only when true
+  filter: String # expr-lang expression; cascade only when true
   depth: Int # max recursion depth (unlimited by default)
   authMode: String # "skip" (default) | "enforce" | "filter"
 ) on FIELD_DEFINITION
@@ -52,8 +52,8 @@ settings: WorkspaceSettings @cascadeDelete(
 
 ### `filter`
 
-A CEL expression evaluated per child node. Only cascade-delete nodes where the expression returns
-`true`.
+A expr-lang expression evaluated per child node. Only cascade-delete nodes where the expression
+returns `true`.
 
 Available variables:
 
