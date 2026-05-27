@@ -3131,7 +3131,34 @@ func getTransformValue(
 //     schema handles removals (e.g., `remove.tags` for removing tags from a list).
 //   - `uuid()`: A function that generates a new UUID string.
 //   - `sha256(s)`: A function that computes the SHA256 hash of a given string.
-type exprEvaluationContext map[string]interface{}
+//
+// exprEvaluationContext is the typed environment passed to expr.Compile and expr.Run
+// for @default, @transform, @validate, and @cascadeDelete(filter:) expressions.
+// Go fields are capitalized (exported for reflection); expr: tags define the lowercase/
+// camelCase identifiers visible inside expressions — matching the pattern used in
+// postValidateEnv (mutation.go).
+type exprEvaluationContext struct {
+	// Data fields
+	Typename   string                 `expr:"__typename"`
+	Input      map[string]interface{} `expr:"input"`
+	RawInput   map[string]interface{} `expr:"rawInput"`
+	Before     map[string]interface{} `expr:"before"`
+	After      map[string]interface{} `expr:"after"`
+	New        map[string]interface{} `expr:"new"`
+	Remove     map[string]interface{} `expr:"remove"`
+	Auth       map[string]interface{} `expr:"auth"`
+	Action     string                 `expr:"action"`
+	FieldValue interface{}            `expr:"value"` // set by WithValueField for @validate/@transform
+	// Built-in functions — same set available in all expression directives.
+	UUID              func() string                                                                        `expr:"uuid"`
+	Sha256            func(string) string                                                                  `expr:"sha256"`
+	GenerateEmbedding func(string, string, string, map[string]any) []float32                               `expr:"generateEmbedding"`
+	CallLambda        func(string, map[string]interface{}) (interface{}, error)                            `expr:"callLambda"`
+	MapDiff           func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error) `expr:"mapDiff"`
+	MapWithoutKeys    func(map[string]interface{}, []interface{}) map[string]interface{}                   `expr:"mapWithoutKeys"`
+	MapInsert         func(map[string]any, map[string]any) map[string]any                                  `expr:"mapInsert"`
+	Error             func(interface{}) (interface{}, error)                                               `expr:"error"`
+}
 
 func callLambda(ns uint64, lambdaName string, payload map[string]interface{}, accessJWT string, authHeaderKey string, authHeaderValue string) (interface{}, error) {
 	lambdaURL := x.LambdaUrl(ns)
@@ -3200,7 +3227,8 @@ func NewExprEvaluationContext(
 	maps.Copy(after, before)
 	maps.Copy(after, input)
 
-	new, _ := diffMapInterface(before, input)
+	// Rename to avoid shadowing Go's new() builtin.
+	newFields, _ := diffMapInterface(before, input)
 
 	// rawInput holds the pre-default raw user input for use in @validate
 	// expressions (e.g. `rawInput?.search == nil`). Keep `input` pointing at
@@ -3212,30 +3240,30 @@ func NewExprEvaluationContext(
 	}
 
 	return exprEvaluationContext{
-		"__typename": typename,
-		"input":      input,
-		"rawInput":   rawInput,
-		"before":     before,
-		"after":      after,
-		"new":        new,
-		"remove":     remove,
-		"auth":       auth.AuthVariables,
-		"action":     action,
-		"uuid":       uuid.NewString,
-		"sha256":     hashSHA256,
-		"generateEmbedding": func(provider string, modelName string, textToEmbed string, parameters map[string]any) (vector []float32) {
+		Typename: typename,
+		Input:    input,
+		RawInput: rawInput,
+		Before:   before,
+		After:    after,
+		New:      newFields,
+		Remove:   remove,
+		Auth:     auth.AuthVariables,
+		Action:   action,
+		UUID:     uuid.NewString,
+		Sha256:   hashSHA256,
+		GenerateEmbedding: func(provider string, modelName string, textToEmbed string, parameters map[string]any) (vector []float32) {
 			vector, _ = generateEmbedding(provider, modelName, textToEmbed, parameters)
 			return
 		},
-		"callLambda": func(lambdaName string, payload map[string]interface{}) (interface{}, error) {
+		CallLambda: func(lambdaName string, payload map[string]interface{}) (interface{}, error) {
 			return callLambda(x.RootNamespace, lambdaName, payload, auth.AccessJWT, auth.AuthHeaderKey, auth.AuthHeaderValue)
 		},
-		"mapDiff":        diffMapInterface,
-		"mapWithoutKeys": mapWithoutKeys,
-		"mapInsert":      mapInsert[string, any],
-		// error() is registered with (interface{}, error) return so that expr.Run
+		MapDiff:        diffMapInterface,
+		MapWithoutKeys: mapWithoutKeys,
+		MapInsert:      mapInsert[string, any],
+		// Error is registered with (interface{}, error) return so that expr.Run
 		// aborts immediately and the caller receives a proper Go error.
-		"error": func(v interface{}) (interface{}, error) {
+		Error: func(v interface{}) (interface{}, error) {
 			b, _ := json.Marshal(v)
 			return nil, errors.New(string(b))
 		},
@@ -3359,17 +3387,19 @@ func diffMapInterface(obj1, obj2 map[string]interface{}) (map[string]interface{}
 }
 
 func (e exprEvaluationContext) WithValueField(fld string) exprEvaluationContext {
-	after := e["after"].(map[string]interface{})
-	e["value"] = after[fld]
+	e.FieldValue = e.After[fld]
 	return e
 }
 
 func (e exprEvaluationContext) Value() interface{} {
-	return e["value"]
+	return e.FieldValue
 }
 
-func (e exprEvaluationContext) As() map[string]interface{} {
-	return map[string]interface{}(e)
+// As returns the struct itself for use with expr.Compile and expr.Run.
+// Callers pass env.As() so that the expression engine receives the typed struct
+// (enabling compile-time type checking) rather than a map[string]interface{}.
+func (e exprEvaluationContext) As() exprEvaluationContext {
+	return e
 }
 
 // PanicWrappedError is a custom error type used to wrap errors that originated from a panic
