@@ -1179,14 +1179,9 @@ func runPostValidate(
 	//   .after   map    — post-mutation field values
 	//   .new     map    — fields that changed (after - before); mirrors @validate `new`
 	//
-	// Helper functions (same set as @validate):
-	//   callLambda(name, payload) — invoke a registered lambda
-	//   uuid()                    — new UUIDv4 string
-	//   sha256(str)               — hex SHA-256
-	//   generateEmbedding(...)    — vector embedding
-	//   mapDiff(a, b)             — fields in b that differ from a
-	//   mapWithoutKeys(m, k)      — m minus specified keys
-	//   error(v)                  — abort expression with error
+	// Helper functions (from schema.ExprFuncs — same set as @validate):
+	//   callLambda, uuid, sha256, generateEmbedding,
+	//   mapDiff, mapWithoutKeys, mapInsert, error
 	//
 	// IMPORTANT: expr.Run must receive the SAME type as expr.Env — the compiled bytecode
 	// uses struct field offsets. Passing a map when the env shape is a struct causes the
@@ -1196,14 +1191,8 @@ func runPostValidate(
 		Nodes  []postValidateNode     `expr:"nodes"`
 		Action string                 `expr:"action"`
 		Auth   map[string]interface{} `expr:"auth"`
-		// Helper functions — same set as @validate (NewExprEvaluationContext).
-		CallLambda           func(string, map[string]interface{}) (interface{}, error)                            `expr:"callLambda"`
-		UUID                 func() string                                                                        `expr:"uuid"`
-		Sha256               func(string) string                                                                  `expr:"sha256"`
-		GenerateEmbedding    func(string, string, string, map[string]any) []float32                               `expr:"generateEmbedding"`
-		DiffMap              func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error) `expr:"mapDiff"`
-		MapStringWithoutKeys func(map[string]interface{}, []interface{}) map[string]interface{}                   `expr:"mapWithoutKeys"`
-		Error                func(interface{}) (interface{}, error)                                               `expr:"error"`
+		// Built-in functions via shared ExprFuncs embedding — same set as @validate.
+		schema.ExprFuncs
 	}
 	prog, err := expr.Compile(cfg.Expr,
 		expr.Env(postValidateEnv{}),
@@ -1229,22 +1218,12 @@ func runPostValidate(
 		authCtx.AuthVariables = map[string]interface{}{}
 	}
 
-	// Populate the struct helper functions using the exported constructor so that
-	// the unexported schema-package helpers (callLambda, hashSHA256, …) are accessible.
-	helpers := schema.NewPostValidateExprHelpers(authCtx)
-
 	// Pass the populated struct — must match the postValidateEnv type used at compile time.
 	evalEnv := postValidateEnv{
-		Nodes:                nodes,
-		Action:               action,
-		Auth:                 authCtx.AuthVariables,
-		CallLambda:           helpers["callLambda"].(func(string, map[string]interface{}) (interface{}, error)),
-		UUID:                 helpers["uuid"].(func() string),
-		Sha256:               helpers["sha256"].(func(string) string),
-		GenerateEmbedding:    helpers["generateEmbedding"].(func(string, string, string, map[string]any) []float32),
-		DiffMap:              helpers["mapDiff"].(func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error)),
-		MapStringWithoutKeys: helpers["mapWithoutKeys"].(func(map[string]interface{}, []interface{}) map[string]interface{}),
-		Error:                helpers["error"].(func(interface{}) (interface{}, error)),
+		Nodes:     nodes,
+		Action:    action,
+		Auth:      authCtx.AuthVariables,
+		ExprFuncs: schema.NewExprFuncs(authCtx),
 	}
 
 	exprResult, runErr := expr.Run(prog, evalEnv)

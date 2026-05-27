@@ -3132,11 +3132,50 @@ func getTransformValue(
 //   - `uuid()`: A function that generates a new UUID string.
 //   - `sha256(s)`: A function that computes the SHA256 hash of a given string.
 //
+// ExprFuncs holds the built-in helper functions shared across all expression directives
+// (@default, @transform, @validate, @cascadeDelete, @postValidate). Embed this struct
+// in any expr.Env struct to expose the full function set in expressions.
+// The constructor NewExprFuncs wires each function to the caller's auth context.
+type ExprFuncs struct {
+	UUID              func() string                                                                        `expr:"uuid"`
+	Sha256            func(string) string                                                                  `expr:"sha256"`
+	GenerateEmbedding func(string, string, string, map[string]any) []float32                               `expr:"generateEmbedding"`
+	CallLambda        func(string, map[string]interface{}) (interface{}, error)                            `expr:"callLambda"`
+	MapDiff           func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error) `expr:"mapDiff"`
+	MapWithoutKeys    func(map[string]interface{}, []interface{}) map[string]interface{}                   `expr:"mapWithoutKeys"`
+	MapInsert         func(map[string]any, map[string]any) map[string]any                                  `expr:"mapInsert"`
+	Error             func(interface{}) (interface{}, error)                                               `expr:"error"`
+}
+
+// NewExprFuncs returns the built-in helper function set wired to the given auth context.
+// Pass the returned value as the ExprFuncs embedded field when constructing any
+// expression environment struct (exprEvaluationContext, postValidateEnv, etc.).
+func NewExprFuncs(auth AuthCtx) ExprFuncs {
+	return ExprFuncs{
+		UUID:   uuid.NewString,
+		Sha256: hashSHA256,
+		GenerateEmbedding: func(provider string, modelName string, textToEmbed string, parameters map[string]any) (vector []float32) {
+			vector, _ = generateEmbedding(provider, modelName, textToEmbed, parameters)
+			return
+		},
+		CallLambda: func(lambdaName string, payload map[string]interface{}) (interface{}, error) {
+			return callLambda(x.RootNamespace, lambdaName, payload, auth.AccessJWT, auth.AuthHeaderKey, auth.AuthHeaderValue)
+		},
+		MapDiff:        diffMapInterface,
+		MapWithoutKeys: mapWithoutKeys,
+		MapInsert:      mapInsert[string, any],
+		Error: func(v interface{}) (interface{}, error) {
+			b, _ := json.Marshal(v)
+			return nil, errors.New(string(b))
+		},
+	}
+}
+
 // exprEvaluationContext is the typed environment passed to expr.Compile and expr.Run
 // for @default, @transform, @validate, and @cascadeDelete(filter:) expressions.
 // Go fields are capitalized (exported for reflection); expr: tags define the lowercase/
-// camelCase identifiers visible inside expressions — matching the pattern used in
-// postValidateEnv (mutation.go).
+// camelCase identifiers visible inside expressions. Built-in functions are provided
+// via ExprFuncs embedding so the same set is shared with postValidateEnv.
 type exprEvaluationContext struct {
 	// Data fields
 	Typename   string                 `expr:"__typename"`
@@ -3149,15 +3188,8 @@ type exprEvaluationContext struct {
 	Auth       map[string]interface{} `expr:"auth"`
 	Action     string                 `expr:"action"`
 	FieldValue interface{}            `expr:"value"` // set by WithValueField for @validate/@transform
-	// Built-in functions — same set available in all expression directives.
-	UUID              func() string                                                                        `expr:"uuid"`
-	Sha256            func(string) string                                                                  `expr:"sha256"`
-	GenerateEmbedding func(string, string, string, map[string]any) []float32                               `expr:"generateEmbedding"`
-	CallLambda        func(string, map[string]interface{}) (interface{}, error)                            `expr:"callLambda"`
-	MapDiff           func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error) `expr:"mapDiff"`
-	MapWithoutKeys    func(map[string]interface{}, []interface{}) map[string]interface{}                   `expr:"mapWithoutKeys"`
-	MapInsert         func(map[string]any, map[string]any) map[string]any                                  `expr:"mapInsert"`
-	Error             func(interface{}) (interface{}, error)                                               `expr:"error"`
+	// Shared built-in functions.
+	ExprFuncs
 }
 
 func callLambda(ns uint64, lambdaName string, payload map[string]interface{}, accessJWT string, authHeaderKey string, authHeaderValue string) (interface{}, error) {
@@ -3240,33 +3272,16 @@ func NewExprEvaluationContext(
 	}
 
 	return exprEvaluationContext{
-		Typename: typename,
-		Input:    input,
-		RawInput: rawInput,
-		Before:   before,
-		After:    after,
-		New:      newFields,
-		Remove:   remove,
-		Auth:     auth.AuthVariables,
-		Action:   action,
-		UUID:     uuid.NewString,
-		Sha256:   hashSHA256,
-		GenerateEmbedding: func(provider string, modelName string, textToEmbed string, parameters map[string]any) (vector []float32) {
-			vector, _ = generateEmbedding(provider, modelName, textToEmbed, parameters)
-			return
-		},
-		CallLambda: func(lambdaName string, payload map[string]interface{}) (interface{}, error) {
-			return callLambda(x.RootNamespace, lambdaName, payload, auth.AccessJWT, auth.AuthHeaderKey, auth.AuthHeaderValue)
-		},
-		MapDiff:        diffMapInterface,
-		MapWithoutKeys: mapWithoutKeys,
-		MapInsert:      mapInsert[string, any],
-		// Error is registered with (interface{}, error) return so that expr.Run
-		// aborts immediately and the caller receives a proper Go error.
-		Error: func(v interface{}) (interface{}, error) {
-			b, _ := json.Marshal(v)
-			return nil, errors.New(string(b))
-		},
+		Typename:  typename,
+		Input:     input,
+		RawInput:  rawInput,
+		Before:    before,
+		After:     after,
+		New:       newFields,
+		Remove:    remove,
+		Auth:      auth.AuthVariables,
+		Action:    action,
+		ExprFuncs: NewExprFuncs(auth),
 	}
 }
 
@@ -4646,40 +4661,4 @@ func parseRequiredArgsFromGQLRequest(req string) (map[string]bool, error) {
 	args := req[strings.Index(req, "(")+1 : strings.LastIndex(req, ")")]
 	_, rf, err := parseBodyTemplate("{"+args+"}", false)
 	return rf, err
-}
-
-// NewPostValidateExprHelpers returns a map of helper functions that can be injected
-// into postValidateEnv for CEL expression evaluation in @postValidate directives.
-// This mirrors the helpers registered in NewExprEvaluationContext (used by @validate),
-// giving @postValidate the same set of built-in functions (callLambda, uuid, sha256,
-// generateEmbedding, diffMap, mapStringWithoutKeys, error).
-//
-// The function is exported so that resolve/mutation.go can access unexported schema-package
-// helpers (callLambda, hashSHA256, etc.) without violating Go's package boundaries.
-func NewPostValidateExprHelpers(auth AuthCtx) map[string]interface{} {
-	return map[string]interface{}{
-		"callLambda": func(lambdaName string, payload map[string]interface{}) (interface{}, error) {
-			return callLambda(x.RootNamespace, lambdaName, payload, auth.AccessJWT, auth.AuthHeaderKey, auth.AuthHeaderValue)
-		},
-		"uuid": func() string {
-			return uuid.NewString()
-		},
-		"sha256": func(input string) string {
-			return hashSHA256(input)
-		},
-		"generateEmbedding": func(provider string, modelName string, textToEmbed string, parameters map[string]any) []float32 {
-			vector, _ := generateEmbedding(provider, modelName, textToEmbed, parameters)
-			return vector
-		},
-		"mapDiff": func(obj1, obj2 map[string]interface{}) (map[string]interface{}, error) {
-			return diffMapInterface(obj1, obj2)
-		},
-		"mapWithoutKeys": func(originalMap map[string]interface{}, keysToRemove []interface{}) map[string]interface{} {
-			return mapWithoutKeys(originalMap, keysToRemove)
-		},
-		"error": func(v interface{}) (interface{}, error) {
-			b, _ := json.Marshal(v)
-			return nil, errors.New(string(b))
-		},
-	}
 }
