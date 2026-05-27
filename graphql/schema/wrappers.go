@@ -3230,8 +3230,9 @@ func NewExprEvaluationContext(
 		"callLambda": func(lambdaName string, payload map[string]interface{}) (interface{}, error) {
 			return callLambda(x.RootNamespace, lambdaName, payload, auth.AccessJWT, auth.AuthHeaderKey, auth.AuthHeaderValue)
 		},
-		"diffMap":              diffMapInterface,
-		"mapStringWithoutKeys": mapStringWithoutKeys,
+		"mapDiff":        diffMapInterface,
+		"mapWithoutKeys": mapWithoutKeys,
+		"mapInsert":      mapInsert[string, any],
 		// error() is registered with (interface{}, error) return so that expr.Run
 		// aborts immediately and the caller receives a proper Go error.
 		"error": func(v interface{}) (interface{}, error) {
@@ -3241,10 +3242,18 @@ func NewExprEvaluationContext(
 	}
 }
 
+// mapInsert inserts the key-value pairs from the sequence into the map.
+// mapInsert safely clones the map first so expr-lang won't lose existing fields.
+func mapInsert[K comparable, V any](m map[K]V, seq map[K]V) map[K]V {
+	cloned := maps.Clone(m)
+	maps.Insert(cloned, maps.All(seq))
+	return cloned
+}
+
 // mapWithoutKeys returns a new map with the specified keys removed.
 // It accepts keys as a variadic list of strings (e.g., "key1", "key2", ...).
 // The original map is not modified.
-func mapStringWithoutKeys(originalMap map[string]interface{}, keysToRemove []interface{}) map[string]interface{} {
+func mapWithoutKeys(originalMap map[string]interface{}, keysToRemove []interface{}) map[string]interface{} {
 	// 1. Create a set for efficient lookup of keys to remove.
 	// Inside the function, `keysToRemove` is treated as a slice: []string
 	keysToRemoveSet := make(map[string]struct{}, len(keysToRemove))
@@ -4636,7 +4645,7 @@ func NewPostValidateExprHelpers(auth AuthCtx) map[string]interface{} {
 			return diffMapInterface(obj1, obj2)
 		},
 		"mapStringWithoutKeys": func(originalMap map[string]interface{}, keysToRemove []interface{}) map[string]interface{} {
-			return mapStringWithoutKeys(originalMap, keysToRemove)
+			return mapWithoutKeys(originalMap, keysToRemove)
 		},
 		"error": func(v interface{}) (interface{}, error) {
 			b, _ := json.Marshal(v)
