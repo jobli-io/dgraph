@@ -3145,7 +3145,7 @@ type ExprFuncs struct {
 	MapDiff           func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error) `expr:"mapDiff"`
 	MapWithoutKeys    func(map[string]interface{}, []interface{}) map[string]interface{}                   `expr:"mapWithoutKeys"`
 	MapInsert         func(map[string]any, map[string]any) map[string]any                                  `expr:"mapInsert"`
-	Log               func(interface{}) interface{}                                                        `expr:"log"`
+	Log               func(string, ...interface{}) interface{}                                             `expr:"log"`
 	Error             func(interface{}) (interface{}, error)                                               `expr:"error"`
 }
 
@@ -3166,9 +3166,9 @@ func NewExprFuncs(auth AuthCtx) ExprFuncs {
 		MapDiff:        diffMapInterface,
 		MapWithoutKeys: mapWithoutKeys,
 		MapInsert:      mapInsert[string, any],
-		Log: func(v interface{}) interface{} {
-			glog.V(2).Infof("[expr log] %v", v)
-			return v
+		Log: func(format string, args ...interface{}) interface{} {
+			glog.V(2).Infof("[expr log] "+format, args...)
+			return nil
 		},
 		Error: func(v interface{}) (interface{}, error) {
 			b, _ := json.Marshal(v)
