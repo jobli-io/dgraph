@@ -1184,8 +1184,8 @@ func runPostValidate(
 	//   uuid()                    — new UUIDv4 string
 	//   sha256(str)               — hex SHA-256
 	//   generateEmbedding(...)    — vector embedding
-	//   diffMap(a, b)             — fields in b that differ from a
-	//   mapStringWithoutKeys(m,k) — m minus specified keys
+	//   mapDiff(a, b)             — fields in b that differ from a
+	//   mapWithoutKeys(m, k)      — m minus specified keys
 	//   error(v)                  — abort expression with error
 	//
 	// IMPORTANT: expr.Run must receive the SAME type as expr.Env — the compiled bytecode
@@ -1201,8 +1201,8 @@ func runPostValidate(
 		UUID                 func() string                                                                        `expr:"uuid"`
 		Sha256               func(string) string                                                                  `expr:"sha256"`
 		GenerateEmbedding    func(string, string, string, map[string]any) []float32                               `expr:"generateEmbedding"`
-		DiffMap              func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error) `expr:"diffMap"`
-		MapStringWithoutKeys func(map[string]interface{}, []interface{}) map[string]interface{}                   `expr:"mapStringWithoutKeys"`
+		DiffMap              func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error) `expr:"mapDiff"`
+		MapStringWithoutKeys func(map[string]interface{}, []interface{}) map[string]interface{}                   `expr:"mapWithoutKeys"`
 		Error                func(interface{}) (interface{}, error)                                               `expr:"error"`
 	}
 	prog, err := expr.Compile(cfg.Expr,
@@ -1242,8 +1242,8 @@ func runPostValidate(
 		UUID:                 helpers["uuid"].(func() string),
 		Sha256:               helpers["sha256"].(func(string) string),
 		GenerateEmbedding:    helpers["generateEmbedding"].(func(string, string, string, map[string]any) []float32),
-		DiffMap:              helpers["diffMap"].(func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error)),
-		MapStringWithoutKeys: helpers["mapStringWithoutKeys"].(func(map[string]interface{}, []interface{}) map[string]interface{}),
+		DiffMap:              helpers["mapDiff"].(func(map[string]interface{}, map[string]interface{}) (map[string]interface{}, error)),
+		MapStringWithoutKeys: helpers["mapWithoutKeys"].(func(map[string]interface{}, []interface{}) map[string]interface{}),
 		Error:                helpers["error"].(func(interface{}) (interface{}, error)),
 	}
 

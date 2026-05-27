@@ -196,8 +196,8 @@ Built-in functions:
 | `sha256(s)`                                        | SHA-256 hash of string                                     |
 | `generateEmbedding(provider, model, text, params)` | Call OpenAI/Gemini embedding API                           |
 | `callLambda(name, payload)`                        | Call a registered lambda function (caller's JWT forwarded) |
-| `diffMap(obj1, obj2)`                              | Return map of changed keys between two maps                |
-| `mapStringWithoutKeys(map, keys)`                  | Return map with specified keys removed                     |
+| `mapDiff(obj1, obj2)`                              | Return map of changed keys between two maps                |
+| `mapWithoutKeys(map, keys)`                        | Return map with specified keys removed                     |
 | `error(v)`                                         | Abort expression evaluation with an error                  |
 
 > **`@postValidate` only** additionally provides:

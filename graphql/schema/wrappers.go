@@ -4641,10 +4641,10 @@ func NewPostValidateExprHelpers(auth AuthCtx) map[string]interface{} {
 			vector, _ := generateEmbedding(provider, modelName, textToEmbed, parameters)
 			return vector
 		},
-		"diffMap": func(obj1, obj2 map[string]interface{}) (map[string]interface{}, error) {
+		"mapDiff": func(obj1, obj2 map[string]interface{}) (map[string]interface{}, error) {
 			return diffMapInterface(obj1, obj2)
 		},
-		"mapStringWithoutKeys": func(originalMap map[string]interface{}, keysToRemove []interface{}) map[string]interface{} {
+		"mapWithoutKeys": func(originalMap map[string]interface{}, keysToRemove []interface{}) map[string]interface{} {
 			return mapWithoutKeys(originalMap, keysToRemove)
 		},
 		"error": func(v interface{}) (interface{}, error) {
