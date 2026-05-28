@@ -1897,8 +1897,45 @@ func rewriteObject(
 			// variableObjMap has no entry for it.  In that case we must NOT replace obj with nil
 			// — the current obj is already the correct, fully-populated definition.  Register it
 			// in variableObjMap so that any later occurrences of the same XID resolve correctly.
+			//
+			// A second edge-case arises when another @transform on a sibling field emits a
+			// reference-only object {sId: "..."} for a node whose full definition will appear
+			// in a later field (alphabetical iteration means the reference arrives first).
+			// Such an object contains ONLY @id fields and no other data — it is intentionally
+			// a cross-reference, not a new-node definition.  We must NOT call EnsureNonNulls
+			// (the required non-@id fields are absent by design) and must NOT register in
+			// idExistence (that would suppress the actual node creation when the full
+			// definition is processed next).  Instead we emit a blank-node forward reference
+			// using the same variable name that varGen will produce for the full definition.
+			isRefOnly := true
+			for key := range obj {
+				if key == exclude {
+					continue
+				}
+				fieldIsXid := false
+				for _, xid := range xids {
+					if xid.Name() == key {
+						fieldIsXid = true
+						break
+					}
+				}
+				if !fieldIsXid {
+					isRefOnly = false
+					break
+				}
+			}
+
 			if resolvedObj := xidMetadata.variableObjMap[xidVariables[0]]; resolvedObj != nil {
 				obj = resolvedObj
+			} else if isRefOnly {
+				// Forward-reference to a sibling node being created later in this mutation.
+				// Emit a blank-node reference and let the full definition (encountered
+				// alphabetically later) create the actual node and register idExistence.
+				refObj := map[string]interface{}{"uid": fmt.Sprintf("_:%s", variable)}
+				if srcField != nil {
+					addInverseLink(refObj, srcField, srcUID)
+				}
+				return newFragment(refObj), upsertVar, nil
 			} else {
 				xidMetadata.variableObjMap[xidVariables[0]] = obj
 			}
