@@ -641,7 +641,7 @@ var directiveValidators = map[string]directiveValidator{
 	defaultDirective:           defaultDirectiveValidation,
 	transformDirective:         transformDirectiveValidation,
 	validateDirective:          validateDirectiveValidation,
-	postValidateDirective:      ValidatorNoOp, // type-level; handled by typeValidations
+	postValidateDirective:      ValidatorNoOp, // type-level; compile-time expr check in postValidateDirectiveValidation (typeValidations)
 	oldValueDirective:          oldValueDirectiveValidation,
 	cascadeDeleteDirective:     cascadeDeleteDirectiveValidation,
 	cascadeAuthDirective:       cascadeAuthDirectiveValidation,

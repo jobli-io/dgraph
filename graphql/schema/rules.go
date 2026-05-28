@@ -38,7 +38,7 @@ func init() {
 	typeValidations = append(typeValidations, idCountCheck, dgraphDirectiveTypeValidation,
 		passwordDirectiveValidation, conflictingDirectiveValidation, nonIdFieldsCheck,
 		remoteTypeValidation, generateDirectiveValidation, apolloKeyValidation,
-		apolloExtendsValidation, lambdaOnMutateValidation)
+		apolloExtendsValidation, lambdaOnMutateValidation, postValidateDirectiveValidation)
 	fieldValidations = append(fieldValidations, listValidityCheck, fieldArgumentCheck,
 		fieldNameCheck, isValidFieldForList, hasAuthDirective, fieldDirectiveCheck)
 
@@ -1797,6 +1797,68 @@ func validateDirectiveValidation(sch *ast.Schema,
 
 	// Returns nil if no schema validation errors were found.
 	return combinedErrors
+}
+
+// postValidateDirectiveValidation compiles the @postValidate expr arguments at
+// schema load time so that syntax errors are surfaced immediately — the same
+// behaviour that @transform, @default, and @validate provide for their exprs.
+//
+// The compilation uses a zero-value postValidateEnv (nodes/action/auth are empty)
+// with AllowUndefinedVariables so runtime-only values (JWT claims, node data)
+// do not cause false positives at compile time.
+func postValidateDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqlerror.List {
+	dir := typ.Directives.ForName(postValidateDirective)
+	if dir == nil {
+		return nil
+	}
+
+	// Collect all expr strings from: top-level expr, add.expr, update.expr.
+	type exprEntry struct {
+		raw string
+		arm string // "" | "add" | "update"
+	}
+	var exprs []exprEntry
+
+	if topExpr := dir.Arguments.ForName("expr"); topExpr != nil && topExpr.Value.Raw != "" {
+		exprs = append(exprs, exprEntry{topExpr.Value.Raw, ""})
+	}
+	for _, arm := range []string{"add", "update"} {
+		if armArg := dir.Arguments.ForName(arm); armArg != nil {
+			if exprVal := armArg.Value.Children.ForName("expr"); exprVal != nil && exprVal.Raw != "" {
+				exprs = append(exprs, exprEntry{exprVal.Raw, arm})
+			}
+		}
+	}
+
+	if len(exprs) == 0 {
+		return nil
+	}
+
+	// Zero-value environment mirrors the struct used in runPostValidate.
+	// AllowUndefinedVariables lets jwt/node fields be absent at compile time.
+	type postValidateEnv struct {
+		Nodes  []map[string]interface{} `expr:"nodes"`
+		Action string                   `expr:"action"`
+		Auth   map[string]interface{}   `expr:"auth"`
+		ExprFuncs
+	}
+	env := postValidateEnv{}
+
+	var errs gqlerror.List
+	for _, e := range exprs {
+		_, compErr := expr.Compile(e.raw, expr.Env(env), expr.AllowUndefinedVariables())
+		if compErr != nil {
+			arm := e.arm
+			if arm == "" {
+				arm = "top-level"
+			}
+			errs = append(errs, gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s: @postValidate %s expr %q cannot be compiled: %s",
+				typ.Name, arm, e.raw, compErr.Error()))
+		}
+	}
+	return errs
 }
 
 func oldValueDirectiveValidation(sch *ast.Schema, typ *ast.Definition,

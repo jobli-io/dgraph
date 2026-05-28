@@ -411,8 +411,10 @@ The schema loader enforces at load time:
 
 - `@postValidate` is **not allowed** on `@remote` types.
 - At least one `expr` must be present (top-level or inside `add`/`update`).
-- Every `expr` must compile as a valid expr-lang expression checked against the same typed env used
-  at runtime (`nodes: []map`, `action: string`, `auth: map`).
+- Every `expr` is compiled at **schema load time** against a zero-value typed env (`nodes: []map`,
+  `action: string`, `auth: map`) with `AllowUndefinedVariables` so runtime-only data (JWT claims,
+  node values) does not cause false positives. Syntax errors are reported as schema load errors —
+  identical to `@validate`, `@transform`, and `@default`.
 
 ---
 
