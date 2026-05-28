@@ -564,3 +564,21 @@ type Nested_Y implements Nested_Z{
 interface Nested_Z {
   x: Nested_X @search
 }
+
+"""
+Regression types: @transform on Campaign.labels injects an @id field (sId)
+that is absent from the original mutation input. Phase-1 (existenceQueries)
+runs before @transform, so variableObjMap has no entry for the sId XID.
+The fix prevents the nested CampaignLabel from being written as a blank node
+with no predicates (all field values must survive the rewrite).
+"""
+type Campaign {
+    title: String!
+    labels: [CampaignLabel]
+        @transform(expr: "map(input.labels ?? [], mapInsert(#, {\"sId\": \"label::\" + #.name}))")
+}
+
+type CampaignLabel {
+    sId: String @id
+    name: String!
+}

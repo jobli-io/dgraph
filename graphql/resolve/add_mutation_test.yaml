@@ -5672,3 +5672,35 @@
             "BookingXID"
           ]
         }
+
+- name: Add Mutation with @transform injecting @id field on nested object
+  explanation: |
+    Regression: @transform on Campaign.labels adds sId to each CampaignLabel, but
+    Phase-1 (existenceQueries / RewriteQueries) runs on the original input BEFORE
+    @transform fires, so variableObjMap has no entry for the sId XID variable.
+    The old code unconditionally did:
+      obj = xidMetadata.variableObjMap[xidVariables[0]]
+    which replaced obj with nil, losing all field values and writing a blank Dgraph node.
+    After the fix, when variableObjMap has no entry, the current obj is kept and
+    registered — all CampaignLabel predicates must appear in the DQL mutation output.
+  gqlmutation: |
+    mutation {
+      addCampaign(input: [{title: "Summer Sale", labels: [{name: "promo"}]}]) {
+        campaign {
+          title
+        }
+      }
+    }
+  dgmutations:
+    - setjson: |
+        {
+          "uid": "_:Campaign_1",
+          "dgraph.type": ["Campaign"],
+          "Campaign.title": "Summer Sale",
+          "Campaign.labels": [{
+            "uid": "_:CampaignLabel_2",
+            "dgraph.type": ["CampaignLabel"],
+            "CampaignLabel.name": "promo",
+            "CampaignLabel.sId": "label::promo"
+          }]
+        }
