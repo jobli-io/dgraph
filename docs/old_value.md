@@ -409,6 +409,17 @@ before.<field1>.<field2>.<field3>...<leafField>
   before.owner.name  // ✅ the Organization's name
   ```
 
+- **`uid` is always present on every pre-fetched edge node** — regardless of which fields you list
+  in `@oldValue(fields: [...])`, the DQL pre-query unconditionally selects `uid` for every edge
+  node. This means `before.owner.uid`, `before.hasPortalForm[0].uid`, etc. are always available
+  without explicitly listing `"id"` or `"uid"` in `fields`.
+
+  This has an important consequence for `@transform` expressions: if you forward a reference to an
+  edge node from `before` into a mutation output, include `"uid": #.uid` so the mutation rewriter
+  can identify it as an existing node. See
+  [Referencing Existing Nodes from `@transform`](./default_transform.md#referencing-existing-nodes-from-transform)
+  for the full explanation.
+
 ---
 
 ## See also

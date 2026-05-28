@@ -3149,6 +3149,13 @@ type ExprFuncs struct {
 	Error             func(interface{}) (interface{}, error)                                               `expr:"error"`
 }
 
+// ExprError is the typed error returned by the error() built-in function in
+// expressions. Using a named type lets callers use errors.As to extract the
+// original message without parsing expr-lang's runtime error annotation format.
+type ExprError struct{ Message string }
+
+func (e *ExprError) Error() string { return e.Message }
+
 // NewExprFuncs returns the built-in helper function set wired to the given auth context.
 // Pass the returned value as the ExprFuncs embedded field when constructing any
 // expression environment struct (exprEvaluationContext, postValidateEnv, etc.).
@@ -3171,8 +3178,15 @@ func NewExprFuncs(auth AuthCtx) ExprFuncs {
 			return nil
 		},
 		Error: func(v interface{}) (interface{}, error) {
-			b, _ := json.Marshal(v)
-			return nil, errors.New(string(b))
+			var msg string
+			switch s := v.(type) {
+			case string:
+				msg = s
+			default:
+				b, _ := json.Marshal(v)
+				msg = string(b)
+			}
+			return nil, &ExprError{Message: msg}
 		},
 	}
 }

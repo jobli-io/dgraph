@@ -141,14 +141,15 @@ element:
 
 ## Behaviour
 
-| Scenario                     | Behaviour                                                               |
-| ---------------------------- | ----------------------------------------------------------------------- |
-| Expression returns `true`    | Transaction commits normally.                                           |
-| Expression returns `false`   | Transaction aborted; `reason` (rendered as template) returned as error. |
-| Delete mutation              | Silently skipped — nodes are already removed.                           |
-| No `@oldValue` fields        | `before`/`after`/`new` are empty maps; `auth`/`action` still usable.    |
-| Bulk / nested mutations      | All nodes bundled into one `nodes` array; expression runs once.         |
-| No UIDs in mutation response | Skipped — nothing to validate (e.g. no-op update).                      |
+| Scenario                      | Behaviour                                                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Expression returns `true`     | Transaction commits normally.                                                                                       |
+| Expression returns `false`    | Transaction aborted; `reason` (rendered as template, `{{.error}}` = `""`) returned as error.                        |
+| Expression calls `error(msg)` | Transaction aborted; `reason` rendered with `{{.error}}` = `msg`. If no `reason`, the raw error string is returned. |
+| Delete mutation               | Silently skipped — nodes are already removed.                                                                       |
+| No `@oldValue` fields         | `before`/`after`/`new` are empty maps; `auth`/`action` still usable.                                                |
+| Bulk / nested mutations       | All nodes bundled into one `nodes` array; expression runs once.                                                     |
+| No UIDs in mutation response  | Skipped — nothing to validate (e.g. no-op update).                                                                  |
 
 ---
 

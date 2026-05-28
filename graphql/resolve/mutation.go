@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	texttemplate "text/template"
 
 	"github.com/expr-lang/expr"
 	"github.com/golang/glog"
@@ -717,7 +718,17 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		// compose the new node ids
 		newUids := map[string][]string{}
 		for k, v := range mutResp.GetUids() {
-			t := newNodes[k].Name()
+			typ := newNodes[k]
+			if typ == nil {
+				// This blank-node variable was emitted as a forward-ref placeholder
+				// (e.g. an XID-only object from a @transform that had no uid field to
+				// resolve to an existing node). The forward-ref path in rewriteObject
+				// returns early without registering the variable in newNodes, so this
+				// variable can appear in GetUids() but not in the map. Skip it — it is
+				// not a meaningful new node that webhooks need to handle.
+				continue
+			}
+			t := typ.Name()
 			newUids[t] = append(newUids[t], v)
 		}
 
@@ -1232,6 +1243,21 @@ func runPostValidate(
 
 	exprResult, runErr := expr.Run(prog, evalEnv)
 	if runErr != nil {
+		// When reason is set, render it as a template and use it as the client-facing
+		// message instead of the raw CEL stack-trace-style error string.
+		if cfg.Reason != "" {
+			// Use errors.As to extract the clean message from error() calls without
+			// parsing expr-lang's runtime annotation format.
+			errMsg := runErr.Error()
+			var exprErr *schema.ExprError
+			if errors.As(runErr, &exprErr) {
+				errMsg = exprErr.Message
+			}
+			if rendered, tmplErr := renderPostValidateReason(cfg.Reason, nodes, action,
+				authCtx.AuthVariables, errMsg); tmplErr == nil {
+				return errors.New(rendered)
+			}
+		}
 		return errors.Wrapf(runErr, "@postValidate on type %s: expression error", typ.Name())
 	}
 
@@ -1239,14 +1265,52 @@ func runPostValidate(
 	if !ok || !passed {
 		msg := fmt.Sprintf("@postValidate on type %s failed", typ.Name())
 		if cfg.Reason != "" {
-			msg = cfg.Reason
+			if rendered, tmplErr := renderPostValidateReason(cfg.Reason, nodes, action,
+				authCtx.AuthVariables, ""); tmplErr == nil {
+				msg = rendered
+			} else {
+				msg = cfg.Reason // template failed — use raw string
+			}
 		}
 		return errors.New(msg)
 	}
 	return nil
 }
 
-// buildPostValidateEnv is intentionally not used at compile time (see runPostValidate).
+// renderPostValidateReason renders the reason string as a Go text/template.
+// Plain strings (no "{{" present) are returned immediately with zero overhead.
+// On template parse or execute failure the error is returned so the caller can
+// fall back to the raw string.
+//
+// Template variables:
+//
+//	{{.nodes}}  — []map[string]interface{} of mutated nodes (uid, before, after)
+//	{{.count}}  — len(nodes) shorthand
+//	{{.action}} — "add" or "update"
+//	{{.auth}}   — JWT claim map
+//	{{.error}}  — underlying CEL error message; empty string when expr returned false
+func renderPostValidateReason(reason string, nodes []map[string]interface{}, action string, auth map[string]interface{}, exprErr string) (string, error) {
+	if !strings.Contains(reason, "{{") {
+		return reason, nil
+	}
+	tmpl, err := texttemplate.New("reason").Parse(reason)
+	if err != nil {
+		return "", err
+	}
+	data := map[string]interface{}{
+		"nodes":  nodes,
+		"count":  len(nodes),
+		"action": action,
+		"auth":   auth,
+		"error":  exprErr,
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
 // Kept as documentation of the runtime variable shape passed to expr.Run.
 //
 //	nodes  []map[string]interface{}  — each element: {uid, before, after}

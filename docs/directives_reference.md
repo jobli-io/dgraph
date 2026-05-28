@@ -8,18 +8,18 @@ are in addition to Dgraph's built-in directives (`@auth`, `@search`, `@id`, `@dg
 
 ## Quick Reference
 
-| Directive                                          | Placement             | Purpose                                                   | Doc                                          |
-| -------------------------------------------------- | --------------------- | --------------------------------------------------------- | -------------------------------------------- |
-| [`@cascadeAuth`](#cascadeauth)                     | `FIELD_DEFINITION`    | Propagate auth from authority type to child               | [cascade_auth.md](cascade_auth.md)           |
-| [`@cascadeAuthPolicy`](#cascadeauthpolicy)         | `OBJECT \| INTERFACE` | Control cascade auth aggregation and opt-outs             | [cascade_auth.md](cascade_auth.md)           |
-| [`@authVariables`](#authvariables)                 | `OBJECT \| INTERFACE` | Declare template substitution values for `@auth` rules    | [cascade_auth.md](cascade_auth.md)           |
-| [`@cascadeDelete`](#cascadedelete)                 | `FIELD_DEFINITION`    | Auto-delete linked nodes when parent is deleted           | [cascade_delete.md](cascade_delete.md)       |
-| [`@postValidate`](#postvalidate)                   | `OBJECT \| INTERFACE` | Run expr-lang expression after mutation commits           | [post_validate.md](post_validate.md)         |
-| [`@validate`](#validate)                           | `FIELD_DEFINITION`    | Field-level validation before mutation commits            | [validate.md](validate.md)                   |
-| [`@default`](#default)                             | `FIELD_DEFINITION`    | Set default field value on add/update                     | [default_transform.md](default_transform.md) |
-| [`@transform`](#transform)                         | `FIELD_DEFINITION`    | Transform a field value via expr-lang on add/update       | [default_transform.md](default_transform.md) |
-| [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`    | Fetch pre-mutation field values for expr-lang expressions | [old_value.md](old_value.md)                 |
-| [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`    | Make a bidirectional edge write-once                      | [immutable_inverse.md](immutable_inverse.md) |
+| Directive                                          | Placement             | Purpose                                                                                                        | Doc                                          |
+| -------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| [`@cascadeAuth`](#cascadeauth)                     | `FIELD_DEFINITION`    | Propagate auth from authority type to child                                                                    | [cascade_auth.md](cascade_auth.md)           |
+| [`@cascadeAuthPolicy`](#cascadeauthpolicy)         | `OBJECT \| INTERFACE` | Control cascade auth aggregation and opt-outs                                                                  | [cascade_auth.md](cascade_auth.md)           |
+| [`@authVariables`](#authvariables)                 | `OBJECT \| INTERFACE` | Declare template substitution values for `@auth` rules                                                         | [cascade_auth.md](cascade_auth.md)           |
+| [`@cascadeDelete`](#cascadedelete)                 | `FIELD_DEFINITION`    | Auto-delete linked nodes when parent is deleted                                                                | [cascade_delete.md](cascade_delete.md)       |
+| [`@postValidate`](#postvalidate)                   | `OBJECT \| INTERFACE` | Run expr-lang expression after mutation commits                                                                | [post_validate.md](post_validate.md)         |
+| [`@validate`](#validate)                           | `FIELD_DEFINITION`    | Field-level validation before mutation commits                                                                 | [validate.md](validate.md)                   |
+| [`@default`](#default)                             | `FIELD_DEFINITION`    | Set default field value on add/update                                                                          | [default_transform.md](default_transform.md) |
+| [`@transform`](#transform)                         | `FIELD_DEFINITION`    | Transform a field value via expr-lang on add/update; include `uid: #.uid` when forwarding `before.*` edge refs | [default_transform.md](default_transform.md) |
+| [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`    | Fetch pre-mutation field values for expr-lang expressions                                                      | [old_value.md](old_value.md)                 |
+| [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`    | Make a bidirectional edge write-once                                                                           | [immutable_inverse.md](immutable_inverse.md) |
 
 ---
 
@@ -196,11 +196,31 @@ Built-in functions:
 | `sha256(s)`                                        | SHA-256 hash of string                                     |
 | `generateEmbedding(provider, model, text, params)` | Call OpenAI/Gemini embedding API                           |
 | `callLambda(name, payload)`                        | Call a registered lambda function (caller's JWT forwarded) |
-| `mapDiff(obj1, obj2)`                              | Return map of changed keys between two maps                |
-| `mapWithoutKeys(map, keys)`                        | Return map with specified keys removed                     |
+| `diffMap(obj1, obj2)`                              | Return map of changed keys between two maps                |
+| `mapStringWithoutKeys(map, keys)`                  | Return map with specified keys removed                     |
 | `error(v)`                                         | Abort expression evaluation with an error                  |
 
 > **`@postValidate` only** additionally provides:
 >
 > - `nodes` — array of `{uid, before, after, new}` maps for all written nodes
 > - `action` — `"add"` or `"update"` (always present)
+
+---
+
+## Mutation Rewriter: `uid` Trust Signal
+
+When a `@transform` expression emits an object that refers to an existing node fetched from
+`before.*` (via `@oldValue`), include the `uid` field in the output to let the mutation rewriter
+link to the existing node rather than creating a phantom blank node.
+
+See
+[Referencing Existing Nodes from `@transform`](./default_transform.md#referencing-existing-nodes-from-transform)
+for the full explanation and pattern.
+
+```graphql
+# ✅ correct — uid acts as an existence proof for the mutation rewriter
+"hasForm": {"sId": #.sId, "uid": #.uid}
+
+# ❌ wrong — omitting uid causes a phantom empty node to be created
+"hasForm": {"sId": #.sId}
+```

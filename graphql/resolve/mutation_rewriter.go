@@ -1600,6 +1600,27 @@ func checkUIDExistsQuery(val interface{}, variable string, typ schema.Type) (*dq
 // { "uid": "XYZ", "title": "...", "author": { "id": "0x123", "posts": [ { "uid": "XYZ" } ] }, ... }
 // asIDReference builds the fragment
 // { "id": "0x123", "posts": [ { "uid": "XYZ" } ] }
+
+// isDgraphInternalField reports whether key is a DQL-internal field that the Dgraph
+// engine injects into query results but that is never part of the GraphQL schema.
+// Specifically:
+//
+//   - "uid"          — the raw 64-bit Dgraph node identifier
+//   - "dgraph.type"  — internal type annotation array
+//   - "__typename"   — GraphQL introspection field
+//
+// These keys may appear inside objects passed to rewriteObject when a @transform
+// expression forwards a before/after sub-object that was returned by a Phase-1
+// existence / @oldValue DQL query.  They must be:
+//   - skipped when deciding if an object is "ref-only" (contains only @id fields), and
+//   - never mistaken for unknown schema fields that would fail validation.
+func isDgraphInternalField(key string) bool {
+	switch key {
+	case "uid", "dgraph.type", "__typename":
+		return true
+	}
+	return false
+}
 func asIDReference(
 	ctx context.Context,
 	val interface{},
@@ -1753,8 +1774,19 @@ func rewriteObject(
 					return asIDReference(ctx, idVal, srcField, srcUID, varGen, mutationType == UpdateWithRemove), upsertVar, nil
 				}
 			} else {
-				// Reference UID does not exist. This is an error.
-				err := errors.Errorf("ID \"%s\" isn't a %s", idVal.(string), srcField.Type().Name())
+				// Reference UID not found in idExistence.
+				// If the object also carries a raw Dgraph "uid" field equal to idVal it was
+				// fetched from Dgraph by a server-side query (e.g. a @transform expression
+				// that reads before.someField.forJobBoard). The "uid" key is a DQL-internal
+				// field that cannot appear in user-provided GraphQL input, so it is safe to
+				// treat as an implicit existence proof.
+				uidStr := idVal.(string)
+				if rawUID, ok := obj["uid"].(string); ok && rawUID == uidStr {
+					idExistence[variable] = uidStr
+					return asIDReference(ctx, uidStr, srcField, srcUID, varGen,
+						mutationType == UpdateWithRemove), upsertVar, nil
+				}
+				err := errors.Errorf("ID \"%s\" isn't a %s", uidStr, srcField.Type().Name())
 				retErrors = append(retErrors, err)
 				return nil, upsertVar, retErrors
 			}
@@ -1907,9 +1939,19 @@ func rewriteObject(
 			// idExistence (that would suppress the actual node creation when the full
 			// definition is processed next).  Instead we emit a blank-node forward reference
 			// using the same variable name that varGen will produce for the full definition.
+			// isRefOnly is true when every key in obj (excluding the inverse field and
+			// Dgraph-internal DQL fields that never appear in user-supplied GraphQL input)
+			// is an @id (XID) field. Such objects are pure cross-references to a node
+			// that is either already in Dgraph or will be created later in this mutation.
 			isRefOnly := true
 			for key := range obj {
 				if key == exclude {
+					continue
+				}
+				// Skip Dgraph-internal DQL fields returned by existence/oldValue queries.
+				// These are never part of the GraphQL schema and must not disqualify the
+				// object from being treated as a reference-only payload.
+				if isDgraphInternalField(key) {
 					continue
 				}
 				fieldIsXid := false
@@ -1928,6 +1970,16 @@ func rewriteObject(
 			if resolvedObj := xidMetadata.variableObjMap[xidVariables[0]]; resolvedObj != nil {
 				obj = resolvedObj
 			} else if isRefOnly {
+				// If the object carries a raw Dgraph "uid" field it was fetched from Dgraph
+				// by a server-side query (e.g. @transform reading before/after state). The
+				// "uid" key is a DQL-internal field that cannot appear in user GraphQL input,
+				// so it is safe to treat as an implicit existence proof — link to the
+				// existing node directly rather than creating a blank-node forward-ref.
+				if rawUID, ok := obj["uid"].(string); ok && rawUID != "" && !strings.HasPrefix(rawUID, "_:") {
+					idExistence[variable] = rawUID
+					return asIDReference(ctx, rawUID, srcField, srcUID, varGen,
+						mutationType == UpdateWithRemove), upsertVar, nil
+				}
 				// Forward-reference to a sibling node being created later in this mutation.
 				// Emit a blank-node reference and let the full definition (encountered
 				// alphabetically later) create the actual node and register idExistence.
