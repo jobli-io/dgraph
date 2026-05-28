@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1113,9 +1114,12 @@ func runPostValidate(
 
 		// new mirrors @validate's `new` variable: fields in `after` whose value differs
 		// from `before`. For add mutations `before` is empty, so `new` == `after`.
+		// Note: use reflect.DeepEqual instead of != because `after` values may be
+		// map[string]interface{} (nested references like {id: "0x..."}) which are
+		// not comparable in Go and would cause a runtime panic with direct !=.
 		newFields := make(map[string]interface{})
 		for k, v := range after {
-			if bv, ok := before[k]; !ok || bv != v {
+			if bv, ok := before[k]; !ok || !reflect.DeepEqual(bv, v) {
 				newFields[k] = v
 			}
 		}
