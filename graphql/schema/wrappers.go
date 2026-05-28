@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	texttemplate "text/template"
 	"time"
 
 	"github.com/dgraph-io/gqlparser/v2/ast"
@@ -3210,6 +3211,13 @@ type exprEvaluationContext struct {
 	FieldValue interface{}            `expr:"value"` // set by WithValueField for @validate/@transform
 	// Shared built-in functions.
 	ExprFuncs
+	// Internal fields — not exposed to expr-lang (no expr: tag).
+	// exprErrorMsg holds the message from an error() call in a @validate expr expression.
+	// Set by validateExpr when errors.As(runErr, &ExprError) succeeds; used by
+	// renderValidateReason to populate {{.error}} in the reason template.
+	exprErrorMsg string
+	// FieldName is the GraphQL field name; used as {{.field}} in reason templates.
+	FieldName string
 }
 
 func callLambda(ns uint64, lambdaName string, payload map[string]interface{}, accessJWT string, authHeaderKey string, authHeaderValue string) (interface{}, error) {
@@ -3423,6 +3431,7 @@ func diffMapInterface(obj1, obj2 map[string]interface{}) (map[string]interface{}
 
 func (e exprEvaluationContext) WithValueField(fld string) exprEvaluationContext {
 	e.FieldValue = e.After[fld]
+	e.FieldName = fld
 	return e
 }
 
@@ -3479,12 +3488,20 @@ func (eec exprEvaluationContext) validateExpr(exprString string) func(fl validat
 		}
 
 		// Run the compiled expression.
-		expResult, err := expr.Run(program, eec.As())
-		if err != nil {
-			panic(fmt.Errorf("expression execution failed for field '%s' with rule '%s': %w", fl.FieldName(), exprString, err))
+		expResult, runErr := expr.Run(program, eec.As())
+		if runErr != nil {
+			// error() built-in returns &ExprError — extract the clean message and store
+			// it so ValidateValue can surface it via {{.error}} in the reason template.
+			// Other runtime errors (e.g. nil dereference) are panicked as before.
+			var exprErr *ExprError
+			if errors.As(runErr, &exprErr) {
+				eec.exprErrorMsg = exprErr.Message
+				return false
+			}
+			panic(fmt.Errorf("expression execution failed for field '%s' with rule '%s': %w", fl.FieldName(), exprString, runErr))
 		}
-		if err, ok := expResult.(error); ok {
-			panic(fmt.Errorf("expression execution failed: %w", err))
+		if errResult, ok := expResult.(error); ok {
+			panic(fmt.Errorf("expression execution failed: %w", errResult))
 		}
 
 		// Interpret the expression result as a boolean for validation purposes.
@@ -3608,17 +3625,63 @@ func validateValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, pare
 		// `validationErr` will be of type `validator.ValidationErrors` if rules failed.
 		// Iterate through them and format, appending to the `errs` slice.
 		for _, e := range validationErr.(validator.ValidationErrors) {
-			formattedError := errors.Errorf("Field %s failed validation on %s", fd.Name, e.ActualTag())
+			var msg string
 			if reason != "" {
-				formattedError = errors.Errorf("%s: Reason: %s", formattedError.Error(), reason)
+				// Render reason as a Go text/template. Available variables:
+				// {{.value}}  — the field value being validated
+				// {{.field}}  — the field name
+				// {{.action}} — "add" or "update"
+				// {{.auth}}   — JWT claim map
+				// {{.error}}  — message from error() call; empty string when expr returned false
+				if rendered, tmplErr := renderValidateReason(reason, eev, e.ActualTag()); tmplErr == nil {
+					msg = rendered
+				} else {
+					msg = reason // template failed — use raw string
+				}
+			} else {
+				msg = fmt.Sprintf("Field %s failed validation on %s", fd.Name, e.ActualTag())
 			}
-			errs = append(errs, formattedError)
+			errs = append(errs, errors.New(msg))
 		}
 	}
 
 	// Returns nil if `errs` is empty (no validation failures and no panics).
 	// Otherwise, returns the collected slice of errors.
 	return errs
+}
+
+// renderValidateReason renders a @validate reason string as a Go text/template.
+// Plain strings (no "{{" present) are returned immediately with zero overhead.
+//
+// Template variables:
+//
+//	{{.value}}  — the field value being validated
+//	{{.field}}  — the field name (from exprEvaluationContext)
+//	{{.action}} — "add" or "update"
+//	{{.auth}}   — JWT claim map
+//	{{.error}}  — message from error() call; empty string when expr returned false
+//	{{.tag}}    — the failing validation tag (e.g. "max", "expr")
+func renderValidateReason(reason string, eev exprEvaluationContext, tag string) (string, error) {
+	if !strings.Contains(reason, "{{") {
+		return reason, nil
+	}
+	tmpl, err := texttemplate.New("reason").Parse(reason)
+	if err != nil {
+		return "", err
+	}
+	data := map[string]interface{}{
+		"value":  eev.Value(),
+		"field":  eev.FieldName,
+		"action": eev.Action,
+		"auth":   eev.Auth,
+		"error":  eev.exprErrorMsg,
+		"tag":    tag,
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 func (fd *fieldDefinition) HasIDDirective() bool {

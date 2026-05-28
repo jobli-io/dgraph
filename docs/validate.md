@@ -92,11 +92,45 @@ present, combine with `rule: "required"`.
 
 ### `reason:` — Error message
 
-The human-readable message returned to the client on failure. Supports Go template syntax:
+The human-readable message returned to the client on failure. Supports Go
+[`text/template`](https://pkg.go.dev/text/template) syntax. Plain strings are returned as-is.
+
+#### Available template variables
+
+| Variable      | Example access             | Description                                                                      |
+| ------------- | -------------------------- | -------------------------------------------------------------------------------- |
+| `{{.value}}`  | `{{.value}}`               | The field value being validated                                                  |
+| `{{.field}}`  | `{{.field}}`               | The GraphQL field name                                                           |
+| `{{.action}}` | `{{.action}}`              | `"add"` or `"update"`                                                            |
+| `{{.auth}}`   | `{{index .auth "USERID"}}` | JWT claim map                                                                    |
+| `{{.error}}`  | `{{.error}}`               | Message from `error()` call; empty string `""` when `expr` simply returned false |
+| `{{.tag}}`    | `{{.tag}}`                 | The failing validator tag (e.g. `"max"`, `"expr"`, `"required"`)                 |
 
 ```graphql
-@validate(rule: "max=60", reason: "Name must be at most 60 characters, got {{.value}}")
+# {{.value}} — show the rejected value
+price: Float @validate(rule: "gt=0", reason: "Price must be positive, got {{.value}}")
+
+# {{.action}} — operation-aware message
+status: String
+  @validate(
+    update: { expr: "value != \'DELETED\' || auth.role == \'admin\'" }
+    reason: "Only admins may set DELETED (action: {{.action}})"
+  )
+
+# {{.error}} — message from error() in expr
+quota: Int
+  @validate(
+    expr: "value <= 100 || error(\'Requested \' + string(value) + \' exceeds limit of 100\')"
+    reason: "Quota check failed: {{.error}}"
+  )
 ```
+
+> [!NOTE] Plain strings (no `{{`) are returned as-is with zero overhead. If the template fails to
+> parse or execute, the literal `reason` string is returned unchanged — validation failure is never
+> silently lost.
+>
+> When `expr` calls `error(msg)`, the expression returns false and `{{.error}}` is populated with
+> `msg`. When `expr` simply returns `false`, `{{.error}}` is an empty string `""`.
 
 ---
 

@@ -473,3 +473,120 @@ func TestCollectPostValidateUIDs_Empty(t *testing.T) {
 	require.Empty(t, uids)
 	require.Empty(t, uidToBlank)
 }
+
+// --- renderPostValidateReason unit tests ---
+
+// TestRenderPostValidateReason_PlainString verifies strings without "{{"
+// are returned as-is with no template processing.
+func TestRenderPostValidateReason_PlainString(t *testing.T) {
+	nodes := []map[string]interface{}{{"uid": "0x1"}}
+	out, err := renderPostValidateReason("No quota remaining", nodes, "add", nil, "")
+	require.NoError(t, err)
+	require.Equal(t, "No quota remaining", out)
+}
+
+// TestRenderPostValidateReason_CountTemplate verifies {{.count}} is substituted.
+func TestRenderPostValidateReason_CountTemplate(t *testing.T) {
+	nodes := []map[string]interface{}{{"uid": "0x1"}, {"uid": "0x2"}, {"uid": "0x3"}}
+	out, err := renderPostValidateReason(
+		"Cannot add {{.count}} items in one request", nodes, "add", nil, "")
+	require.NoError(t, err)
+	require.Equal(t, "Cannot add 3 items in one request", out)
+}
+
+// TestRenderPostValidateReason_ActionTemplate verifies {{.action}} is substituted.
+func TestRenderPostValidateReason_ActionTemplate(t *testing.T) {
+	nodes := []map[string]interface{}{{"uid": "0x1"}}
+	out, err := renderPostValidateReason("Forbidden on {{.action}}", nodes, "update", nil, "")
+	require.NoError(t, err)
+	require.Equal(t, "Forbidden on update", out)
+}
+
+// TestRenderPostValidateReason_ErrorTemplate verifies {{.error}} carries the
+// payload from error() calls, not the full CEL stacktrace.
+func TestRenderPostValidateReason_ErrorTemplate(t *testing.T) {
+	nodes := []map[string]interface{}{{"uid": "0x1"}}
+	out, err := renderPostValidateReason(
+		"Validation failed: {{.error}}", nodes, "add", nil,
+		"quota exceeded. Limit: 10, Used: 10, Requested: 1.")
+	require.NoError(t, err)
+	require.Equal(t, "Validation failed: quota exceeded. Limit: 10, Used: 10, Requested: 1.", out)
+}
+
+// TestRenderPostValidateReason_AuthTemplate verifies {{index .auth "KEY"}} access.
+func TestRenderPostValidateReason_AuthTemplate(t *testing.T) {
+	nodes := []map[string]interface{}{{"uid": "0x1"}}
+	auth := map[string]interface{}{"USER": "alice"}
+	out, err := renderPostValidateReason(
+		`Forbidden for user {{index .auth "USER"}}`, nodes, "add", auth, "")
+	require.NoError(t, err)
+	require.Equal(t, "Forbidden for user alice", out)
+}
+
+// TestRenderPostValidateReason_InvalidTemplate verifies a malformed template
+// returns an error so the caller can fall back to the raw reason string.
+func TestRenderPostValidateReason_InvalidTemplate(t *testing.T) {
+	_, err := renderPostValidateReason("{{.unclosed", nil, "add", nil, "")
+	require.Error(t, err, "malformed template must return an error")
+}
+
+// --- end-to-end: reason as template when expr returns false ---
+
+// TestPostValidate_ReasonTemplate_ExprFalse verifies that {{.count}} and
+// {{.action}} are substituted when the expression returns false.
+func TestPostValidate_ReasonTemplate_ExprFalse(t *testing.T) {
+	const schemaStr = `
+type Review
+  @postValidate(
+    add: {
+      expr:   "len(nodes) <= 1"
+      reason: "Cannot add {{.count}} reviews in one request (action: {{.action}})"
+    }
+  ) {
+  id:    ID!
+  title: String
+}`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+	mut := makeAddMutation(t, gqlSchema, `mutation {
+		addReview(input: [{}, {}]) { review { id } }
+	}`)
+	rewriter := NewAddRewriter()
+	mutResp := &dgoapi.Response{Uids: map[string]string{"Review_1": "0xc1", "Review_2": "0xc2"}}
+	ex := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0xc1"},{"uid":"0xc2"}]}`}
+
+	err := runPostValidate(context.Background(), mut, ex, rewriter, mutResp, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Cannot add 2 reviews in one request (action: add)")
+}
+
+// --- end-to-end: reason with {{.error}} when expr calls error() ---
+
+// TestPostValidate_ReasonTemplate_ExprError verifies that when the expression
+// calls error(msg), the reason template is rendered with {{.error}} = msg —
+// the clean payload via ExprError/errors.As, not the raw CEL stacktrace.
+func TestPostValidate_ReasonTemplate_ExprError(t *testing.T) {
+	const schemaStr = `
+type Review
+  @postValidate(
+    add: {
+      expr:   "error(\"quota exceeded: used 10 of 10\")"
+      reason: "Validation failed: {{.error}}"
+    }
+  ) {
+  id:    ID!
+  title: String
+}`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+	mut := makeAddMutation(t, gqlSchema, `mutation {
+		addReview(input: [{}]) { review { id } }
+	}`)
+	rewriter := NewAddRewriter()
+	mutResp := &dgoapi.Response{Uids: map[string]string{"Review_1": "0xd1"}}
+	ex := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0xd1"}]}`}
+
+	err := runPostValidate(context.Background(), mut, ex, rewriter, mutResp, nil)
+	require.Error(t, err)
+	// {{.error}} must be the clean message, not the CEL annotation.
+	require.Contains(t, err.Error(), "Validation failed: quota exceeded: used 10 of 10")
+	require.NotContains(t, err.Error(), "(1:", "CEL line:col annotation must not appear")
+}
