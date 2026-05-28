@@ -1886,10 +1886,22 @@ func rewriteObject(
 			}
 			// Node with XIDs does not exist. It means this is a new node.
 			// This node will be created later.
-			obj = xidMetadata.variableObjMap[xidVariables[0]]
-			// We replace obj with xidMetadata.variableObjMap[variable] in this case.
-			// This is done to ensure that the first time we encounter an XID node, we use
-			// its definition and later times, we just use its reference.
+			//
+			// Normally variableObjMap[xidVariables[0]] holds the first (full) definition of
+			// this XID node seen during Phase-1 existenceQueries scanning, and we switch obj
+			// to it so that subsequent reference-only occurrences of the same XID still carry
+			// all the field values.
+			//
+			// However, when a @transform directive adds an @id field (e.g. sId) that was absent
+			// from the original mutation input, Phase-1 never registered this node and
+			// variableObjMap has no entry for it.  In that case we must NOT replace obj with nil
+			// — the current obj is already the correct, fully-populated definition.  Register it
+			// in variableObjMap so that any later occurrences of the same XID resolve correctly.
+			if resolvedObj := xidMetadata.variableObjMap[xidVariables[0]]; resolvedObj != nil {
+				obj = resolvedObj
+			} else {
+				xidMetadata.variableObjMap[xidVariables[0]] = obj
+			}
 
 			if err := typ.EnsureNonNulls(obj, exclude); (err != nil) &&
 				!(mutationType == UpdateWithSet && atTopLevel) {
