@@ -3667,7 +3667,47 @@ invalid_schemas:
         },
       ]
 
+  - name: "@postValidate expr with unknown function is rejected at schema load time"
+    input: |
+      type JobAd
+        @postValidate(
+          expr: """
+          let res = xcallLambda("JobAd.checkBulkQuota", {"args": nodes});
+          res?.code == 200 || res?.code == 206 || res?.code == 401 ? true : error(res?.message)
+          """,
+          reason: "{{.error}}"
+        ) {
+        id: ID!
+        title: String!
+      }
+    errlist:
+      [
+        {
+          "message":
+            "Type JobAd: @postValidate top-level expr \"let res =
+            xcallLambda(\\\"JobAd.checkBulkQuota\\\", {\\\"args\\\": nodes});\\nres?.code == 200 ||
+            res?.code == 206 || res?.code == 401 ? true : error(res?.message)\" cannot be compiled:
+            unknown name xcallLambda (1:11)\n | let res = xcallLambda(\"JobAd.checkBulkQuota\",
+            {\"args\": nodes});\n | ..........^",
+          "locations": [{ "line": 2, "column": 4 }],
+        },
+      ]
+
 valid_schemas:
+  - name: "@postValidate with valid callLambda expr is accepted"
+    input: |
+      type JobAd
+        @postValidate(
+          expr: """
+          let res = callLambda("JobAd.checkQuota", {"args": nodes});
+          res?.code == 200 ? true : error(res?.message)
+          """,
+          reason: "Quota exceeded: {{.error}}"
+        ) {
+        id: ID!
+        title: String!
+      }
+
   - name: "@default allows non-scalar field type"
     input: |
       type X {

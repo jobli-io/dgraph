@@ -1800,12 +1800,13 @@ func validateDirectiveValidation(sch *ast.Schema,
 }
 
 // postValidateDirectiveValidation compiles the @postValidate expr arguments at
-// schema load time so that syntax errors are surfaced immediately — the same
-// behaviour that @transform, @default, and @validate provide for their exprs.
+// schema load time so that syntax errors (including unknown functions) are surfaced
+// immediately — the same behaviour @transform, @default, and @validate provide.
 //
-// The compilation uses a zero-value postValidateEnv (nodes/action/auth are empty)
-// with AllowUndefinedVariables so runtime-only values (JWT claims, node data)
-// do not cause false positives at compile time.
+// The compilation uses the same typed postValidateEnv struct used at runtime, so the
+// compiler type-checks all identifier references. Unknown functions (e.g. xcallLambda)
+// are rejected here rather than at first mutation. Let bindings are resolved by the
+// compiler itself and do not require the env to declare them.
 func postValidateDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqlerror.List {
 	dir := typ.Directives.ForName(postValidateDirective)
 	if dir == nil {
@@ -1846,7 +1847,7 @@ func postValidateDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqler
 
 	var errs gqlerror.List
 	for _, e := range exprs {
-		_, compErr := expr.Compile(e.raw, expr.Env(env), expr.AllowUndefinedVariables())
+		_, compErr := expr.Compile(e.raw, expr.Env(env))
 		if compErr != nil {
 			arm := e.arm
 			if arm == "" {
