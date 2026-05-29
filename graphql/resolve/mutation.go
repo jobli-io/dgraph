@@ -1393,6 +1393,35 @@ func collectPostValidateUIDs(
 		}
 	}
 
+	// For add+upsert mutations where the node already existed, Dgraph does NOT emit a
+	// blank-node assignment in GetUids() (no new node was created). The existing node's
+	// UID is returned in the upsert query result, keyed by the DQL variable name which
+	// follows the same "TypeName_N" naming scheme (e.g. result["JobAd_1"] = [{uid:"0x123"}]).
+	// Scan result for such keys to collect those UIDs so @postValidate still runs.
+	if mutation.MutationType() == schema.AddMutation {
+		for key, val := range result {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			arr, ok := val.([]interface{})
+			if !ok {
+				continue
+			}
+			for _, item := range arr {
+				obj, ok := item.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				uid, _ := obj["uid"].(string)
+				if uid != "" && !seenUID[uid] {
+					seenUID[uid] = true
+					uids = append(uids, uid)
+					uidToBlankName[uid] = key
+				}
+			}
+		}
+	}
+
 	// For update mutations, root nodes are existing (not in GetUids()).
 	// Their before state is stored under "xx" (merged across all filter-matched nodes).
 	if mutation.MutationType() == schema.UpdateMutation {
