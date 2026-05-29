@@ -334,6 +334,134 @@ func TestOnlyCorrectSearchArgsWork(t *testing.T) {
 	}
 }
 
+// TestImmutableInversePatchBehaviour verifies the precise semantics of how
+// @hasInverse(immutable: true) propagates into generated XxxPatch types.
+//
+// Rule: a *list* field on the parent whose children carry the immutable
+// inverse back-reference must REMAIN in the parent's Patch type — the list
+// can grow (new children can be added) even though each child cannot be
+// reassigned to a different parent.
+//
+// Counter-rule: a *scalar* field on one side of a one-to-one immutable pair
+// must be excluded from the Patch type on BOTH sides.
+func TestImmutableInversePatchBehaviour(t *testing.T) {
+	tests := []struct {
+		name           string
+		schema         string
+		patchType      string   // e.g. "JobAdPatch"
+		mustContain    []string // field names that must be present in the patch
+		mustNotContain []string // field names that must be absent from the patch
+	}{
+		{
+			// JobAd.hasPortalForm: [PortalForm] is a one-to-many (list) field.
+			// PortalForm.forJobAd carries @hasInverse(immutable:true).
+			// The list parent side must remain in JobAdPatch so that
+			// updateJobAd(set:{hasPortalForm:[...]}) can trigger JobAd's
+			// @default/@transform evaluation (e.g. hasAdPostRecord).
+			name: "list-side of immutable inverse remains in parent Patch",
+			schema: `
+type JobAd {
+  id: ID!
+  title: String!
+  hasPortalForm: [PortalForm] @hasInverse(field: forJobAd)
+}
+type PortalForm {
+  id: ID!
+  name: String!
+  forJobAd: JobAd! @hasInverse(field: hasPortalForm, immutable: true)
+}`,
+			patchType:      "JobAdPatch",
+			mustContain:    []string{"hasPortalForm"},
+			mustNotContain: []string{},
+		},
+		{
+			// PortalForm.forJobAd carries @hasInverse(immutable:true) directly.
+			// It must be excluded from PortalFormPatch (write-once field).
+			name: "scalar immutable field is excluded from its own Patch",
+			schema: `
+type JobAd {
+  id: ID!
+  title: String!
+  hasPortalForm: [PortalForm] @hasInverse(field: forJobAd)
+}
+type PortalForm {
+  id: ID!
+  name: String!
+  forJobAd: JobAd! @hasInverse(field: hasPortalForm, immutable: true)
+}`,
+			patchType:      "PortalFormPatch",
+			mustContain:    []string{"name"},
+			mustNotContain: []string{"forJobAd"},
+		},
+		{
+			// One-to-one (scalar on both sides): both sides must be excluded.
+			// House.owner: Owner @hasInverse(field: house, immutable: true)
+			// → owner excluded from HousePatch, house excluded from OwnerPatch.
+			name: "scalar-to-scalar immutable inverse excluded from both Patch types",
+			schema: `
+type House {
+  id: ID!
+  address: String!
+  owner: Owner @hasInverse(field: house, immutable: true)
+}
+type Owner {
+  id: ID!
+  name: String!
+  house: House @hasInverse(field: owner)
+}`,
+			patchType:      "OwnerPatch",
+			mustContain:    []string{"name"},
+			mustNotContain: []string{"house"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, errs := NewHandler(tt.schema, false)
+			require.NoError(t, errs, "schema should be valid")
+
+			generated := h.GQLSchema()
+
+			// Find the patch type block and check field presence.
+			// Strategy: find the line "input XxxPatch {", collect field names
+			// until the closing "}", then assert mustContain / mustNotContain.
+			inBlock := false
+			foundFields := map[string]bool{}
+			for _, line := range strings.Split(generated, "\n") {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "input "+tt.patchType+" {" {
+					inBlock = true
+					continue
+				}
+				if inBlock {
+					if trimmed == "}" {
+						break
+					}
+					// Each field line looks like "  fieldName: SomeType"
+					if idx := strings.Index(trimmed, ":"); idx > 0 {
+						fname := strings.TrimSpace(trimmed[:idx])
+						foundFields[fname] = true
+					}
+				}
+			}
+
+			require.True(t, inBlock || len(foundFields) > 0,
+				"patch type %q not found in generated schema", tt.patchType)
+
+			for _, want := range tt.mustContain {
+				require.True(t, foundFields[want],
+					"expected field %q to be present in %s but it was absent.\nFound: %v",
+					want, tt.patchType, foundFields)
+			}
+			for _, banned := range tt.mustNotContain {
+				require.False(t, foundFields[banned],
+					"expected field %q to be absent from %s but it was present.\nFound: %v",
+					banned, tt.patchType, foundFields)
+			}
+		})
+	}
+}
+
 func TestMain(m *testing.M) {
 	// set up the lambda url for unit tests
 	x.Config.GraphQL = z.NewSuperFlag("lambda-url=http://localhost:8086/graphql-worker;").

@@ -2650,18 +2650,30 @@ func getPatchFields(schema *ast.Schema, defn *ast.Definition, providesTypeMap ma
 			}
 		}
 
-		// Auto-propagation: if this field is the inverse of another field that carries
-		// @hasInverse(immutable: true), then this side is also effectively immutable.
-		// E.g. House.owner has @hasInverse(field: "house", immutable: true) →
-		// Owner.house is the inverse and must also be excluded from OwnerPatch.
-		if invDir := fld.Directives.ForName(inverseDirective); invDir != nil {
-			if invField := invDir.Arguments.ForName("field"); invField != nil {
-				invTypeDef := schema.Types[fld.Type.Name()]
-				if invTypeDef != nil {
-					if invFld := invTypeDef.Fields.ForName(invField.Value.Raw); invFld != nil {
-						if invFldDir := invFld.Directives.ForName(inverseDirective); invFldDir != nil {
-							if immArg := invFldDir.Arguments.ForName(inverseImmutableArg); immArg != nil && immArg.Value.Raw == "true" {
-								continue
+		// Auto-propagation: if this field is the *scalar* (one-to-one) inverse of another
+		// field that carries @hasInverse(immutable: true), then this side is also
+		// effectively immutable and must be excluded from the patch type.
+		//
+		// E.g. Owner.house: House  @hasInverse(field: "owner", immutable: true)
+		//   → house is excluded from OwnerPatch (can't reassign the owner's house).
+		//
+		// We deliberately do NOT apply this to list-type fields. A list field like
+		//   JobAd.hasPortalForm: [PortalForm]
+		// whose children carry @hasInverse(field: forJobAd, immutable: true) is
+		// different: the immutability means a PortalForm cannot be *reassigned* to a
+		// different JobAd, but the JobAd's list can still grow (new PortalForms added).
+		// Excluding it from JobAdPatch would make it impossible to trigger JobAd's
+		// @default/@transform evaluation (e.g. hasAdPostRecord) via updateJobAd.
+		if fld.Type.NamedType != "" { // scalar (non-list) field only
+			if invDir := fld.Directives.ForName(inverseDirective); invDir != nil {
+				if invField := invDir.Arguments.ForName("field"); invField != nil {
+					invTypeDef := schema.Types[fld.Type.Name()]
+					if invTypeDef != nil {
+						if invFld := invTypeDef.Fields.ForName(invField.Value.Raw); invFld != nil {
+							if invFldDir := invFld.Directives.ForName(inverseDirective); invFldDir != nil {
+								if immArg := invFldDir.Arguments.ForName(inverseImmutableArg); immArg != nil && immArg.Value.Raw == "true" {
+									continue
+								}
 							}
 						}
 					}
