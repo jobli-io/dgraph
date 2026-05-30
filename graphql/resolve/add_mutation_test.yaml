@@ -5810,3 +5810,66 @@
           "dgraph.type": ["Widget"],
           "uid": "_:Widget_1"
         }
+
+- name:
+    isRefOnly forward-ref guard — Case 3, existing Tag found via primary resolves alt forward-ref
+  explanation: |
+    Case 3 regression: the Tag exists in Dgraph but was NOT found during Phase-1
+    existence queries for the ref-only alt input (because alt only has {key:"t1"}
+    and the Phase-1 query for alt runs but can also be matched via a different path).
+
+    Here we simulate the exact Case 3 scenario:
+      - alt is processed first (alphabetically) → typUidExist=false → forward ref
+        "_:Tag_2" is emitted for Widget.alt.
+      - primary is processed next → existence query for Tag_2 hits Dgraph (via
+        qnametouid "Tag_2":"0xAB") → typUidExist=true → asIDReference("0xAB").
+
+    Before the fix: Widget.alt would have {"uid":"_:Tag_2"} (dangling blank node)
+    while Widget.primary has {"uid":"0xAB"}. Dgraph would create an empty new Tag.
+
+    After the fix: resolveTypeFwdRefs records "_:Tag_2" → "0xAB" at the
+    asIDReference return point, then patchBlankNodes replaces the already-emitted
+    forward ref, so both Widget.alt and Widget.primary resolve to "0xAB".
+
+    NOTE: this test shares the same Phase-1 dgquery as the previous test because
+    varGen produces the same variable name for the same (type, field, value) triple.
+    The difference is qnametouid: Tag_2 exists for both queries but in this test
+    Widget_1 does NOT exist (new widget) and Tag_2 DOES exist.
+  gqlmutation: |
+    mutation addWidget($input: [AddWidgetInput!]!) {
+      addWidget(input: $input) {
+        widget { widgetId }
+      }
+    }
+  gqlvariables: |
+    {
+      "input": [{
+        "widgetId": "W2",
+        "alt":     { "key": "t1" },
+        "primary": { "key": "t1", "value": "V1" }
+      }]
+    }
+  dgquery: |-
+    query {
+      Widget_1(func: eq(Widget.widgetId, "W2")) {
+        uid
+        dgraph.type
+      }
+      Tag_2(func: eq(Tag.key, "t1")) {
+        uid
+        dgraph.type
+      }
+    }
+  qnametouid: |
+    {
+      "Tag_2": "0xAB"
+    }
+  dgmutations:
+    - setjson: |
+        {
+          "Widget.alt": { "uid": "0xAB" },
+          "Widget.primary": { "uid": "0xAB" },
+          "Widget.widgetId": "W2",
+          "dgraph.type": ["Widget"],
+          "uid": "_:Widget_1"
+        }
