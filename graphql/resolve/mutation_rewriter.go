@@ -101,6 +101,11 @@ type xidMetadata struct {
 	seenUIDs map[string]bool
 	// variableOldValueMap stores the mapping of xidVariable -> the old object which contains that xid/id
 	variableOldValueMap map[string]map[string]interface{}
+	// forwardRefs records blank-node UIDs emitted as isRefOnly forward references,
+	// keyed by xidVariable (e.g. "User_3"). When a @default later adds the same XID
+	// to a node being created, the node's blank-node UID is unified with the forward
+	// ref so both edges resolve to exactly one Dgraph node.
+	forwardRefs map[string]string
 }
 
 // A mutationBuilder can build a json mutation []byte from a mutationFragment
@@ -229,6 +234,7 @@ func NewXidMetadata() *xidMetadata {
 		seenAtTopLevel:      make(map[string]bool),
 		seenUIDs:            make(map[string]bool),
 		variableOldValueMap: make(map[string]map[string]interface{}),
+		forwardRefs:         make(map[string]string),
 	}
 }
 
@@ -1793,6 +1799,12 @@ func rewriteObject(
 		}
 	}
 
+	// registeredXidVariables holds the XID variable names registered into idExistence
+	// for this node. It is declared here (function scope) so the @defaults loop below
+	// can read and update the registrations even though xidVariables itself is scoped
+	// inside the `if len(xids) != 0 {}` block.
+	var registeredXidVariables []string
+
 	xids := typ.XIDFields()
 	if len(xids) != 0 {
 		// multipleNodesForSameID is true when there are multiple nodes present
@@ -1983,7 +1995,11 @@ func rewriteObject(
 				// Forward-reference to a sibling node being created later in this mutation.
 				// Emit a blank-node reference and let the full definition (encountered
 				// alphabetically later) create the actual node and register idExistence.
-				refObj := map[string]interface{}{"uid": fmt.Sprintf("_:%s", variable)}
+				refUID := fmt.Sprintf("_:%s", variable)
+				// Record the forward ref so that when the node's @default later adds this
+				// XID value, the creation can unify its blank-node UID with ours.
+				xidMetadata.forwardRefs[variable] = refUID
+				refObj := map[string]interface{}{"uid": refUID}
 				if srcField != nil {
 					addInverseLink(refObj, srcField, srcUID)
 				}
@@ -2013,6 +2029,8 @@ func rewriteObject(
 			for _, xidVariable := range xidVariables {
 				idExistence[xidVariable] = fmt.Sprintf("_:%s", variable)
 			}
+			// Expose to the @defaults loop which runs after this block closes.
+			registeredXidVariables = xidVariables
 		}
 
 		if upsertVar == "" {
@@ -2146,6 +2164,9 @@ func rewriteObject(
 				// update idExistence for default node
 				var fieldQueries []*dql.GraphQuery
 				var fieldTypes []string
+				// defaultXidVar is set when the defaulted field is an @id (XID) field.
+				// It is read after the existence-query execution block below.
+				var defaultXidVar string
 				if val, ok := value.([]interface{}); ok {
 					for _, i := range val {
 						obj, ok := i.(map[string]interface{})
@@ -2173,10 +2194,15 @@ func rewriteObject(
 					fieldTypes = append(fieldTypes, typs...)
 
 				} else {
-					// update idExistence for nodes with default xid
+					// Scalar @default on an @id (XID) field.
+					// Pass a xid-only projection of obj so that existenceQueries does NOT
+					// update variableObjMap with the full mutation obj.  Without this,
+					// a later isRefOnly lookup for {sId:"..."} would load the full obj
+					// (with createdAt, firstName, etc.) and trigger validate failures.
 					for _, xid := range typ.XIDFields() {
 						if xid.Name() == field.Name() {
-							queries, typs, errs := existenceQueries(ctx, typ, field, varGen, obj, xidMetadata)
+							xidOnlyObj := map[string]interface{}{field.Name(): obj[field.Name()]}
+							queries, typs, errs := existenceQueries(ctx, typ, field, varGen, xidOnlyObj, xidMetadata)
 							if len(errs) > 0 {
 								// for _, err := range errs {
 								// 	retErrors = append(retErrors, errors.Wrapf(err, "failed to rewrite mutation payload for default value"))
@@ -2184,6 +2210,11 @@ func rewriteObject(
 							}
 							fieldQueries = append(fieldQueries, queries...)
 							fieldTypes = append(fieldTypes, typs...)
+							// Compute the xidVariable for post-execution handling.
+							xidVal, xerr := extractVal(obj[field.Name()], field.Name(), field.Type().Name())
+							if xerr == nil && xidVal != "" {
+								defaultXidVar = varGen.Next(typ, field.Name(), xidVal, false)
+							}
 							break
 						}
 					}
@@ -2262,7 +2293,59 @@ func rewriteObject(
 					}
 				}
 
+				// Post-execution: handle @default on an @id field for a new-node creation.
+				// defaultXidVar is non-empty only when the field that just got its default
+				// value set is an @id (XID) field (see the else-branch above).
+				if defaultXidVar != "" {
+					if existingUID, found := idExistence[defaultXidVar]; found {
+						// Case A: XID already exists in Dgraph (e.g. the user was already created
+						// in a previous mutation).  Re-run rewriteObject so the XID loop picks
+						// up this XID in the existence map and returns asIDReference.
+						if !strings.HasPrefix(existingUID, "_:") {
+							shouldReRun = true
+						} else if existingUID != myUID {
+							// Case A': idExistence has a blank-node for this XID (a forward ref
+							// emitted earlier in this mutation by another field).  Align this
+							// node's UID so both edges resolve to the same blank node.
+							for _, xidVar := range registeredXidVariables {
+								idExistence[xidVar] = existingUID
+							}
+							myUID = existingUID
+							newObj["uid"] = existingUID
+						}
+					} else {
+						// Case B: XID is brand-new (not in Dgraph, not yet seen in this mutation).
+						if fwdUID, hasFwd := xidMetadata.forwardRefs[defaultXidVar]; hasFwd {
+							// Case B1: A forward-ref was already emitted for this XID (e.g.
+							// Workspace.createdBy was processed before Workspace.ownedBy).
+							// Align this node's blank-node UID to the forward ref so the DQL
+							// mutation has exactly one Dgraph node for both edges.
+							for _, xidVar := range registeredXidVariables {
+								idExistence[xidVar] = fwdUID
+							}
+							idExistence[defaultXidVar] = fwdUID
+							xidMetadata.variableObjMap[defaultXidVar] = obj
+							myUID = fwdUID
+							newObj["uid"] = fwdUID
+						} else {
+							// Case B2: No forward-ref exists yet.  Register this node's UID so
+							// any subsequent reference to the same XID (createdBy, Plugin.createdBy
+							// etc.) resolves via asIDReference instead of emitting a new forward ref.
+							idExistence[defaultXidVar] = myUID
+							xidMetadata.variableObjMap[defaultXidVar] = obj
+						}
+					}
+					// Reset so we don't re-apply this logic for other fields in the same loop.
+					defaultXidVar = ""
+				}
+
 				if shouldReRun {
+					// Clear blank-node registrations made by this run's XID loop so the
+					// re-run processes the updated obj (which now includes the @default XID)
+					// from scratch and takes the correct asIDReference path.
+					for _, xidVar := range registeredXidVariables {
+						delete(idExistence, xidVar)
+					}
 					return rewriteObject(ctx, typ, srcField, srcUID, varGen, obj, xidMetadata, idExistence,
 						mutationType, authVariables, objDel)
 				}
