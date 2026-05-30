@@ -5873,3 +5873,72 @@
           "dgraph.type": ["Widget"],
           "uid": "_:Widget_1"
         }
+
+- name:
+    "isRefOnly Case 3 — two distinct @id fields: existing PersonNode found by xId resolves sId
+    forward-ref"
+  explanation: |
+    TRUE Case 3 test: PersonNode has two @id fields with SEPARATE Phase-1 variables:
+      PersonNode_2  ← lead  {sId:"sn_alice"}  — Phase-1 existence miss (no qnametouid)
+      PersonNode_3  ← member {xId:"alice",...} — Phase-1 existence HIT  (qnametouid)
+
+    Phase-2 field loop (lead < member alphabetically):
+      1. lead  {sId:"sn_alice"} → PersonNode_2 → typUidExist=false → forward-ref _:PersonNode_2
+      2. member {xId:"alice",display:"Alice"} → PersonNode_3 → typUidExist=true → asIDReference
+           Case 3 loop: PersonNode.sId absent from member obj
+             → GetDefaultValue(sId,"add","PersonNode",{xId:"alice",display:"Alice"}) = "sn_alice"
+             → varGen.Next(PersonNode, sId, "sn_alice") = PersonNode_2  (idempotent)
+             → forwardRefs["PersonNode_2"] = "_:PersonNode_2" → resolveExactFwdRef("_:PersonNode_2","0xABC")
+
+    patchBlankNodes: GroupNode.lead.uid "_:PersonNode_2" → "0xABC" ✓
+
+    Before the fix: GroupNode.lead → {uid:"_:PersonNode_2"} (dangling blank node) while
+                    GroupNode.member → {uid:"0xABC"}.  Dgraph creates an empty PersonNode.
+    After the fix:  both edges resolve to "0xABC".
+  gqlmutation: |
+    mutation addGroupNode($input: [AddGroupNodeInput!]!) {
+      addGroupNode(input: $input) {
+        groupNode { gId }
+      }
+    }
+  gqlvariables: |
+    {
+      "input": [{
+        "gId": "G1",
+        "lead":   { "sId": "sn_alice" },
+        "member": { "xId": "alice", "display": "Alice" }
+      }]
+    }
+  dgquery: |-
+    query {
+      GroupNode_1(func: eq(GroupNode.gId, "G1")) {
+        uid
+        dgraph.type
+      }
+      PersonNode_2(func: eq(PersonNode.sId, "sn_alice")) {
+        uid
+        dgraph.type
+      }
+      PersonNode_3(func: eq(PersonNode.xId, "alice")) {
+        uid
+        dgraph.type
+      }
+    }
+  qnametouid: |
+    {
+      "PersonNode_3": "0xABC"
+    }
+  dgmutations:
+    - setjson: |
+        {
+          "GroupNode.lead": { "uid": "0xABC" },
+          "GroupNode.member": { "uid": "0xABC" },
+          "GroupNode.gId": "G1",
+          "dgraph.type": ["GroupNode"],
+          "uid": "_:GroupNode_1"
+        }
+
+# NOTE: The companion scenario (new PersonNode, both lead + member pointing to new node)
+# requires the sId @default existence query to run against live Dgraph. Because the unit
+# test framework has no Dgraph, the @defaults loop errors out when it tries to execute
+# the existence check. This case is covered by integration tests (addWorkspace).

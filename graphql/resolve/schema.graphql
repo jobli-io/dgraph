@@ -613,3 +613,46 @@ type Tag {
     key: String! @id
     value: String!
 }
+
+"""
+PersonNode / GroupNode — Case 3 regression types.
+
+PersonNode has TWO @id fields:
+  xId  — user-provided (present in mutation input from the user)
+  sId  — @default-computed from xId at creation time
+
+This mirrors the production User.xId / User.sId pattern.
+
+GroupNode has two edges to PersonNode:
+  member — provides the full definition {xId, display} (user input)
+  lead   — provides ONLY {sId: "sn_alice"} (as produced by a @default on the
+            parent type, which runs at Phase-2 time and generates a sId-only ref)
+
+Alphabetical field ordering: lead < member, so lead is processed first.
+
+Case 3 scenario:
+  Phase-1 existence queries:
+    PersonNode_1  (lead's sId = "sn_alice") → NO MATCH in qnametouid
+    PersonNode_2  (member's xId = "alice")  → HIT  in qnametouid (0xABC)
+
+  Phase-2 field loop:
+    lead  {sId:"sn_alice"} → PersonNode_1 → typUidExist=false → forward-ref _:PersonNode_1
+    member {xId:"alice", display:"Alice"} → PersonNode_2 → typUidExist=true → asIDReference
+      Case 3 loop: sId absent from obj → GetDefaultValue → "sn_alice"
+                   varGen.Next(PersonNode, "sId", "sn_alice") = PersonNode_1 (idempotent)
+                   forwardRefs["PersonNode_1"] = "_:PersonNode_1" → resolveExactFwdRef
+      blankNodeResolutions["_:PersonNode_1"] = "0xABC"
+
+  patchBlankNodes: GroupNode.lead.uid "_:PersonNode_1" → "0xABC" ✓
+"""
+type PersonNode {
+    xId: String! @id
+    sId: String! @id @default(add: {expr: "\"sn_\" + input.xId"})
+    display: String!
+}
+
+type GroupNode {
+    gId: String! @id
+    member: PersonNode
+    lead: PersonNode
+}
