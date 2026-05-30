@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/golang/glog"
 	"github.com/pkg/errors"
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
@@ -37,15 +36,6 @@ const (
 )
 
 // Enum passed on to rewriteObject function.
-// mapKeys returns the sorted key names of a map — used in diagnostic log lines.
-func mapKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
 
 // MutationType is the type of mutation being performed.
 type MutationType int
@@ -1992,16 +1982,12 @@ func rewriteObject(
 			}
 
 			resolvedObj := xidMetadata.variableObjMap[xidVariables[0]]
-			glog.V(2).Infof("[rewriteObject] typ=%s xidVar=%s isRefOnly=%v resolvedObj_len=%d typUidExist=%v",
-				typ.Name(), xidVariables[0], isRefOnly, len(resolvedObj), resolvedObj != nil)
 
 			if resolvedObj != nil && !isRefOnly {
 				// Only substitute the cached full definition when the *current* obj is not a
 				// pure cross-reference. If isRefOnly is true (obj has only @id fields),
 				// this invocation is a forward reference regardless of what variableObjMap
 				// holds — fall through to the isRefOnly branch below.
-				glog.V(2).Infof("[rewriteObject] typ=%s xidVar=%s SUBSTITUTING resolvedObj (full def)",
-					typ.Name(), xidVariables[0])
 				obj = resolvedObj
 			} else if isRefOnly {
 				// If the object carries a raw Dgraph "uid" field it was fetched from Dgraph
@@ -2010,8 +1996,6 @@ func rewriteObject(
 				// so it is safe to treat as an implicit existence proof — link to the
 				// existing node directly rather than creating a blank-node forward-ref.
 				if rawUID, ok := obj["uid"].(string); ok && rawUID != "" && !strings.HasPrefix(rawUID, "_:") {
-					glog.V(2).Infof("[rewriteObject] typ=%s xidVar=%s isRefOnly=true rawUID=%s → asIDReference",
-						typ.Name(), xidVariables[0], rawUID)
 					idExistence[variable] = rawUID
 					return asIDReference(ctx, rawUID, srcField, srcUID, varGen,
 						mutationType == UpdateWithRemove), upsertVar, nil
@@ -2020,8 +2004,6 @@ func rewriteObject(
 				// Emit a blank-node reference and let the full definition (encountered
 				// alphabetically later) create the actual node and register idExistence.
 				refUID := fmt.Sprintf("_:%s", variable)
-				glog.V(2).Infof("[rewriteObject] typ=%s xidVar=%s isRefOnly=true → FORWARD REF %s",
-					typ.Name(), xidVariables[0], refUID)
 				// Record the forward ref so that when the node's @default later adds this
 				// XID value, the creation can unify its blank-node UID with ours.
 				xidMetadata.forwardRefs[variable] = refUID
@@ -2031,8 +2013,6 @@ func rewriteObject(
 				}
 				return newFragment(refObj), upsertVar, nil
 			} else {
-				glog.V(2).Infof("[rewriteObject] typ=%s xidVar=%s NEW NODE (no resolvedObj, not isRefOnly)",
-					typ.Name(), xidVariables[0])
 				xidMetadata.variableObjMap[xidVariables[0]] = obj
 			}
 
@@ -2325,20 +2305,16 @@ func rewriteObject(
 				// defaultXidVar is non-empty only when the field that just got its default
 				// value set is an @id (XID) field (see the else-branch above).
 				if defaultXidVar != "" {
-					glog.V(2).Infof("[xid-default] typ=%s defaultXidVar=%s myUID=%s idExistence[var]=%q forwardRefs[var]=%q",
-						typ.Name(), defaultXidVar, myUID, idExistence[defaultXidVar], xidMetadata.forwardRefs[defaultXidVar])
 					if existingUID, found := idExistence[defaultXidVar]; found {
 						// Case A: XID already exists in Dgraph (e.g. the user was already created
 						// in a previous mutation).  Re-run rewriteObject so the XID loop picks
 						// up this XID in the existence map and returns asIDReference.
 						if !strings.HasPrefix(existingUID, "_:") {
-							glog.V(2).Infof("[xid-default] CASE A: existing Dgraph node uid=%s → shouldReRun", existingUID)
 							shouldReRun = true
 						} else if existingUID != myUID {
 							// Case A': idExistence has a blank-node for this XID (a forward ref
 							// emitted earlier in this mutation by another field).  Align this
 							// node's UID so both edges resolve to the same blank node.
-							glog.V(2).Infof("[xid-default] CASE A': blank-node forward ref %s != myUID %s → align", existingUID, myUID)
 							for _, xidVar := range registeredXidVariables {
 								idExistence[xidVar] = existingUID
 							}
@@ -2352,7 +2328,6 @@ func rewriteObject(
 							// Workspace.createdBy was processed before Workspace.ownedBy).
 							// Align this node's blank-node UID to the forward ref so the DQL
 							// mutation has exactly one Dgraph node for both edges.
-							glog.V(2).Infof("[xid-default] CASE B1: forward ref found %s → align myUID %s → %s", fwdUID, myUID, fwdUID)
 							for _, xidVar := range registeredXidVariables {
 								idExistence[xidVar] = fwdUID
 							}
@@ -2364,7 +2339,6 @@ func rewriteObject(
 							// Case B2: No forward-ref exists yet.  Register this node's UID so
 							// any subsequent reference to the same XID (createdBy, Plugin.createdBy
 							// etc.) resolves via asIDReference instead of emitting a new forward ref.
-							glog.V(2).Infof("[xid-default] CASE B2: no forward ref → patch idExistence[%s]=%s", defaultXidVar, myUID)
 							idExistence[defaultXidVar] = myUID
 							xidMetadata.variableObjMap[defaultXidVar] = obj
 						}
@@ -2419,8 +2393,6 @@ func rewriteObject(
 		// Extract auth variables
 		oldValue := xidMetadata.variableOldValueMap[variable] // retrieve the old value
 		for _, err := range field.ValidateValue(action, typ.Name(), obj, authCtx, oldValue, objDel) {
-			glog.V(2).Infof("[validate] typ=%s field=%s err=%s rawInput_keys=%v obj_keys=%v",
-				typ.Name(), field.Name(), err, mapKeys(authCtx.RawInput), mapKeys(obj))
 			retErrors = append(retErrors, errors.Errorf("Type %s; %s", typ.Name(), err.Error()))
 		}
 	}

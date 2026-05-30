@@ -582,3 +582,34 @@ type CampaignLabel {
     sId: String @id
     name: String!
 }
+
+"""
+Regression types for the isRefOnly forward-ref guard (resolvedObj != nil && !isRefOnly).
+
+Widget has two fields that both reference Tag by its XID (key):
+  alt   — comes first alphabetically; the user provides a ref-only {key:"..."} input
+  primary — provides the full Tag definition {key:"...", value:"..."}
+
+When Phase-1 (existenceQueries) processes the mutation it caches {key,value} for
+the Tag XID variable in variableObjMap.  Later, the field loop processes `alt`
+first (alphabetical order) and sees resolvedObj != nil in variableObjMap.
+
+Before the fix: the code did `obj = resolvedObj` unconditionally, meaning the
+ref-only `alt` input was treated as a full node definition and the Tag was CREATED
+inside Widget.alt rather than Widget.primary. With inverse links this produces the
+wrong parent context.
+
+After the fix: when isRefOnly is true the code always takes the forward-ref path
+regardless of what variableObjMap holds, so Tag is correctly created inside
+Widget.primary and Widget.alt just carries a blank-node reference.
+"""
+type Widget {
+    widgetId: String! @id
+    alt: Tag
+    primary: Tag!
+}
+
+type Tag {
+    key: String! @id
+    value: String!
+}

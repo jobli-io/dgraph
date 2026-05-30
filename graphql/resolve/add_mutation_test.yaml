@@ -5704,3 +5704,109 @@
             "CampaignLabel.sId": "label::promo"
           }]
         }
+
+- name:
+    isRefOnly forward-ref guard — ref-only sibling field defers Tag creation to full-definition
+    field
+  explanation: |
+    Regression test for the guard: `resolvedObj != nil && !isRefOnly` in rewriteObject.
+
+    Widget.alt and Widget.primary both reference the same Tag (key="t1").
+    Phase-1 (existenceQueries) processes alt first (alphabetical order), caches
+    {key:"t1"} as a ref-only in variableObjMap, then updates it to {key,value}
+    when it processes primary.
+
+    During the field loop alt is visited first.  At this point:
+      - typUidExist = false (Tag not yet registered in idExistence)
+      - resolvedObj = {key:"t1", value:"V1"} (non-nil from Phase-1)
+      - isRefOnly = true  (alt input only contains the @id field "key")
+
+    Before the fix: obj = resolvedObj unconditionally → Tag was CREATED inside
+    Widget.alt (wrong parent).  Widget.primary then found typUidExist=true and
+    emitted only a uid reference — so the Tag was attached to the wrong field.
+
+    After the fix: isRefOnly objects always take the forward-ref path.  Tag is
+    correctly CREATED inside Widget.primary and Widget.alt carries a blank-node ref.
+  gqlmutation: |
+    mutation addWidget($input: [AddWidgetInput!]!) {
+      addWidget(input: $input) {
+        widget { widgetId }
+      }
+    }
+  gqlvariables: |
+    {
+      "input": [{
+        "widgetId": "W1",
+        "alt":     { "key": "t1" },
+        "primary": { "key": "t1", "value": "V1" }
+      }]
+    }
+  dgquery: |-
+    query {
+      Widget_1(func: eq(Widget.widgetId, "W1")) {
+        uid
+        dgraph.type
+      }
+      Tag_2(func: eq(Tag.key, "t1")) {
+        uid
+        dgraph.type
+      }
+    }
+  dgmutations:
+    - setjson: |
+        {
+          "Widget.alt": { "uid": "_:Tag_2" },
+          "Widget.primary": {
+            "Tag.key": "t1",
+            "Tag.value": "V1",
+            "dgraph.type": ["Tag"],
+            "uid": "_:Tag_2"
+          },
+          "Widget.widgetId": "W1",
+          "dgraph.type": ["Widget"],
+          "uid": "_:Widget_1"
+        }
+
+- name: isRefOnly forward-ref guard — ref-only nested input resolves to existing Tag node
+  explanation: |
+    Companion to the previous test.  When the Tag already exists in Dgraph the
+    ref-only {key:"t1"} input should correctly produce an asIDReference (uid(Tag_key_2))
+    rather than creating a duplicate node.
+  gqlmutation: |
+    mutation addWidget($input: [AddWidgetInput!]!) {
+      addWidget(input: $input) {
+        widget { widgetId }
+      }
+    }
+  gqlvariables: |
+    {
+      "input": [{
+        "widgetId": "W1",
+        "alt":     { "key": "t1" },
+        "primary": { "key": "t1", "value": "V1" }
+      }]
+    }
+  dgquery: |-
+    query {
+      Widget_1(func: eq(Widget.widgetId, "W1")) {
+        uid
+        dgraph.type
+      }
+      Tag_2(func: eq(Tag.key, "t1")) {
+        uid
+        dgraph.type
+      }
+    }
+  qnametouid: |
+    {
+      "Tag_2": "0x99"
+    }
+  dgmutations:
+    - setjson: |
+        {
+          "Widget.alt": { "uid": "0x99" },
+          "Widget.primary": { "uid": "0x99" },
+          "Widget.widgetId": "W1",
+          "dgraph.type": ["Widget"],
+          "uid": "_:Widget_1"
+        }
