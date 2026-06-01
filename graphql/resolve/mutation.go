@@ -331,10 +331,12 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	}()
 
 	emptyResult := func(err error) *Resolved {
+		// Return a proper empty payload (numUids=0, empty lists) rather than null.
+		// This is consistent with every other "nothing was mutated" path (upsert no-match,
+		// delete empty filter) and is unambiguous for clients: null means server error,
+		// {"numUids":0} means "processed but nothing was created/updated/deleted".
 		return &Resolved{
-			// all the standard mutations are nullable objects, so Data should pretty-much be
-			// {"mutAlias":null} everytime.
-			Data:  mutation.NullResponse(),
+			Data:  completeMutationResult(mutation, nil, 0),
 			Field: mutation,
 			// there is no completion down the pipeline, so error's path should be prepended with
 			// mutation's alias before returning the response.
