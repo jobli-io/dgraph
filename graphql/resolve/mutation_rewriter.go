@@ -2063,13 +2063,43 @@ func rewriteObject(
 
 			resolvedObj := xidMetadata.variableObjMap[xidVariables[0]]
 
+			// resolvedIsRefOnly is true when resolvedObj (the best definition seen during
+			// Phase-1 existence-query scanning) contains only @id (XID) fields.
+			// When resolvedIsRefOnly is false, resolvedObj has non-XID fields which means
+			// a fuller (more complete) definition was found — the current isRefOnly obj is
+			// a forward-reference to that fuller definition.
+			resolvedIsRefOnly := resolvedObj == nil
+			if !resolvedIsRefOnly {
+				resolvedIsRefOnly = true // assume until proven otherwise
+				for key := range resolvedObj {
+					if key == exclude || isDgraphInternalField(key) {
+						continue
+					}
+					fieldIsXid := false
+					for _, xid := range xids {
+						if xid.Name() == key {
+							fieldIsXid = true
+							break
+						}
+					}
+					if !fieldIsXid {
+						resolvedIsRefOnly = false
+						break
+					}
+				}
+			}
+
 			if resolvedObj != nil && !isRefOnly {
-				// Only substitute the cached full definition when the *current* obj is not a
-				// pure cross-reference. If isRefOnly is true (obj has only @id fields),
-				// this invocation is a forward reference regardless of what variableObjMap
-				// holds — fall through to the isRefOnly branch below.
+				// The current obj is not a pure reference (has non-XID fields).
+				// Use the cached best definition.
 				obj = resolvedObj
-			} else if isRefOnly {
+			} else if isRefOnly && !resolvedIsRefOnly {
+				// The current obj is ref-only AND variableObjMap holds a fuller definition
+				// (one with non-XID fields). This means the current obj is a forward-reference
+				// to a node that will be (or already was) fully created elsewhere in this
+				// mutation. Emit a blank-node forward ref so that patchBlankNodes can unify
+				// the references after the full definition is written.
+				//
 				// If the object carries a raw Dgraph "uid" field it was fetched from Dgraph
 				// by a server-side query (e.g. @transform reading before/after state). The
 				// "uid" key is a DQL-internal field that cannot appear in user GraphQL input,
@@ -2080,9 +2110,6 @@ func rewriteObject(
 					return asIDReference(ctx, rawUID, srcField, srcUID, varGen,
 						mutationType == UpdateWithRemove), upsertVar, nil
 				}
-				// Forward-reference to a sibling node being created later in this mutation.
-				// Emit a blank-node reference and let the full definition (encountered
-				// alphabetically later) create the actual node and register idExistence.
 				refUID := fmt.Sprintf("_:%s", variable)
 				// Record the forward ref so that when the node's @default later adds this
 				// XID value, the creation can unify its blank-node UID with ours.
@@ -2093,7 +2120,70 @@ func rewriteObject(
 				}
 				return newFragment(refObj), upsertVar, nil
 			} else {
-				xidMetadata.variableObjMap[xidVariables[0]] = obj
+				// Either:
+				// (a) isRefOnly && resolvedIsRefOnly — the variableObjMap holds only an
+				//     XID-only definition. We need to decide which sub-case applies:
+				//
+				//     (a1) resolvedObj has MORE XID fields than obj (e.g., Person1:
+				//          {id,name} vs {id} where both are @id fields): the resolvedObj is a
+				//          fuller XID-only definition. Substitute obj = resolvedObj and fall
+				//          through to normal creation.
+				//
+				//     (a2) A required (non-nullable) @id field is absent from obj and no
+				//          fuller XID-only definition exists: this obj is a partial reference
+				//          that may be unified via a different @id key through the Case 3
+				//          @default mechanism. Emit a forward ref.
+				//
+				//     (a3) All required @id fields are present: this IS the canonical
+				//          definition. Fall through to EnsureNonNulls — it will pass (create)
+				//          or fail (error) as appropriate.
+				//
+				// (b) !isRefOnly && resolvedObj == nil — first time seeing this XID; register
+				//     the full object and fall through to normal creation.
+				if resolvedIsRefOnly && resolvedObj != nil && len(resolvedObj) > len(obj) {
+					// Case (a1): resolvedObj is a fuller XID-only definition.
+					// Use it so the full set of @id fields is written.
+					obj = resolvedObj
+				} else if isRefOnly {
+					// If the object carries a raw Dgraph "uid" field it was fetched from
+					// Dgraph by a server-side query (e.g. a @transform expression forwarding
+					// before/after state from an @oldValue DQL result).  The "uid" key is a
+					// DQL-internal field that cannot appear in user-provided GraphQL input, so
+					// it is safe to treat as an implicit existence proof — link to the existing
+					// node directly regardless of whether any required @id field is absent.
+					if rawUID, ok := obj["uid"].(string); ok && rawUID != "" && !strings.HasPrefix(rawUID, "_:") {
+						idExistence[variable] = rawUID
+						return asIDReference(ctx, rawUID, srcField, srcUID, varGen,
+							mutationType == UpdateWithRemove), upsertVar, nil
+					}
+					// Check whether any required (non-nullable) @id field is absent from obj.
+					// If so, this is a partial reference that may be resolved via Case 3.
+					anyRequiredXidMissing := false
+					for _, xid := range xids {
+						if _, ok := obj[xid.Name()]; !ok && !xid.Type().Nullable() {
+							anyRequiredXidMissing = true
+							break
+						}
+					}
+					if anyRequiredXidMissing {
+						// Case (a2): required XID absent — emit a forward ref so that
+						// the Case 3 @default mechanism can unify this blank node with the
+						// fully-defined occurrence found via a different @id field.
+						refUID := fmt.Sprintf("_:%s", variable)
+						xidMetadata.forwardRefs[variable] = refUID
+						refObj := map[string]interface{}{"uid": refUID}
+						if srcField != nil {
+							addInverseLink(refObj, srcField, srcUID)
+						}
+						return newFragment(refObj), upsertVar, nil
+					}
+					// Case (a3): all required XIDs present — register and fall through to
+					// EnsureNonNulls which will determine create vs. error.
+					xidMetadata.variableObjMap[xidVariables[0]] = obj
+				} else {
+					// Case (b): not refOnly, first encounter — register the full object.
+					xidMetadata.variableObjMap[xidVariables[0]] = obj
+				}
 			}
 
 			if err := typ.EnsureNonNulls(obj, exclude); (err != nil) &&

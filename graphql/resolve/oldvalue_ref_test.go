@@ -200,10 +200,15 @@ func TestOldValueXIDRef_WithDgraphTypeAndUID_DirectCall(t *testing.T) {
 	require.Equal(t, "0x9", fragMap["uid"])
 }
 
-// TestOldValueXIDRef_RefOnlyWithoutUID_ForwardRef verifies the happy-path where
-// an XID object with NO uid field still correctly emits a blank-node forward
-// reference (existing behaviour, not regressed by the fix).
-func TestOldValueXIDRef_RefOnlyWithoutUID_ForwardRef(t *testing.T) {
+// TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls verifies that a ref-only
+// XID object with no uid field AND no required non-XID fields correctly errors
+// via EnsureNonNulls rather than silently emitting a blank-node forward-ref.
+//
+// Only objects that carry a raw Dgraph "uid" field (fetched by a @transform /
+// @oldValue DQL query) bypass EnsureNonNulls via asIDReference.  A plain
+// {code:"CA"} with no uid is treated as an incomplete node definition — the
+// required "name" field is missing, so the engine must return an error.
+func TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls(t *testing.T) {
 	stateTyp := getTestMutatedType(t,
 		`mutation { addState(input:[{code:"CA", name:"California", capital:"Sacramento"}]) { state { code } } }`,
 		"State")
@@ -212,7 +217,7 @@ func TestOldValueXIDRef_RefOnlyWithoutUID_ForwardRef(t *testing.T) {
 	xidMetadata := NewXidMetadata()
 	idExistence := map[string]string{}
 
-	// Pure @id reference — no uid field. Should emit a blank-node forward-ref.
+	// Pure @id reference — no uid field, no name (required non-XID field).
 	obj := map[string]interface{}{
 		"code": "CA",
 	}
@@ -231,13 +236,11 @@ func TestOldValueXIDRef_RefOnlyWithoutUID_ForwardRef(t *testing.T) {
 		nil,
 	)
 
-	// With no uid, and idExistence empty, forward-ref blank node is emitted.
-	require.Empty(t, errs)
-
-	fragMap, ok := frag.fragment.(map[string]interface{})
-	require.True(t, ok)
-
-	uidVal, _ := fragMap["uid"].(string)
-	require.True(t, len(uidVal) > 2 && uidVal[:2] == "_:",
-		"without uid field engine must emit blank-node forward-ref, got: %v", uidVal)
+	// {code:"CA"} with no uid falls through to EnsureNonNulls (case a3).
+	// name: String! is required but absent → error.
+	require.NotEmpty(t, errs,
+		"ref-only XID object without uid and missing required field must error via EnsureNonNulls")
+	require.Contains(t, errs[0].Error(), "name",
+		"error must mention the missing required field 'name'")
+	require.Nil(t, frag, "fragment must be nil when EnsureNonNulls fails")
 }
