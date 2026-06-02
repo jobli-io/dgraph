@@ -115,6 +115,14 @@ type xidMetadata struct {
 	// patchBlankNodes walks the final mutation fragments and applies these resolutions
 	// before the setJSON is marshaled.
 	blankNodeResolutions map[string]string
+	// pendingForwardRefs tracks every isRefOnly blank-node forward reference emitted
+	// during Rewrite. Keyed by xidVariables[0] (the canonical variable for the first
+	// non-nil @id field). Multiple occurrences of the same XID value accumulate into
+	// the same entry (refObjs slice) so ALL live maps in the parent fragments can be
+	// patched at once during post-processing.
+	// Entries are removed when a full (non-XID-only) definition for the same XID is
+	// encountered, at which point the full definition handles node creation.
+	pendingForwardRefs map[string]*pendingForwardRef
 }
 
 // A mutationBuilder can build a json mutation []byte from a mutationFragment
@@ -236,6 +244,20 @@ func NewDeleteRewriter() MutationRewriter {
 	return &deleteRewriter{}
 }
 
+// pendingForwardRef tracks an isRefOnly blank-node forward reference emitted
+// during Rewrite that has not yet been resolved by a full object definition.
+// refObjs accumulates every live map[string]interface{} that carries the forward
+// ref's blank-node uid so ALL parent fragments can be patched retroactively in
+// resolvePendingForwardRefs once the mutation payload is fully scanned.
+type pendingForwardRef struct {
+	refUID  string
+	refObjs []map[string]interface{} // one entry per occurrence of this XID as isRefOnly
+	obj     map[string]interface{}   // richest object seen (most @id fields)
+	typ     schema.Type
+	exclude string
+	xids    []schema.FieldDefinition
+}
+
 // NewXidMetadata returns a new empty *xidMetadata for storing the metadata.
 func NewXidMetadata() *xidMetadata {
 	return &xidMetadata{
@@ -245,6 +267,7 @@ func NewXidMetadata() *xidMetadata {
 		variableOldValueMap:  make(map[string]map[string]interface{}),
 		forwardRefs:          make(map[string]string),
 		blankNodeResolutions: make(map[string]string),
+		pendingForwardRefs:   make(map[string]*pendingForwardRef),
 	}
 }
 
@@ -257,7 +280,83 @@ func (xm *xidMetadata) resolveExactFwdRef(blankNode, realUID string) {
 	}
 }
 
+// resolvePendingForwardRefs processes all tracked isRefOnly forward references
+// where EnsureNonNulls failed immediately (required fields absent at the time
+// of the first encounter). For each entry:
+//   - Skip if variableObjMap holds a FULL (non-ref-only) definition — either a
+//     non-ref-only object (Case b) or an inline-creation that passed EnsureNonNulls
+//     (Case a3). In both cases the blank-node uid is the same, so DGraph merges.
+//   - Skip if blankNodeResolutions already resolved the blank-node (Case 3:
+//     an existing node was found via a different @id field).
+//   - Otherwise re-run EnsureNonNulls on the best obj captured (the richest obj
+//     seen across all occurrences of this XID):
+//   - Error → propagate (nil required field, absent non-@id required field).
+//   - OK → retroactively patch every refObj in refObjs with dgraph.type and
+//     all @id predicate values. Since each refObj is the live Go map embedded
+//     in a parent mutation fragment, the mutation JSON will include the complete
+//     node data when the fragment is marshaled — no separate fragment needed.
+func (xm *xidMetadata) resolvePendingForwardRefs() x.GqlErrorList {
+	if len(xm.pendingForwardRefs) == 0 {
+		return nil
+	}
+	var errs x.GqlErrorList
+	for xidVar0, pending := range xm.pendingForwardRefs {
+		// A full (non-ref-only) definition was registered later (Case b or a3) — it
+		// handles node creation via inline creation; skip post-processing for this XID.
+		// NOTE: existenceQueries also writes variableObjMap (even for ref-only entries),
+		// so we must verify the entry is genuinely full (has non-@id data) not just a
+		// ref-only entry written by existenceQueries.
+		if cached, resolved := xm.variableObjMap[xidVar0]; resolved {
+			// Determine if cached obj is full (has non-@id data).
+			cacheIsRefOnly := true
+			for key := range cached {
+				if isDgraphInternalField(key) {
+					continue
+				}
+				fieldIsXid := false
+				for _, xid := range pending.xids {
+					if xid.Name() == key {
+						fieldIsXid = true
+						break
+					}
+				}
+				if !fieldIsXid {
+					cacheIsRefOnly = false
+					break
+				}
+			}
+			if !cacheIsRefOnly {
+				// Full definition exists — it handles node creation.
+				continue
+			}
+			// cached is still ref-only (set by existenceQueries) — fall through to validate.
+		}
+		// Resolved via Case 3 @default mechanism (existing node found by different @id).
+		if _, resolved := xm.blankNodeResolutions[pending.refUID]; resolved {
+			continue
+		}
+		// Validate — catches nil required fields ({email:nil}) and absent required
+		// non-@id fields ({code:"CA"} on a type with name:String!).
+		if err := pending.typ.EnsureNonNulls(pending.obj, pending.exclude); err != nil {
+			errs = append(errs, schema.AsGQLErrors(err)...)
+			continue
+		}
+		// Validation passed: the isRefOnly object IS a complete self-contained node.
+		// Patch every parent fragment that embedded this blank-node reference.
+		for _, refObj := range pending.refObjs {
+			refObj["dgraph.type"] = []interface{}{pending.typ.Name()}
+			for _, xid := range pending.xids {
+				if v, ok := pending.obj[xid.Name()]; ok && v != nil {
+					refObj[xid.DgraphPredicate()] = v
+				}
+			}
+		}
+	}
+	return errs
+}
+
 // patchBlankNodes recursively walks a mutation fragment value and replaces any
+
 // {"uid": blankNode} where blankNode appears in xm.blankNodeResolutions with
 // the corresponding real UID. This is safe because the fragment is built from
 // Go maps/slices that are not shared with the GraphQL response.
@@ -720,6 +819,15 @@ func (arw *AddRewriter) Rewrite(
 		}
 	}
 
+	// Deferred validation: validate all tracked isRefOnly forward refs that were
+	// not subsequently resolved by a full definition or existence query.
+	if pendingErrs := xidMetadata.resolvePendingForwardRefs(); len(pendingErrs) > 0 {
+		for _, e := range pendingErrs {
+			retErrors = schema.AppendGQLErrs(retErrors,
+				schema.GQLWrapf(schema.AsGQLErrors(e), "failed to rewrite mutation payload"))
+		}
+	}
+
 	for _, frag := range arw.frags {
 		// Apply any blank-node resolutions accumulated during rewriting
 		// (Case 3: existing node found via one @id field after a forward-ref was
@@ -903,6 +1011,15 @@ func (urw *UpdateRewriter) Rewrite(
 			if fragment != nil {
 				urw.delFrag = fragment
 			}
+		}
+	}
+
+	// Deferred validation: validate all tracked isRefOnly forward refs that were
+	// not subsequently resolved by a full definition or existence query.
+	if pendingErrs := xidMetadata.resolvePendingForwardRefs(); len(pendingErrs) > 0 {
+		for _, e := range pendingErrs {
+			retErrors = schema.AppendGQLErrs(retErrors,
+				schema.GQLWrapf(schema.AsGQLErrors(e), "failed to rewrite mutation payload"))
 		}
 	}
 
@@ -2063,127 +2180,134 @@ func rewriteObject(
 
 			resolvedObj := xidMetadata.variableObjMap[xidVariables[0]]
 
-			// resolvedIsRefOnly is true when resolvedObj (the best definition seen during
-			// Phase-1 existence-query scanning) contains only @id (XID) fields.
-			// When resolvedIsRefOnly is false, resolvedObj has non-XID fields which means
-			// a fuller (more complete) definition was found — the current isRefOnly obj is
-			// a forward-reference to that fuller definition.
-			resolvedIsRefOnly := resolvedObj == nil
-			if !resolvedIsRefOnly {
-				resolvedIsRefOnly = true // assume until proven otherwise
-				for key := range resolvedObj {
-					if key == exclude || isDgraphInternalField(key) {
-						continue
-					}
-					fieldIsXid := false
-					for _, xid := range xids {
-						if xid.Name() == key {
-							fieldIsXid = true
-							break
-						}
-					}
-					if !fieldIsXid {
-						resolvedIsRefOnly = false
-						break
-					}
-				}
-			}
-
 			if resolvedObj != nil && !isRefOnly {
-				// The current obj is not a pure reference (has non-XID fields).
-				// Use the cached best definition.
+				// Current obj has non-XID data. Use the cached best definition and fall
+				// through to EnsureNonNulls and node creation.
 				obj = resolvedObj
-			} else if isRefOnly && !resolvedIsRefOnly {
-				// The current obj is ref-only AND variableObjMap holds a fuller definition
-				// (one with non-XID fields). This means the current obj is a forward-reference
-				// to a node that will be (or already was) fully created elsewhere in this
-				// mutation. Emit a blank-node forward ref so that patchBlankNodes can unify
-				// the references after the full definition is written.
-				//
-				// If the object carries a raw Dgraph "uid" field it was fetched from Dgraph
-				// by a server-side query (e.g. @transform reading before/after state). The
-				// "uid" key is a DQL-internal field that cannot appear in user GraphQL input,
-				// so it is safe to treat as an implicit existence proof — link to the
-				// existing node directly rather than creating a blank-node forward-ref.
+			} else if isRefOnly {
+				// Exception (a): raw Dgraph uid from server-side query.
 				if rawUID, ok := obj["uid"].(string); ok && rawUID != "" && !strings.HasPrefix(rawUID, "_:") {
 					idExistence[variable] = rawUID
 					return asIDReference(ctx, rawUID, srcField, srcUID, varGen,
 						mutationType == UpdateWithRemove), upsertVar, nil
 				}
-				refUID := fmt.Sprintf("_:%s", variable)
-				// Record the forward ref so that when the node's @default later adds this
-				// XID value, the creation can unify its blank-node UID with ours.
-				xidMetadata.forwardRefs[variable] = refUID
-				refObj := map[string]interface{}{"uid": refUID}
-				if srcField != nil {
-					addInverseLink(refObj, srcField, srcUID)
-				}
-				return newFragment(refObj), upsertVar, nil
-			} else {
-				// Either:
-				// (a) isRefOnly && resolvedIsRefOnly — the variableObjMap holds only an
-				//     XID-only definition. We need to decide which sub-case applies:
-				//
-				//     (a1) resolvedObj has MORE XID fields than obj (e.g., Person1:
-				//          {id,name} vs {id} where both are @id fields): the resolvedObj is a
-				//          fuller XID-only definition. Substitute obj = resolvedObj and fall
-				//          through to normal creation.
-				//
-				//     (a2) A required (non-nullable) @id field is absent from obj and no
-				//          fuller XID-only definition exists: this obj is a partial reference
-				//          that may be unified via a different @id key through the Case 3
-				//          @default mechanism. Emit a forward ref.
-				//
-				//     (a3) All required @id fields are present: this IS the canonical
-				//          definition. Fall through to EnsureNonNulls — it will pass (create)
-				//          or fail (error) as appropriate.
-				//
-				// (b) !isRefOnly && resolvedObj == nil — first time seeing this XID; register
-				//     the full object and fall through to normal creation.
-				if resolvedIsRefOnly && resolvedObj != nil && len(resolvedObj) > len(obj) {
-					// Case (a1): resolvedObj is a fuller XID-only definition.
-					// Use it so the full set of @id fields is written.
-					obj = resolvedObj
-				} else if isRefOnly {
-					// If the object carries a raw Dgraph "uid" field it was fetched from
-					// Dgraph by a server-side query (e.g. a @transform expression forwarding
-					// before/after state from an @oldValue DQL result).  The "uid" key is a
-					// DQL-internal field that cannot appear in user-provided GraphQL input, so
-					// it is safe to treat as an implicit existence proof — link to the existing
-					// node directly regardless of whether any required @id field is absent.
-					if rawUID, ok := obj["uid"].(string); ok && rawUID != "" && !strings.HasPrefix(rawUID, "_:") {
-						idExistence[variable] = rawUID
-						return asIDReference(ctx, rawUID, srcField, srcUID, varGen,
-							mutationType == UpdateWithRemove), upsertVar, nil
-					}
-					// Check whether any required (non-nullable) @id field is absent from obj.
-					// If so, this is a partial reference that may be resolved via Case 3.
-					anyRequiredXidMissing := false
-					for _, xid := range xids {
-						if _, ok := obj[xid.Name()]; !ok && !xid.Type().Nullable() {
-							anyRequiredXidMissing = true
+
+				// Exception (b): check whether resolvedObj is a full (non-XID-only) definition.
+				// If the variableObjMap already holds a full definition for this XID, the current
+				// ref-only occurrence is a forward reference to that full definition — just emit a
+				// bare forward ref (no tracking needed; the full definition handles creation).
+				resolvedIsRefOnly := resolvedObj == nil
+				if resolvedObj != nil {
+					resolvedIsRefOnly = true
+					for key := range resolvedObj {
+						if key == exclude || isDgraphInternalField(key) {
+							continue
+						}
+						fieldIsXid := false
+						for _, xid := range xids {
+							if xid.Name() == key {
+								fieldIsXid = true
+								break
+							}
+						}
+						if !fieldIsXid {
+							resolvedIsRefOnly = false
 							break
 						}
 					}
-					if anyRequiredXidMissing {
-						// Case (a2): required XID absent — emit a forward ref so that
-						// the Case 3 @default mechanism can unify this blank node with the
-						// fully-defined occurrence found via a different @id field.
-						refUID := fmt.Sprintf("_:%s", variable)
-						xidMetadata.forwardRefs[variable] = refUID
-						refObj := map[string]interface{}{"uid": refUID}
-						if srcField != nil {
-							addInverseLink(refObj, srcField, srcUID)
-						}
-						return newFragment(refObj), upsertVar, nil
-					}
-					// Case (a3): all required XIDs present — register and fall through to
-					// EnsureNonNulls which will determine create vs. error.
-					xidMetadata.variableObjMap[xidVariables[0]] = obj
-				} else {
-					// Case (b): not refOnly, first encounter — register the full object.
-					xidMetadata.variableObjMap[xidVariables[0]] = obj
 				}
+
+				if !resolvedIsRefOnly {
+					// Exception (b): full definition already in variableObjMap — no tracking
+					// needed; the full definition's fragment handles node creation.
+					canonicalVar := xidVariables[0]
+					refUID := fmt.Sprintf("_:%s", canonicalVar)
+					for _, xidVar := range xidVariables {
+						xidMetadata.forwardRefs[xidVar] = refUID
+					}
+					refObj := map[string]interface{}{"uid": refUID}
+					if srcField != nil {
+						addInverseLink(refObj, srcField, srcUID)
+					}
+					return newFragment(refObj), upsertVar, nil
+				}
+
+				// Case (a1): resolvedObj is a fuller XID-only definition (more @id fields)
+				// than the current obj. Use it so the full set of @id fields is considered.
+				if resolvedObj != nil && len(resolvedObj) > len(obj) {
+					obj = resolvedObj
+				}
+
+				// --- EnsureNonNulls-based inline-vs-defer decision ---
+				//
+				// Try EnsureNonNulls on the current obj immediately:
+				//   PASS → all required data is present → create the node inline (Case a3).
+				//   FAIL → required data is absent (e.g. required non-@id field missing, or
+				//           required @id field present but nil) → this obj may be a forward
+				//           reference to a fuller definition that appears LATER in the payload.
+				//           Defer EnsureNonNulls to post-processing (resolvePendingForwardRefs).
+				//
+				// IMPORTANT: we do NOT set idExistence here so that the fuller definition
+				// (when it comes) uses the SAME xid variable and thus the SAME blank-node uid,
+				// ensuring both forward refs and the inline creation merge in DGraph.
+				if err := typ.EnsureNonNulls(obj, exclude); err == nil {
+					// All required fields satisfied — create the node inline (Case a3 original).
+					// Register in variableObjMap so that:
+					//   a) post-processing skips any pending forward ref for this XID, and
+					//   b) subsequent occurrences of this XID find the cached obj and take
+					//      the asIDReference path (via the idExistence assignment below).
+					xidMetadata.variableObjMap[xidVariables[0]] = obj
+					// Fall through to EnsureNonNulls and node creation below.
+				} else {
+					// Required data absent — defer. Emit a blank-node forward reference and
+					// track in pendingForwardRefs. resolvePendingForwardRefs will:
+					//   • Skip the entry if a full definition came later (variableObjMap set).
+					//   • Return the EnsureNonNulls error if no full definition ever arrived.
+					canonicalVar := xidVariables[0]
+					refUID := fmt.Sprintf("_:%s", canonicalVar)
+					// Register in forwardRefs for ALL xidVariables so:
+					//   1. The @defaults uid-alignment loop can detect this forward ref.
+					//   2. The new uid-alignment loop (after myUID is set) can patch
+					//      blankNodeResolutions when a later inline creation uses the same XID.
+					for _, xidVar := range xidVariables {
+						xidMetadata.forwardRefs[xidVar] = refUID
+					}
+					// DO NOT set idExistence — the fuller definition must be able to use
+					// the same xid variable (e.g. "User_2") and thus the same blank-node uid
+					// ("_:User_2") so both refs and the creation merge in DGraph automatically.
+					refObj := map[string]interface{}{"uid": refUID}
+					if srcField != nil {
+						addInverseLink(refObj, srcField, srcUID)
+					}
+					// Accumulate in pendingForwardRefs. Multiple occurrences of the same
+					// ref-only XID each produce a separate refObj embedded in a different
+					// parent fragment — collect all so post-processing can patch them all.
+					if existing, ok := xidMetadata.pendingForwardRefs[canonicalVar]; ok {
+						existing.refObjs = append(existing.refObjs, refObj)
+						if len(obj) > len(existing.obj) {
+							existing.obj = obj
+						}
+					} else {
+						xidMetadata.pendingForwardRefs[canonicalVar] = &pendingForwardRef{
+							refUID:  refUID,
+							refObjs: []map[string]interface{}{refObj},
+							obj:     obj,
+							typ:     typ,
+							exclude: exclude,
+							xids:    xids,
+						}
+					}
+					return newFragment(refObj), upsertVar, nil
+				}
+			} else {
+				// Case (b): current obj is NOT ref-only — register as the canonical full
+				// definition and fall through to EnsureNonNulls + node creation.
+				// Any pending forward ref for this XID is now resolved: the full definition
+				// will be created with the same blank-node uid (because the xid variable
+				// "canonicalVar" is the same, and we didn't set idExistence in the tracking
+				// path). DGraph merges all blank-node refs with the same uid automatically.
+				xidMetadata.variableObjMap[xidVariables[0]] = obj
+				delete(xidMetadata.pendingForwardRefs, xidVariables[0])
 			}
 
 			if err := typ.EnsureNonNulls(obj, exclude); (err != nil) &&
@@ -2254,6 +2378,18 @@ func rewriteObject(
 
 	// myUID is used for referencing this node. It is set to _:variable
 	myUID := fmt.Sprintf("_:%s", variable)
+
+	// After myUID is determined, check all registered XID variables for previously
+	// emitted forward references and align them to myUID via blankNodeResolutions.
+	// This handles the multi-@id case where the tracking path emitted a forward ref
+	// with uid "_:xidVariables[0]" but the inline creation's last @id variable produces
+	// a different uid "_:variable" (e.g. Tag_2 vs Tag_3 for key vs value).
+	// patchBlankNodes will then replace the forward-ref uid with myUID in all fragments.
+	for _, xidVar := range registeredXidVariables {
+		if fwdUID, hasFwd := xidMetadata.forwardRefs[xidVar]; hasFwd && fwdUID != myUID {
+			xidMetadata.resolveExactFwdRef(fwdUID, myUID)
+		}
+	}
 
 	// Assign dgraph.types attribute.
 	dgraphTypes := []string{typ.DgraphName()}

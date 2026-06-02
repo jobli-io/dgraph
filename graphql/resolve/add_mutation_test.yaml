@@ -5753,7 +5753,7 @@
       }
     }
   dgmutations:
-    - setjson: |
+    - setjson: |-
         {
           "Widget.alt": { "uid": "_:Tag_2" },
           "Widget.primary": {

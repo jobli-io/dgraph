@@ -201,20 +201,21 @@ func TestOldValueXIDRef_WithDgraphTypeAndUID_DirectCall(t *testing.T) {
 }
 
 // TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls verifies that a ref-only
-// XID object with no uid field AND no required non-XID fields correctly errors
-// via EnsureNonNulls rather than silently emitting a blank-node forward-ref.
+// XID object with no uid field AND missing required non-XID fields correctly
+// surfaces an EnsureNonNulls error — but only in post-processing.
 //
-// Only objects that carry a raw Dgraph "uid" field (fetched by a @transform /
-// @oldValue DQL query) bypass EnsureNonNulls via asIDReference.  A plain
-// {code:"CA"} with no uid is treated as an incomplete node definition — the
-// required "name" field is missing, so the engine must return an error.
+// With the EnsureNonNulls-based inline-vs-defer approach:
+//   - rewriteObject defers validation and emits a forward ref (non-nil fragment,
+//     no immediate error) — the full definition may yet arrive later.
+//   - resolvePendingForwardRefs re-runs EnsureNonNulls on the captured obj and
+//     propagates the error when no full definition was found.
 func TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls(t *testing.T) {
 	stateTyp := getTestMutatedType(t,
 		`mutation { addState(input:[{code:"CA", name:"California", capital:"Sacramento"}]) { state { code } } }`,
 		"State")
 
 	varGen := NewVariableGenerator()
-	xidMetadata := NewXidMetadata()
+	xm := NewXidMetadata()
 	idExistence := map[string]string{}
 
 	// Pure @id reference — no uid field, no name (required non-XID field).
@@ -229,18 +230,28 @@ func TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls(t *testing.T) {
 		"",
 		varGen,
 		obj,
-		xidMetadata,
+		xm,
 		idExistence,
 		Add,
 		nil,
 		nil,
 	)
 
-	// {code:"CA"} with no uid falls through to EnsureNonNulls (case a3).
-	// name: String! is required but absent → error.
-	require.NotEmpty(t, errs,
-		"ref-only XID object without uid and missing required field must error via EnsureNonNulls")
-	require.Contains(t, errs[0].Error(), "name",
+	// With the deferred approach, rewriteObject emits a forward ref (non-nil)
+	// rather than immediately erroring — it cannot know if a full definition arrives later.
+	require.Empty(t, errs,
+		"rewriteObject must not immediately error; deferred validation handles it")
+	require.NotNil(t, frag, "rewriteObject must return a forward ref fragment")
+
+	// Post-processing: resolvePendingForwardRefs detects no full definition came
+	// and re-runs EnsureNonNulls, which fails on missing required field 'name'.
+	pendingErrs := xm.resolvePendingForwardRefs()
+	require.NotEmpty(t, pendingErrs,
+		"resolvePendingForwardRefs must surface the EnsureNonNulls error for 'name'")
+	var errStr string
+	for _, e := range pendingErrs {
+		errStr += e.Error()
+	}
+	require.Contains(t, errStr, "name",
 		"error must mention the missing required field 'name'")
-	require.Nil(t, frag, "fragment must be nil when EnsureNonNulls fails")
 }
