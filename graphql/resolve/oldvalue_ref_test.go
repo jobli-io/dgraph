@@ -255,3 +255,89 @@ func TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls(t *testing.T) {
 	require.Contains(t, errStr, "name",
 		"error must mention the missing required field 'name'")
 }
+
+// TestIsRefOnly_MultipleParentsSameIncompleteXID_SingleError verifies that when
+// N parent objects all carry a ref-only reference to the same incomplete XID
+// (EnsureNonNulls fails), resolvePendingForwardRefs surfaces EXACTLY ONE error
+// rather than one per parent occurrence.
+//
+// This guards against a regression where each tracked refObj would independently
+// trigger a duplicate error message.
+func TestIsRefOnly_MultipleParentsSameIncompleteXID_SingleError(t *testing.T) {
+	stateTyp := getTestMutatedType(t,
+		`mutation { addState(input:[{code:"CA", name:"California", capital:"Sacramento"}]) { state { code } } }`,
+		"State")
+
+	varGen := NewVariableGenerator()
+	xm := NewXidMetadata()
+	idExistence := map[string]string{}
+	obj := map[string]interface{}{"code": "CA"}
+
+	// Simulate two parents both embedding the same ref-only State {code:"CA"}.
+	frag1, _, errs1 := rewriteObject(
+		context.Background(), stateTyp, nil, "", varGen, obj, xm, idExistence, Add, nil, nil)
+	require.Empty(t, errs1, "first ref-only must not immediately error")
+	require.NotNil(t, frag1, "first ref-only must return a forward-ref fragment")
+
+	frag2, _, errs2 := rewriteObject(
+		context.Background(), stateTyp, nil, "", varGen, obj, xm, idExistence, Add, nil, nil)
+	require.Empty(t, errs2, "second ref-only must not immediately error")
+	require.NotNil(t, frag2, "second ref-only must return a forward-ref fragment")
+
+	// Both refs must share the same blank-node uid (same xid variable).
+	// fragment is interface{} — type-assert to map before indexing.
+	uid1 := frag1.fragment.(map[string]interface{})["uid"]
+	uid2 := frag2.fragment.(map[string]interface{})["uid"]
+	require.Equal(t, uid1, uid2,
+		"both ref-only fragments must share the same blank-node uid")
+
+	// Post-processing: exactly one error, not two.
+	pendingErrs := xm.resolvePendingForwardRefs()
+	require.Len(t, pendingErrs, 1,
+		"exactly one error expected — one per XID, not one per parent occurrence")
+	require.Contains(t, pendingErrs[0].Error(), "name",
+		"error must mention the missing required field 'name'")
+}
+
+// TestIsRefOnly_FullDefAfterRefOnly_ClearsPending verifies that when a ref-only
+// occurrence is followed by a full definition for the same XID (typical "forward
+// reference resolved by later sibling" scenario):
+//
+//  1. rewriteObject does NOT error on the ref-only (defers validation).
+//  2. rewriteObject processes the full definition (Case b).
+//  3. resolvePendingForwardRefs returns NO errors (Case b deleted the pending entry).
+//  4. Both fragments share the same blank-node uid so Dgraph merges them.
+func TestIsRefOnly_FullDefAfterRefOnly_ClearsPending(t *testing.T) {
+	stateTyp := getTestMutatedType(t,
+		`mutation { addState(input:[{code:"CA", name:"California", capital:"Sacramento"}]) { state { code } } }`,
+		"State")
+
+	varGen := NewVariableGenerator()
+	xm := NewXidMetadata()
+	idExistence := map[string]string{}
+
+	// Step 1: ref-only occurrence — EnsureNonNulls fails → deferred.
+	refOnly := map[string]interface{}{"code": "CA"}
+	fragRef, _, errsRef := rewriteObject(
+		context.Background(), stateTyp, nil, "", varGen, refOnly, xm, idExistence, Add, nil, nil)
+	require.Empty(t, errsRef, "ref-only must not immediately error")
+	require.NotNil(t, fragRef)
+
+	// Step 2: full definition — isRefOnly=false → Case b clears pendingForwardRefs.
+	fullDef := map[string]interface{}{"code": "CA", "name": "California"}
+	fragFull, _, errsFull := rewriteObject(
+		context.Background(), stateTyp, nil, "", varGen, fullDef, xm, idExistence, Add, nil, nil)
+	require.Empty(t, errsFull, "full definition must not error")
+	require.NotNil(t, fragFull)
+
+	// Step 3: post-processing must be silent — pending entry was cleared by Case b.
+	pendingErrs := xm.resolvePendingForwardRefs()
+	require.Empty(t, pendingErrs,
+		"resolvePendingForwardRefs must return no errors when full def arrived")
+
+	// Step 4: both fragments reference the same blank-node uid so Dgraph merges them.
+	uidRef := fragRef.fragment.(map[string]interface{})["uid"]
+	uidFull := fragFull.fragment.(map[string]interface{})["uid"]
+	require.Equal(t, uidRef, uidFull,
+		"ref-only forward-ref uid must match full-def inline creation uid")
+}

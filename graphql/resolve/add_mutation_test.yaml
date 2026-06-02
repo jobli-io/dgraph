@@ -5942,3 +5942,176 @@
 # requires the sId @default existence query to run against live Dgraph. Because the unit
 # test framework has no Dgraph, the @defaults loop errors out when it tries to execute
 # the existence check. This case is covered by integration tests (addWorkspace).
+
+- name: >-
+    isRefOnly — multiple parents share same incomplete ref-only XID → single post-processing error
+  explanation: |
+    Widget1 and Widget2 both carry ALL-ref-only references to the same Tag (key="t1").
+    No full Tag definition exists anywhere in the payload so Phase-1 never updates
+    variableObjMap to a full definition.
+
+    Phase-2 behaviour:
+      Widget1.alt   {key:"t1"} → resolvedIsRefOnly=true → EnsureNonNulls fails (value absent)
+                                 → deferred, refObj1 tracked under pendingForwardRefs["Tag_2"]
+      Widget1.primary {key:"t1"} → same → refObj2 appended
+      Widget2.alt   {key:"t1"} → same → refObj3 appended
+      Widget2.primary {key:"t1"} → same → refObj4 appended
+
+    resolvePendingForwardRefs must surface EXACTLY ONE error (not one per parent), with
+    a message that names the missing field "value".
+  gqlmutation: |
+    mutation addWidget($input: [AddWidgetInput!]!) {
+      addWidget(input: $input) {
+        widget { widgetId }
+      }
+    }
+  gqlvariables: |
+    {
+      "input": [
+        { "widgetId": "W1", "alt": { "key": "t1" }, "primary": { "key": "t1" } },
+        { "widgetId": "W2", "alt": { "key": "t1" }, "primary": { "key": "t1" } }
+      ]
+    }
+  dgquery: |-
+    query {
+      Widget_1(func: eq(Widget.widgetId, "W1")) {
+        uid
+        dgraph.type
+      }
+      Tag_2(func: eq(Tag.key, "t1")) {
+        uid
+        dgraph.type
+      }
+      Widget_3(func: eq(Widget.widgetId, "W2")) {
+        uid
+        dgraph.type
+      }
+    }
+  error2:
+    {
+      "message":
+        "failed to rewrite mutation payload because type Tag requires a value for field value, but
+        no value present",
+    }
+
+- name: >-
+    isRefOnly — ref-only refs in input 1 resolve to same blank node as full-def in input 2
+  explanation: |
+    Widget1 has ONLY ref-only references to Tag (key="t1") in both alt and primary.
+    Widget2 provides the full Tag definition {key:"t1", value:"V1"} in primary.
+
+    Phase-1 (existenceQueries) processes both inputs; when it encounters Widget2.primary it
+    updates variableObjMap["Tag_2"] to the full definition {key:"t1", value:"V1"}.
+
+    Phase-2:
+      Widget1.alt   {key:"t1"} → resolvedObj is full def → resolvedIsRefOnly=false
+                                 → Exception (b): bare forward ref {uid:"_:Tag_2"}
+      Widget1.primary {key:"t1"} → same Exception (b) → {uid:"_:Tag_2"}
+      Widget2.primary {key:"t1", value:"V1"} → isRefOnly=false → Case (b): inline creation
+                                 uid="_:Tag_2" (same xid variable, same blank-node uid)
+
+    Both widgets correctly reference the same blank-node Tag.
+  gqlmutation: |
+    mutation addWidget($input: [AddWidgetInput!]!) {
+      addWidget(input: $input) {
+        widget { widgetId }
+      }
+    }
+  gqlvariables: |
+    {
+      "input": [
+        { "widgetId": "W1", "alt": { "key": "t1" }, "primary": { "key": "t1" } },
+        { "widgetId": "W2", "primary": { "key": "t1", "value": "V1" } }
+      ]
+    }
+  dgquery: |-
+    query {
+      Widget_1(func: eq(Widget.widgetId, "W1")) {
+        uid
+        dgraph.type
+      }
+      Tag_2(func: eq(Tag.key, "t1")) {
+        uid
+        dgraph.type
+      }
+      Widget_3(func: eq(Widget.widgetId, "W2")) {
+        uid
+        dgraph.type
+      }
+    }
+  dgmutations:
+    - setjson: |-
+        {
+          "Widget.alt": { "uid": "_:Tag_2" },
+          "Widget.primary": { "uid": "_:Tag_2" },
+          "Widget.widgetId": "W1",
+          "dgraph.type": ["Widget"],
+          "uid": "_:Widget_1"
+        }
+    - setjson: |-
+        {
+          "Widget.primary": {
+            "Tag.key": "t1",
+            "Tag.value": "V1",
+            "dgraph.type": ["Tag"],
+            "uid": "_:Tag_2"
+          },
+          "Widget.widgetId": "W2",
+          "dgraph.type": ["Widget"],
+          "uid": "_:Widget_3"
+        }
+
+- name: >-
+    isRefOnly — ref-only refs in input 1 resolve to existing Tag when existence query hits
+  explanation: |
+    Same layout as the previous test but Tag already exists in Dgraph (qnametouid has Tag_2).
+    Widget1.alt and Widget1.primary are ref-only {key:"t1"}; Widget2.primary has the full def.
+    Because idExistence["Tag_2"]="0x55" is set from the existence query result, Widget1's
+    ref-only refs take the typUidExist=true → asIDReference path and Widget2.primary also
+    resolves to the real uid.
+  gqlmutation: |
+    mutation addWidget($input: [AddWidgetInput!]!) {
+      addWidget(input: $input) {
+        widget { widgetId }
+      }
+    }
+  gqlvariables: |
+    {
+      "input": [
+        { "widgetId": "W1", "alt": { "key": "t1" }, "primary": { "key": "t1" } },
+        { "widgetId": "W2", "primary": { "key": "t1", "value": "V1" } }
+      ]
+    }
+  dgquery: |-
+    query {
+      Widget_1(func: eq(Widget.widgetId, "W1")) {
+        uid
+        dgraph.type
+      }
+      Tag_2(func: eq(Tag.key, "t1")) {
+        uid
+        dgraph.type
+      }
+      Widget_3(func: eq(Widget.widgetId, "W2")) {
+        uid
+        dgraph.type
+      }
+    }
+  qnametouid: |
+    { "Tag_2": "0x55" }
+  dgmutations:
+    - setjson: |-
+        {
+          "Widget.alt": { "uid": "0x55" },
+          "Widget.primary": { "uid": "0x55" },
+          "Widget.widgetId": "W1",
+          "dgraph.type": ["Widget"],
+          "uid": "_:Widget_1"
+        }
+    - setjson: |-
+        {
+          "Widget.primary": { "uid": "0x55" },
+          "Widget.widgetId": "W2",
+          "dgraph.type": ["Widget"],
+          "uid": "_:Widget_3"
+        }
