@@ -3693,6 +3693,60 @@ invalid_schemas:
         },
       ]
 
+  - name: "@generate mutation arg rejects unknown field 'query'"
+    input: |
+      type Foo @generate(mutation: { query: false, add: false, update: false, delete: false }) {
+        id: ID!
+        name: String!
+      }
+    errlist:
+      [
+        {
+          "message":
+            'Type Foo; unknown field "query" inside mutation argument of @generate directive. Valid
+            fields are: add, update, delete.',
+          "locations": [{ "line": 1, "column": 32 }],
+        },
+      ]
+
+  - name: "@generate query arg rejects unknown field 'add'"
+    input: |
+      type Bar @generate(query: { add: false, get: false }) {
+        id: ID!
+        name: String!
+      }
+    errlist:
+      [
+        {
+          "message":
+            'Type Bar; unknown field "add" inside query argument of @generate directive. Valid
+            fields are: get, query, password, aggregate.',
+          "locations": [{ "line": 1, "column": 29 }],
+        },
+      ]
+
+  - name: "@generate mutation arg rejects multiple unknown fields"
+    input: |
+      type Baz @generate(mutation: { query: false, subscription: false }) {
+        id: ID!
+        name: String!
+      }
+    errlist:
+      [
+        {
+          "message":
+            'Type Baz; unknown field "query" inside mutation argument of @generate directive. Valid
+            fields are: add, update, delete.',
+          "locations": [{ "line": 1, "column": 32 }],
+        },
+        {
+          "message":
+            'Type Baz; unknown field "subscription" inside mutation argument of @generate directive.
+            Valid fields are: add, update, delete.',
+          "locations": [{ "line": 1, "column": 46 }],
+        },
+      ]
+
 valid_schemas:
   - name: "@postValidate with valid callLambda expr is accepted"
     input: |

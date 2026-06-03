@@ -2123,6 +2123,24 @@ func generateDirectiveValidation(schema *ast.Schema, typ *ast.Definition) gqlerr
 					"only be true/false, found: `%s",
 				typ.Name, aggregateField.Raw))
 		}
+
+		// Reject unknown fields — they are silently ignored by the parser, which can
+		// mislead users (e.g. `query: { mutation: false }` has no effect).
+		knownQueryFields := map[string]bool{
+			generateGetField:       true,
+			generateQueryField:     true,
+			generatePasswordField:  true,
+			generateAggregateField: true,
+		}
+		for _, child := range queryArg.Value.Children {
+			if !knownQueryFields[child.Name] {
+				errs = append(errs, gqlerror.ErrorPosf(
+					child.Position,
+					"Type %s; unknown field %q inside query argument of @generate directive. "+
+						"Valid fields are: get, query, password, aggregate.",
+					typ.Name, child.Name))
+			}
+		}
 	}
 
 	mutationArg := dir.Arguments.ForName(generateMutationArg)
@@ -2159,6 +2177,23 @@ func generateDirectiveValidation(schema *ast.Schema, typ *ast.Definition) gqlerr
 				"Type %s; delete field inside mutation argument of @generate directive can "+
 					"only be true/false, found: `%s",
 				typ.Name, deleteField.Raw))
+		}
+
+		// Reject unknown fields — they are silently ignored by the parser, which can
+		// mislead users (e.g. `mutation: { query: false }` has no effect).
+		knownMutationFields := map[string]bool{
+			generateAddField:    true,
+			generateUpdateField: true,
+			generateDeleteField: true,
+		}
+		for _, child := range mutationArg.Value.Children {
+			if !knownMutationFields[child.Name] {
+				errs = append(errs, gqlerror.ErrorPosf(
+					child.Position,
+					"Type %s; unknown field %q inside mutation argument of @generate directive. "+
+						"Valid fields are: add, update, delete.",
+					typ.Name, child.Name))
+			}
 		}
 	}
 
