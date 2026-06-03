@@ -919,15 +919,11 @@ func resubstituteRuleNode(rn *RuleNode, edge cascadeAuthIncomingEdge,
 		child, err := parseRuleNodeFromTemplate(rn.RuleTemplate, authorityVars, childVars,
 			childTypeName, edge.parentTypeName, sch)
 		if err != nil {
-			// Re-substitution failed (e.g. authority vars empty/unavailable, enum
-			// validation rejects the substituted value, or child lacks required keys).
-			// If the authority rule was pre-compiled by resolveTemplateLeaves (Rule != nil),
-			// fall back to it silently — it already has the authority's own @authVariables
-			// baked in and is correct for a parent-style cascade.
-			// Only propagate the error when there is no pre-compiled fallback.
-			if rn.Rule != nil {
-				return rn, nil
-			}
+			// Re-substitution failed. Propagate the error always — silently falling
+			// back to the authority's pre-compiled rule (rn.Rule) would cause a
+			// concrete type with e.g. value:[] in @authVariables to inherit the
+			// authority's own permissions rather than enforcing deny-all, which is
+			// a silent security misconfiguration. Schema load must fail instead.
 			return nil, err
 		}
 		if child != nil {
@@ -1299,13 +1295,32 @@ func substitutAuthVars(ruleStr string, vars map[string][]string) string {
 		return ruleStr
 	}
 	for key, vals := range vars {
-		// Skip empty placeholder values — they indicate the key is declared on
-		// an interface (e.g. IAMResource.QRY_PERMISSIONS = []) as a stub for
-		// implementing types to override. Substituting an empty list would
-		// produce {in: []} which yields an invalid DQL "eq(pred)" with no args.
-		if len(vals) == 0 {
-			continue
-		}
+		// Empty value arrays are substituted as [] rather than skipped.
+		//
+		// History: this code previously skipped empty arrays on the assumption
+		// that they were interface stub placeholders and that substituting []
+		// would produce an invalid DQL "eq(pred)" with no args. Both of those
+		// assumptions are now addressed:
+		//
+		//   1. buildFilter (query_rewriter.go) now converts `in: []` to a
+		//      uid(0x0) filter (always-false, deny-all) instead of the broken
+		//      eq(pred) form, so substituting [] is safe at runtime.
+		//
+		//   2. Skipping the substitution left {{KEY}} unresolved in the rule
+		//      string. The unresolvedAuthVarKeys check in parseRuleNodeFromTemplate
+		//      would have caught this — but resubstituteRuleNode was silently
+		//      falling back to the authority type's pre-compiled rule instead
+		//      of propagating the error. This meant a concrete type with
+		//      value:[] in @authVariables would silently inherit the authority's
+		//      own permissions rather than enforcing deny-all — a silent security
+		//      misconfiguration.
+		//
+		// Interface stub pattern: an interface that declares value:[] as a
+		// placeholder for implementing types will now substitute [] into its own
+		// rules. The second resolveTemplateLeaves pass in authRules() re-resolves
+		// concrete types with their own non-empty vars, overriding the [] from
+		// the interface. For types that genuinely have value:[], the rule
+		// compiles with `in: []` which at query time produces uid(0x0) = deny-all.
 		placeholder := "{{" + key + "}}"
 		ruleStr = strings.ReplaceAll(ruleStr, placeholder, "["+strings.Join(vals, ", ")+"]")
 	}
