@@ -1295,32 +1295,34 @@ func substitutAuthVars(ruleStr string, vars map[string][]string) string {
 		return ruleStr
 	}
 	for key, vals := range vars {
-		// Empty value arrays are substituted as [] rather than skipped.
+		// Skip empty placeholder values — they indicate the key is declared on
+		// an interface (e.g. IAMResource.QRY_PERMISSIONS = []) as a stub for
+		// implementing types to override.
 		//
-		// History: this code previously skipped empty arrays on the assumption
-		// that they were interface stub placeholders and that substituting []
-		// would produce an invalid DQL "eq(pred)" with no args. Both of those
-		// assumptions are now addressed:
+		// This skip is load-bearing for the two-stage interface stub override:
 		//
-		//   1. buildFilter (query_rewriter.go) now converts `in: []` to a
-		//      uid(0x0) filter (always-false, deny-all) instead of the broken
-		//      eq(pred) form, so substituting [] is safe at runtime.
+		//   Stage 1 — resolveTemplateLeaves with the interface's OWN vars:
+		//     Skipping [] leaves {{KEY}} unresolved in the rule string.
+		//     gqlValidateRule then fails on the {{}} syntax (invalid GraphQL),
+		//     keeping rn.Rule = nil.
 		//
-		//   2. Skipping the substitution left {{KEY}} unresolved in the rule
-		//      string. The unresolvedAuthVarKeys check in parseRuleNodeFromTemplate
-		//      would have caught this — but resubstituteRuleNode was silently
-		//      falling back to the authority type's pre-compiled rule instead
-		//      of propagating the error. This meant a concrete type with
-		//      value:[] in @authVariables would silently inherit the authority's
-		//      own permissions rather than enforcing deny-all — a silent security
-		//      misconfiguration.
+		//   Stage 2 — second resolveTemplateLeaves pass with the concrete type's vars:
+		//     rn.Rule == nil triggers re-substitution with the concrete type's
+		//     non-empty values, e.g. QRY_PERMISSIONS = [_ALL, _GROUP, ...].
+		//     gqlValidateRule succeeds and sets rn.Rule.
 		//
-		// Interface stub pattern: an interface that declares value:[] as a
-		// placeholder for implementing types will now substitute [] into its own
-		// rules. The second resolveTemplateLeaves pass in authRules() re-resolves
-		// concrete types with their own non-empty vars, overriding the [] from
-		// the interface. For types that genuinely have value:[], the rule
-		// compiles with `in: []` which at query time produces uid(0x0) = deny-all.
+		// If we substituted [] here instead of skipping, Stage 1 would compile
+		// "in: []" as valid GraphQL (setting rn.Rule), Stage 2 would see
+		// rn.Rule != nil and skip, and the concrete type's values would never
+		// override the empty list — producing uid(0x0) (deny-all) for every
+		// user, even those with valid permissions.
+		//
+		// Cascade auth resubstitution (resubstituteRuleNode) is a separate code
+		// path that propagates errors when a concrete type genuinely has
+		// value:[] — that is handled correctly without touching this function.
+		if len(vals) == 0 {
+			continue
+		}
 		placeholder := "{{" + key + "}}"
 		ruleStr = strings.ReplaceAll(ruleStr, placeholder, "["+strings.Join(vals, ", ")+"]")
 	}
