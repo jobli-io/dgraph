@@ -2878,9 +2878,27 @@ func buildFilter(typ schema.Type,
 				// in takes List of Scalars as argument, for eg:
 				// code : { in: ["abc", "def", "ghi"] } -> eq(State.code,"abc","def","ghi")
 				case "in":
-					// No need to check for List types as this would pass GraphQL validation
-					// if val was not list
+					// in: ["abc", "def"] -> eq(State.code, "abc", "def")
+					//
+					// DQL's eq() requires at least one value argument (in addition to the
+					// predicate). An empty list — in: [] — would produce eq(pred) which Dgraph
+					// rejects with "eq expects atleast 1 argument".
+					//
+					// Semantically, in: [] means "value must be a member of ∅", which is always
+					// false.  We short-circuit to uid(0x0): UID 0 never exists in Dgraph, so
+					// the filter matches nothing. This correctly produces deny-all behaviour for
+					// both hardcoded in: [] and @authVariables substitutions that resolve to an
+					// empty permissions array.
 					vals := val.([]interface{})
+					if len(vals) == 0 {
+						ands = append(ands, &dql.FilterTree{
+							Func: &dql.Function{
+								Name: "uid",
+								UID:  []uint64{0},
+							},
+						})
+						continue
+					}
 					fn = "eq"
 
 					for _, v := range vals {

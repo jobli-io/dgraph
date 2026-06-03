@@ -130,6 +130,42 @@
       }
     }
 
+# Regression: in: [] (empty list) must not produce "eq expects atleast 1 argument".
+# Semantically in: [] means "value ∈ ∅" = always false → uid(0x0) (never-matching filter).
+- name: in filter with empty list produces never-matching uid(0x0) filter
+  gqlquery: |
+    query {
+      queryState(filter: {code: {in: []}}) {
+        code
+        name
+      }
+    }
+  dgquery: |-
+    query {
+      queryState(func: type(State)) @filter(uid(0x0)) {
+        State.code : State.code
+        State.name : State.name
+        dgraph.uid : uid
+      }
+    }
+
+- name: in filter with empty enum list produces never-matching uid(0x0) filter
+  gqlquery: |
+    query{
+      queryVerification(filter: {status: {in: []}})  {
+        name
+        status
+      }
+    }
+  dgquery: |-
+    query {
+      queryVerification(func: type(Verification)) @filter(uid(0x0)) {
+        Verification.name : Verification.name
+        Verification.status : Verification.status
+        dgraph.uid : uid
+      }
+    }
+
 - name: eq filter on field which is a List of enum type
   gqlquery: |
     query{
