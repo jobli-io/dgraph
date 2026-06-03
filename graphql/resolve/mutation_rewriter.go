@@ -2655,12 +2655,35 @@ func rewriteObject(
 
 				if shouldReRun {
 					// Clear blank-node registrations made by this run's XID loop so the
-					// re-run processes the updated obj (which now includes the @default XID)
-					// from scratch and takes the correct asIDReference path.
+					// re-run starts fresh and takes the correct asIDReference path.
+					//
+					// Pass a snapshot that contains only user-provided values plus any
+					// @id (XID) fields computed by the @default loop.  We must exclude
+					// non-@id defaults (e.g. disabled=false) because they make
+					// isRefOnly=false in the re-run, which causes EnsureNonNulls to fire
+					// on an incomplete object and fail.
+					//
+					// We include XID-valued defaults so the re-run's XID loop can look up
+					// the computed values in idExistence and take the asIDReference path.
+					xidSet := make(map[string]bool, len(xids))
+					for _, xf := range xids {
+						xidSet[xf.Name()] = true
+					}
+					rerunObj := make(map[string]interface{}, len(rawInputSnapshot))
+					// Copy original user-supplied fields.
+					for k, v := range rawInputSnapshot {
+						rerunObj[k] = v
+					}
+					// Promote @id-computed defaults so the XID lookup succeeds in the re-run.
+					for k, v := range obj {
+						if xidSet[k] {
+							rerunObj[k] = v
+						}
+					}
 					for _, xidVar := range registeredXidVariables {
 						delete(idExistence, xidVar)
 					}
-					return rewriteObject(ctx, typ, srcField, srcUID, varGen, obj, xidMetadata, idExistence,
+					return rewriteObject(ctx, typ, srcField, srcUID, varGen, rerunObj, xidMetadata, idExistence,
 						mutationType, authVariables, objDel)
 				}
 			}

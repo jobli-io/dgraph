@@ -656,3 +656,45 @@ type GroupNode {
     member: PersonNode
     lead: PersonNode
 }
+
+"""
+AccountNode / AccountHolderNode — shouldReRun default-contamination regression types.
+
+AccountNode has THREE fields of interest:
+  email  — user-provided @id (XID)
+  handle — @default-computed @id derived from email; triggers shouldReRun when the
+            computed handle value already exists in Dgraph (idExistence hit)
+  active — non-XID @default(add: {value: "true"})
+
+Without the fix, the @default loop populates obj["active"]=true BEFORE shouldReRun
+fires.  The re-run then receives obj={email, handle, active}, making isRefOnly=false,
+which causes EnsureNonNulls to fire on an incomplete forward-reference object and
+return an incorrect error.
+
+With the fix, the re-run receives only {email, handle} (user-provided + XID defaults)
+so isRefOnly=true → typUidExist=true → asIDReference.  No spurious error.
+
+AccountHolderNode has two edges to AccountNode:
+  creator  — first alphabetically; provides {email:"a@b.com"} ref-only
+  primary  — provides {email:"a@b.com", handle:"@a"} (full xid spec)
+
+shouldReRun scenario:
+  Phase-1: AccountNode_1 (creator's email) hits idExistence with "0xDEF"
+  Phase-2 creator edge: email → AccountNode_1 → typUidExist=true → Case A
+    @default loop computes handle="@a@b.com" → shouldReRun=true
+    Bug: rewriteObject(obj={email,active=true}) → isRefOnly=false → error
+    Fix: rewriteObject(rerunObj={email,handle="@a@b.com"}) → isRefOnly=false… wait,
+         handle is also an @id so isRefOnly checks only @id fields → both email+handle
+         are @id → isRefOnly=true → typUidExist=true → asIDReference ✓
+"""
+type AccountNode {
+    email:  String! @id
+    handle: String! @id @default(add: {expr: "\"@\" + input.email"})
+    active: Boolean! @default(add: {value: "true"})
+}
+
+type AccountHolderNode {
+    holderId: String! @id
+    creator:  AccountNode
+    primary:  AccountNode
+}

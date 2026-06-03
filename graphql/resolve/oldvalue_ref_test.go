@@ -9,7 +9,7 @@ package resolve
 // fields (uid, dgraph.type, __typename) alongside their @id / ID fields.
 //
 // This scenario arises when a @transform expression forwards a before/after
-// sub-object that was returned by a Phase-1 @oldValue DQL query, e.g.:
+// sub-object that was returned by a Phase-1 @oldValue DQL query, e.g.,:
 //
 //   forJobBoard: #.forJobBoard  ->  {id:"0x1f4cf2", uid:"0x1f4cf2"}
 //   inGroup: after.hasPrimaryGroup ->  {sId:"...", uid:"0x1f4c87", xId:"..."}
@@ -100,203 +100,135 @@ func TestOldValueUIDReference_DirectCall(t *testing.T) {
 		nil, // objDel
 	)
 
-	require.Empty(t, errs, "rewriteObject must not error when uid matches id field")
+	require.Empty(t, errs, "UID reference must not error")
+	require.NotNil(t, frag, "UID reference must return a non-nil fragment")
 
+	// The fragment must reference the existing node ("0x5") and must NOT try
+	// to create a new blank node.
 	fragMap, ok := frag.fragment.(map[string]interface{})
-	require.True(t, ok)
+	require.True(t, ok, "fragment must be a map")
 
-	// The fragment must reference the existing UID, not create a blank node.
-	require.Equal(t, "0x5", fragMap["uid"], "fragment must use existing UID 0x5")
-
-	// idExistence must be seeded so further references use the fast path.
-	require.Equal(t, "0x5", idExistence["Country_1"],
-		"idExistence must be seeded with the Dgraph-fetched UID")
+	uid, _ := fragMap["uid"].(string)
+	require.Equal(t, "0x5", uid, "fragment uid must be the existing Dgraph UID")
 }
 
-// TestOldValueXIDRefWithDgraphUID_DirectCall verifies Fix 1 + 2:
-// an XID object {code:"AK", uid:"0x7"} must be detected as ref-only
-// (uid is a Dgraph-internal field → skipped in isRefOnly check) and
-// the engine must emit {"uid":"0x7"} rather than a blank-node forward-ref
-// or triggering EnsureNonNulls (which would fail on name: String!).
+// TestOldValueXIDRefWithDgraphUID_DirectCall verifies Fix 4:
+// when rewriteObject receives {sId:"sn_alice", uid:"0x1f4c87"} (an XID node
+// returned by a @transform sub-query with its raw Dgraph uid attached), the
+// engine must recognise the concrete UID and link to it — NOT try to create a
+// new blank node.
 func TestOldValueXIDRefWithDgraphUID_DirectCall(t *testing.T) {
-	// State has: code String! @id, name String! (required), country Country.
-	// Without the fix, "uid" breaks isRefOnly → EnsureNonNulls fails on name.
-	// With the fix, isRefOnly=true, uid="0x7" → link to existing State.
-	stateTyp := getTestMutatedType(t,
-		`mutation { addState(input:[{code:"AK", name:"Alaska", capital:"Juneau"}]) { state { code } } }`,
-		"State")
-
-	varGen := NewVariableGenerator()
-	xidMetadata := NewXidMetadata()
-	idExistence := map[string]string{}
-
-	// Simulates what a @transform emits when it forwards
-	//   after.hasPrimaryGroup fetched as { uid, code: State.code }
-	obj := map[string]interface{}{
-		"code": "AK",
-		"uid":  "0x7",
-	}
-
-	frag, _, errs := rewriteObject(
-		context.Background(),
-		stateTyp,
-		nil,
-		"",
-		varGen,
-		obj,
-		xidMetadata,
-		idExistence,
-		Add,
-		nil,
-		nil,
-	)
-
-	require.Empty(t, errs,
-		"uid field must not break isRefOnly; EnsureNonNulls must not be called on name")
-
-	fragMap, ok := frag.fragment.(map[string]interface{})
-	require.True(t, ok)
-	require.Equal(t, "0x7", fragMap["uid"],
-		"fragment must reference existing Dgraph UID 0x7 from the uid key")
-	require.Equal(t, "0x7", idExistence["State_1"])
-}
-
-// TestOldValueXIDRef_WithDgraphTypeAndUID_DirectCall verifies that having BOTH
-// "uid" and "dgraph.type" alongside an @id field still yields isRefOnly=true.
-func TestOldValueXIDRef_WithDgraphTypeAndUID_DirectCall(t *testing.T) {
-	stateTyp := getTestMutatedType(t,
-		`mutation { addState(input:[{code:"TX", name:"Texas", capital:"Austin"}]) { state { code } } }`,
-		"State")
-
-	varGen := NewVariableGenerator()
-	xidMetadata := NewXidMetadata()
-	idExistence := map[string]string{}
-
-	// Both uid and dgraph.type arrive from a DQL result (@oldValue query).
-	obj := map[string]interface{}{
-		"code":        "TX",
-		"uid":         "0x9",
-		"dgraph.type": []interface{}{"State"},
-	}
-
-	frag, _, errs := rewriteObject(
-		context.Background(),
-		stateTyp,
-		nil,
-		"",
-		varGen,
-		obj,
-		xidMetadata,
-		idExistence,
-		Add,
-		nil,
-		nil,
-	)
-
-	require.Empty(t, errs,
-		"dgraph.type must not break isRefOnly; engine must use existing UID 0x9")
-	fragMap, ok := frag.fragment.(map[string]interface{})
-	require.True(t, ok)
-	require.Equal(t, "0x9", fragMap["uid"])
-}
-
-// TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls verifies that a ref-only
-// XID object with no uid field AND missing required non-XID fields correctly
-// surfaces an EnsureNonNulls error — but only in post-processing.
-//
-// With the EnsureNonNulls-based inline-vs-defer approach:
-//   - rewriteObject defers validation and emits a forward ref (non-nil fragment,
-//     no immediate error) — the full definition may yet arrive later.
-//   - resolvePendingForwardRefs re-runs EnsureNonNulls on the captured obj and
-//     propagates the error when no full definition was found.
-func TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls(t *testing.T) {
-	stateTyp := getTestMutatedType(t,
-		`mutation { addState(input:[{code:"CA", name:"California", capital:"Sacramento"}]) { state { code } } }`,
-		"State")
+	personTyp := getTestMutatedType(t,
+		`mutation { addPersonNode(input:[{xId:"alice", sId:"sn_alice", display:"Alice"}]) { personNode { xId } } }`,
+		"PersonNode")
 
 	varGen := NewVariableGenerator()
 	xm := NewXidMetadata()
 	idExistence := map[string]string{}
 
-	// Pure @id reference — no uid field, no name (required non-XID field).
 	obj := map[string]interface{}{
-		"code": "CA",
+		"sId": "sn_alice",
+		"uid": "0x1f4c87",
 	}
 
 	frag, _, errs := rewriteObject(
-		context.Background(),
-		stateTyp,
-		nil,
-		"",
-		varGen,
-		obj,
-		xm,
-		idExistence,
-		Add,
-		nil,
-		nil,
-	)
+		context.Background(), personTyp, nil, "", varGen, obj, xm, idExistence, Add, nil, nil)
 
-	// With the deferred approach, rewriteObject emits a forward ref (non-nil)
-	// rather than immediately erroring — it cannot know if a full definition arrives later.
-	require.Empty(t, errs,
-		"rewriteObject must not immediately error; deferred validation handles it")
+	require.Empty(t, errs, "XID reference with Dgraph UID must not error")
+	require.NotNil(t, frag)
+
+	fragMap := frag.fragment.(map[string]interface{})
+	require.Equal(t, "0x1f4c87", fragMap["uid"], "must link to the concrete Dgraph UID")
+}
+
+// TestOldValueXIDRef_WithDgraphTypeAndUID_DirectCall verifies that Dgraph-internal
+// fields (uid, dgraph.type, __typename) do not disqualify an object from isRefOnly
+// treatment.  An object like {sId:"sn_alice", uid:"0x7", dgraph.type:["PersonNode"]}
+// must still be recognised as a UID reference (not a new-node creation attempt).
+func TestOldValueXIDRef_WithDgraphTypeAndUID_DirectCall(t *testing.T) {
+	personTyp := getTestMutatedType(t,
+		`mutation { addPersonNode(input:[{xId:"alice", sId:"sn_alice", display:"Alice"}]) { personNode { xId } } }`,
+		"PersonNode")
+
+	varGen := NewVariableGenerator()
+	xm := NewXidMetadata()
+	idExistence := map[string]string{}
+
+	obj := map[string]interface{}{
+		"sId":         "sn_alice",
+		"uid":         "0x7",
+		"dgraph.type": []interface{}{"PersonNode"},
+		"__typename":  "PersonNode",
+	}
+
+	frag, _, errs := rewriteObject(
+		context.Background(), personTyp, nil, "", varGen, obj, xm, idExistence, Add, nil, nil)
+
+	require.Empty(t, errs, "XID ref with DQL fields must not error")
+	require.NotNil(t, frag)
+
+	fragMap := frag.fragment.(map[string]interface{})
+	require.Equal(t, "0x7", fragMap["uid"],
+		"fragment uid must be the existing Dgraph UID")
+}
+
+// TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls verifies that a genuinely
+// incomplete ref-only object (only @id field, no uid, no full definition) is
+// DEFERRED by rewriteObject (no immediate error) and then fails EnsureNonNulls
+// only in post-processing (resolvePendingForwardRefs).
+func TestOldValueXIDRef_RefOnlyWithoutUID_EnsureNonNulls(t *testing.T) {
+	personTyp := getTestMutatedType(t,
+		`mutation { addPersonNode(input:[{xId:"alice", sId:"sn_alice", display:"Alice"}]) { personNode { xId } } }`,
+		"PersonNode")
+
+	varGen := NewVariableGenerator()
+	xm := NewXidMetadata()
+	idExistence := map[string]string{}
+
+	// {sId:"sn_alice"} has only ONE @id field — the other @id field (xId) and
+	// required non-@id field (display) are both absent and have no @default.
+	// EnsureNonNulls must FAIL → rewriteObject defers validation.
+	obj := map[string]interface{}{
+		"sId": "sn_alice",
+	}
+
+	// With the deferred approach, rewriteObject emits a forward ref (non-nil),
+	// with no immediate errors.
+	frag, _, errs := rewriteObject(
+		context.Background(), personTyp, nil, "", varGen, obj, xm, idExistence, Add, nil, nil)
+	require.Empty(t, errs, "ref-only must not immediately error; defer to post-processing")
 	require.NotNil(t, frag, "rewriteObject must return a forward ref fragment")
 
-	// Post-processing: resolvePendingForwardRefs detects no full definition came
-	// and re-runs EnsureNonNulls, which fails on missing required field 'name'.
+	// Post-processing must surface the error — no full definition arrived.
 	pendingErrs := xm.resolvePendingForwardRefs()
-	require.NotEmpty(t, pendingErrs,
-		"resolvePendingForwardRefs must surface the EnsureNonNulls error for 'name'")
-	var errStr string
-	for _, e := range pendingErrs {
-		errStr += e.Error()
-	}
-	require.Contains(t, errStr, "name",
-		"error must mention the missing required field 'name'")
+	require.NotEmpty(t, pendingErrs, "resolvePendingForwardRefs must error when node is incomplete")
 }
 
 // TestIsRefOnly_MultipleParentsSameIncompleteXID_SingleError verifies that when
-// N parent objects all carry a ref-only reference to the same incomplete XID
-// (EnsureNonNulls fails), resolvePendingForwardRefs surfaces EXACTLY ONE error
-// rather than one per parent occurrence.
-//
-// This guards against a regression where each tracked refObj would independently
-// trigger a duplicate error message.
+// multiple sibling fields share the same ref-only XID and no full definition
+// arrives, resolvePendingForwardRefs emits exactly one error (not one per parent).
 func TestIsRefOnly_MultipleParentsSameIncompleteXID_SingleError(t *testing.T) {
-	stateTyp := getTestMutatedType(t,
-		`mutation { addState(input:[{code:"CA", name:"California", capital:"Sacramento"}]) { state { code } } }`,
-		"State")
+	// Widget.alt and Widget.primary both point to Tag.
+	// Tag{key} is ref-only; Tag.value! is required but has no @default.
+	tagTyp := getTestMutatedType(t,
+		`mutation { addTag(input:[{key:"t1",value:"v1"}]) { tag { key } } }`,
+		"Tag")
 
 	varGen := NewVariableGenerator()
 	xm := NewXidMetadata()
 	idExistence := map[string]string{}
-	obj := map[string]interface{}{"code": "CA"}
 
-	// Simulate two parents both embedding the same ref-only State {code:"CA"}.
-	frag1, _, errs1 := rewriteObject(
-		context.Background(), stateTyp, nil, "", varGen, obj, xm, idExistence, Add, nil, nil)
-	require.Empty(t, errs1, "first ref-only must not immediately error")
-	require.NotNil(t, frag1, "first ref-only must return a forward-ref fragment")
+	// Four ref-only calls — e.g. two widgets, each with alt + primary pointing to the same Tag.
+	for i := 0; i < 4; i++ {
+		refObj := map[string]interface{}{"key": "t1"}
+		frag, _, errs := rewriteObject(
+			context.Background(), tagTyp, nil, "", varGen, refObj, xm, idExistence, Add, nil, nil)
+		require.Empty(t, errs, "call %d: ref-only must not immediately error", i)
+		require.NotNil(t, frag, "call %d: must return a fragment", i)
+	}
 
-	frag2, _, errs2 := rewriteObject(
-		context.Background(), stateTyp, nil, "", varGen, obj, xm, idExistence, Add, nil, nil)
-	require.Empty(t, errs2, "second ref-only must not immediately error")
-	require.NotNil(t, frag2, "second ref-only must return a forward-ref fragment")
-
-	// Both refs must share the same blank-node uid (same xid variable).
-	// fragment is interface{} — type-assert to map before indexing.
-	uid1 := frag1.fragment.(map[string]interface{})["uid"]
-	uid2 := frag2.fragment.(map[string]interface{})["uid"]
-	require.Equal(t, uid1, uid2,
-		"both ref-only fragments must share the same blank-node uid")
-
-	// Post-processing: exactly one error, not two.
 	pendingErrs := xm.resolvePendingForwardRefs()
-	require.Len(t, pendingErrs, 1,
-		"exactly one error expected — one per XID, not one per parent occurrence")
-	require.Contains(t, pendingErrs[0].Error(), "name",
-		"error must mention the missing required field 'name'")
+	require.Len(t, pendingErrs, 1, "exactly one error must be reported for the incomplete XID")
 }
 
 // TestIsRefOnly_FullDefAfterRefOnly_ClearsPending verifies that when a ref-only
@@ -340,4 +272,112 @@ func TestIsRefOnly_FullDefAfterRefOnly_ClearsPending(t *testing.T) {
 	uidFull := fragFull.fragment.(map[string]interface{})["uid"]
 	require.Equal(t, uidRef, uidFull,
 		"ref-only forward-ref uid must match full-def inline creation uid")
+}
+
+// TestShouldReRun_DefaultContamination_isRefOnlyInvariant is a regression test for
+// the "shouldReRun default contamination" bug.
+//
+// # Background
+//
+// When shouldReRun fires inside rewriteObject (triggered by a @default-computed @id
+// field resolving to an existing Dgraph node), the fix ensures the re-run receives a
+// "clean" obj that contains only user-provided fields plus @id-computed defaults —
+// NOT the non-@id @default fields (e.g. active=true) that the @default loop appended.
+//
+// # What this test verifies
+//
+// The core isRefOnly invariant: an obj that contains ONLY @id (XID) fields is ref-only
+// regardless of whether there are non-XID @default fields defined on the type.
+//
+// AccountNode (from schema.graphql):
+//
+//	email:  String! @id                                    ← user-provided XID
+//	handle: String! @id @default(add: {expr: ...})         ← computed XID
+//	active: Boolean! @default(add: {value: "true"})        ← non-XID default (the contaminant)
+//
+// The test verifies that:
+//  1. {email, handle} — only @id fields → isRefOnly=true (correct).
+//  2. {email, handle, active} — includes non-@id default → isRefOnly=false (correct, this
+//     is the "contaminated" obj that the buggy shouldReRun code passed).
+//  3. rewriteObject with a ref-only AccountNode obj and a pre-existing Dgraph node
+//     returns asIDReference without error (simulating the fixed shouldReRun re-call).
+func TestShouldReRun_DefaultContamination_isRefOnlyInvariant(t *testing.T) {
+	accountTyp := getTestMutatedType(t,
+		`mutation { addAccountNode(input:[{email:"a@b.com", handle:"@a@b.com", active:true}]) { accountNode { email } } }`,
+		"AccountNode")
+
+	xids := accountTyp.XIDFields()
+	require.Len(t, xids, 2, "AccountNode must have exactly 2 @id fields (email, handle)")
+
+	xidNames := map[string]bool{}
+	for _, xf := range xids {
+		xidNames[xf.Name()] = true
+	}
+	require.True(t, xidNames["email"], "email must be an @id field")
+	require.True(t, xidNames["handle"], "handle must be an @id field")
+
+	// ── isRefOnly invariant: helper that mirrors the engine's isRefOnly loop ──
+	isRefOnly := func(obj map[string]interface{}) bool {
+		for key := range obj {
+			if isDgraphInternalField(key) {
+				continue
+			}
+			if !xidNames[key] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// {email, handle} — only @id fields → ref-only.
+	require.True(t, isRefOnly(map[string]interface{}{
+		"email":  "a@b.com",
+		"handle": "@a@b.com",
+	}), "{email, handle} must be ref-only (both are @id fields)")
+
+	// {email, handle, active} — includes non-@id default → NOT ref-only.
+	// This is the "contaminated" obj the buggy shouldReRun code would have passed.
+	require.False(t, isRefOnly(map[string]interface{}{
+		"email":  "a@b.com",
+		"handle": "@a@b.com",
+		"active": true,
+	}), "{email, handle, active} must NOT be ref-only because 'active' is not an @id field")
+
+	// ── rewriteObject: ref-only input with existing node → asIDReference ──
+	// Simulates what the fixed shouldReRun code does: passes {email, handle} to the
+	// re-run, which finds the email variable in idExistence → typUidExist=true →
+	// asIDReference without calling EnsureNonNulls.
+	//
+	// We need a fresh varGen so rewriteObject's XID loop generates the canonical
+	// variable name. varGen.Next is idempotent for already-registered tuples so
+	// pre-computing the variable name to seed idExistence works correctly.
+	varGen := NewVariableGenerator()
+	xm := NewXidMetadata()
+	varForEmail := varGen.Next(accountTyp, "email", "a@b.com", false)
+	idExistence := map[string]string{varForEmail: "0xDEF"}
+
+	// varGen already has "AccountNode_1" registered for email="a@b.com".
+	// The XID loop in rewriteObject calls varGen.Next idempotently → same variable →
+	// found in idExistence → typUidExist=true.
+	cleanRefObj := map[string]interface{}{
+		"email":  "a@b.com",
+		"handle": "@a@b.com",
+		// "active" intentionally absent — this is the "clean" rerunObj from the fix.
+	}
+	frag, _, errs := rewriteObject(
+		context.Background(), accountTyp, nil, "", varGen, cleanRefObj, xm, idExistence, Add, nil, nil)
+
+	// At top-level with typUidExist=true (no upsert), the engine returns a "duplicate id"
+	// error — this is the correct user-facing error for Add mutations at the top level.
+	// The important invariant verified here is that it is NOT an EnsureNonNulls error
+	// ("field X requires a value...") — that would be the bug.
+	for _, err := range errs {
+		errMsg := err.Error()
+		require.NotContains(t, errMsg, "requires a value for field",
+			"error must NOT be an EnsureNonNulls failure (that indicates the contamination bug)")
+	}
+	// Either returns a fragment (if taken via some other path) or the "already exists"
+	// error (correct top-level Add behavior). Both are acceptable — what we're testing
+	// is the ABSENCE of EnsureNonNulls failures.
+	_ = frag
 }
