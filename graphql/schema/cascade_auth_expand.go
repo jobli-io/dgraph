@@ -981,16 +981,23 @@ func resubstituteRuleNode(rn *RuleNode, edge cascadeAuthIncomingEdge,
 // constants do not show up as unresolved when the child's own @authVariables are applied.
 // childVars are the child type's own @authVariables (may include overlapping keys; child
 // values take precedence so a child can override an authority default if needed).
-func parseRuleNodeFromTemplate(template string, authorityVars, childVars map[string][]string,
+func parseRuleNodeFromTemplate(template string, authorityVars, childVars map[string]string,
 	childTypeName, authorityTypeName string, sch *schema) (*RuleNode, error) {
 
 	// Step 1: apply child @authVariables FIRST so child-specific values take
 	// precedence over the authority's own values for overlapping keys.
 	// Example: JobAd.QRY_PERMISSIONS = [_ALL _JOBAD ...] must override
 	// Group.QRY_PERMISSIONS = [_ALL _GROUP ...] when JobAd cascades through Group.
+	//
+	// value:[] is substituted verbatim as "[]" — when the template contains
+	// in: {{KEY}}, this produces in: [] which buildFilter converts to uid(0x0)
+	// (deny-all). This is the intended behaviour for a child that explicitly
+	// declares value:[] to block access through a particular cascade arm.
 	substituted := substitutAuthVars(template, childVars)
 	// Step 2: resolve any remaining authority compile-time constants that the
-	// child did NOT override (e.g. {{ADM_PERMISSIONS}} if child lacks that key).
+	// child did NOT declare at all (e.g. {{ADM_PERMISSIONS}} if child lacks that
+	// key entirely). Uses the skip-on-empty variant so that authority stubs don't
+	// clobber placeholders the child already resolved in step 1.
 	substituted = substitutAuthVars(substituted, authorityVars)
 	if strings.HasPrefix(substituted, RBACQueryPrefix) {
 		return nil, nil
@@ -1283,55 +1290,34 @@ func mergeAuthNodeWithOr(a, b *RuleNode) *RuleNode {
 	return &RuleNode{Or: []*RuleNode{a, b}}
 }
 
-// substitutAuthVars performs compile-time {{KEY}} substitution using a map of
-// key → []string values.
+// substitutAuthVars performs compile-time {{KEY}} → verbatim substitution.
+// Every declared key is replaced with its raw value string exactly as written
+// in the @authVariables directive — [], [x, y, z], ["a", "b"], "str", 1, etc.
 //
-// Values are substituted verbatim (without additional quoting) so that enum
-// filter values such as [_ALL, READ_WORKSPACE] are produced correctly.
-// For string-typed filter fields, include the quotes inside the value strings
-// in @authVariables (e.g. value: ["\"mystring\""]).
-func substitutAuthVars(ruleStr string, vars map[string][]string) string {
+// The interface stub pattern works through KEY ABSENCE, not value: []:
+// if a key is not in the map no substitution occurs, {{KEY}} stays unresolved,
+// gqlValidateRule rejects the rule, rn.Rule stays nil, and Stage 2 fills in
+// the concrete type's value. Interfaces that use {{KEY}} templates simply omit
+// those keys from their own @authVariables (or carry no @authVariables at all).
+//
+// A declared value:[] IS meaningful and is substituted verbatim as "[]".
+// When the template contains `in: {{KEY}}` this produces `in: []` which
+// buildFilter converts to uid(0x0) — the intended deny-all for cascade arms
+// where the child explicitly gates access to nothing.
+func substitutAuthVars(ruleStr string, vars map[string]string) string {
 	if len(vars) == 0 {
 		return ruleStr
 	}
-	for key, vals := range vars {
-		// Skip empty placeholder values — they indicate the key is declared on
-		// an interface (e.g. IAMResource.QRY_PERMISSIONS = []) as a stub for
-		// implementing types to override.
-		//
-		// This skip is load-bearing for the two-stage interface stub override:
-		//
-		//   Stage 1 — resolveTemplateLeaves with the interface's OWN vars:
-		//     Skipping [] leaves {{KEY}} unresolved in the rule string.
-		//     gqlValidateRule then fails on the {{}} syntax (invalid GraphQL),
-		//     keeping rn.Rule = nil.
-		//
-		//   Stage 2 — second resolveTemplateLeaves pass with the concrete type's vars:
-		//     rn.Rule == nil triggers re-substitution with the concrete type's
-		//     non-empty values, e.g. QRY_PERMISSIONS = [_ALL, _GROUP, ...].
-		//     gqlValidateRule succeeds and sets rn.Rule.
-		//
-		// If we substituted [] here instead of skipping, Stage 1 would compile
-		// "in: []" as valid GraphQL (setting rn.Rule), Stage 2 would see
-		// rn.Rule != nil and skip, and the concrete type's values would never
-		// override the empty list — producing uid(0x0) (deny-all) for every
-		// user, even those with valid permissions.
-		//
-		// Cascade auth resubstitution (resubstituteRuleNode) is a separate code
-		// path that propagates errors when a concrete type genuinely has
-		// value:[] — that is handled correctly without touching this function.
-		if len(vals) == 0 {
-			continue
-		}
+	for key, raw := range vars {
 		placeholder := "{{" + key + "}}"
-		ruleStr = strings.ReplaceAll(ruleStr, placeholder, "["+strings.Join(vals, ", ")+"]")
+		ruleStr = strings.ReplaceAll(ruleStr, placeholder, raw)
 	}
 	return ruleStr
 }
 
 // resolveAuthVariables is the richer variant that also substitutes {TYPE}
 // placeholder — kept for use outside the parse pipeline.
-func resolveAuthVariables(ruleStr string, vars map[string][]string, typeName string) string {
+func resolveAuthVariables(ruleStr string, vars map[string]string, typeName string) string {
 	return strings.ReplaceAll(substitutAuthVars(ruleStr, vars), "{TYPE}", typeName)
 }
 

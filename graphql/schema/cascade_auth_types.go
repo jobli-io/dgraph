@@ -101,16 +101,29 @@ func (t *astType) CascadeAuthPolicyConfig() CascadeAuthPolicyConfig {
 }
 
 // AuthVariables returns the @authVariables substitution map for this type,
-// keyed by variable name with a list of allowed values.
+// keyed by variable name. The map value is the VERBATIM text of the value
+// argument as written in the schema directive:
 //
-// The @authVariables directive has shape:
+//	value: []          → "[]"
+//	value: [x, y, z]  → "[x, y, z]"
+//	value: ["a", "b"] → `["a", "b"]`
+//	value: "str"       → `"str"`
+//	value: 1           → "1"
+//
+// All values are stored and substituted as-is. There is no special handling
+// of []: it produces "[]" in the rule string which, inside an `in:` filter,
+// buildFilter converts to uid(0x0) — the intended deny-all for cascade arms.
+//
+// The interface stub pattern works through KEY ABSENCE: an interface that uses
+// {{KEY}} templates simply omits those keys from its @authVariables (or carries
+// no @authVariables at all). Absent keys are not in the map, so no substitution
+// occurs, {{KEY}} stays unresolved, and Stage 2 fills in the concrete type's value.
+//
+// The @authVariables directive shape:
 //
 //	@authVariables(vars: [AuthVariable!]!)
 //	input AuthVariable { key: String! value: [String!]! }
-//
-// So the directive has one argument named "vars" whose value is a list of
-// AuthVariable input objects, each with "key" and "value" children.
-func (t *astType) AuthVariables() map[string][]string {
+func (t *astType) AuthVariables() map[string]string {
 	def := t.inSchema.schema.Types[t.typ.Name()]
 	if def == nil {
 		return nil
@@ -123,15 +136,13 @@ func (t *astType) AuthVariables() map[string][]string {
 	if varsArg == nil || varsArg.Value == nil {
 		return nil
 	}
-	result := make(map[string][]string)
+	result := make(map[string]string)
 	// varsArg.Value is a list literal; each child is an AuthVariable object literal.
 	for _, item := range varsArg.Value.Children {
 		if item.Value == nil {
 			continue
 		}
-		// item.Value is an object literal with fields "key" and "value".
-		var key string
-		var vals []string
+		var key, raw string
 		for _, field := range item.Value.Children {
 			switch field.Name {
 			case "key":
@@ -140,17 +151,14 @@ func (t *astType) AuthVariables() map[string][]string {
 				}
 			case "value":
 				if field.Value != nil {
-					// field.Value is a list literal of strings.
-					for _, v := range field.Value.Children {
-						if v.Value != nil {
-							vals = append(vals, v.Value.Raw)
-						}
-					}
+					// Use the AST's String() to get the verbatim representation
+					// exactly as written: [], [x, y, z], ["a", "b"], "str", 1, etc.
+					raw = field.Value.String()
 				}
 			}
 		}
 		if key != "" {
-			result[key] = vals
+			result[key] = raw
 		}
 	}
 	if len(result) == 0 {

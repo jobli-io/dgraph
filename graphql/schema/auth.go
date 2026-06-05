@@ -500,7 +500,7 @@ func snapshotTypeAuthMap(src map[string]*TypeAuth) map[string]*TypeAuth {
 // resolved in that type's own auth rules before cascade expansion reads them.
 //
 // If substitution or re-parsing fails, the original leaf is returned unchanged.
-func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string][]string, typeName string) *RuleNode {
+func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string]string, typeName string) *RuleNode {
 	if rn == nil || len(vars) == 0 {
 		return rn
 	}
