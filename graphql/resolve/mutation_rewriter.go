@@ -2311,9 +2311,18 @@ func rewriteObject(
 			}
 
 			if err := typ.EnsureNonNulls(obj, exclude); (err != nil) &&
-				!(mutationType == UpdateWithSet && atTopLevel) {
-				// This object does not contain non nullable XID, returns error.
-				// We ignore the error for update mutation top level fields.
+				!(mutationType == UpdateWithSet) {
+				// Skip EnsureNonNulls for update mutations at any level:
+				//   1. Forward-ref with full node in the same transaction — the
+				//      isRefOnly early-return above already handles this case before
+				//      we reach this point, so it's a no-op here.
+				//   2. Previously-created node not in the same transaction — the
+				//      existence query should have populated idExistence and returned
+				//      via asIDReference above; if it didn't (e.g. auth filtered it
+				//      out), the XID/blank-node path is still safe: Dgraph will match
+				//      or upsert the node via the XID predicate.
+				// We keep the check for Add mutations: a new node must satisfy all
+				// non-null constraints at write time.
 				retErrors = append(retErrors, err)
 				return nil, upsertVar, retErrors
 			}
