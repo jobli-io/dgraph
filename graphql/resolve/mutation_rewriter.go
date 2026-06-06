@@ -2202,9 +2202,16 @@ func rewriteObject(
 			resolvedObj := xidMetadata.variableObjMap[xidVariables[0]]
 
 			if resolvedObj != nil && !isRefOnly {
-				// Current obj has non-XID data. Use the cached best definition and fall
-				// through to EnsureNonNulls and node creation.
-				obj = resolvedObj
+				// Current obj has non-XID data (full definition). Use the cached obj
+				// only if it is itself a full (non-ref-only) definition.
+				//
+				// A ref-only obj can end up in variableObjMap when it passes EnsureNonNulls
+				// because all required non-XID fields carry @default(add:...). If the cached
+				// obj is that ref-only stub, the CURRENT obj is the richer full definition
+				// and must not be replaced.
+				if !computeIsRefOnly(resolvedObj, xids, exclude, nil) {
+					obj = resolvedObj
+				}
 			} else if isRefOnly {
 				// Exception (a): raw Dgraph uid from server-side query.
 				if rawUID, ok := obj["uid"].(string); ok && rawUID != "" && !strings.HasPrefix(rawUID, "_:") {
