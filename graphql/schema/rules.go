@@ -1616,6 +1616,38 @@ func defaultDirectiveValidation(sch *ast.Schema,
 			}
 		}
 	}
+	// Validate refOnly in add: and update: sub-args.
+	//   Gap 1 — refOnly only makes sense on relation (object) fields. Scalar and
+	//            enum fields never go through isRefOnly computation, so the flag
+	//            would be silently ignored.
+	//   Gap 2 — refOnly without a paired value or expr in the same DgraphDefault
+	//            sub-object is a no-op: getDefaultValue returns (nil, nil, nil)
+	//            when found==false and never propagates the refOnly override.
+	for _, opName := range []string{"add", "update"} {
+		opArg := dir.Arguments.ForName(opName)
+		if opArg == nil {
+			continue
+		}
+		ro := opArg.Value.Children.ForName("refOnly")
+		if ro == nil {
+			continue
+		}
+		fieldTypeName := field.Type.Name()
+		if isScalar(fieldTypeName) || sch.Types[fieldTypeName].Kind == ast.Enum {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @default %s.refOnly can only be used on relation (object) fields, not on scalar or enum type %s",
+				typ.Name, field.Name, opName, fieldTypeName)}
+		}
+		hasValue := opArg.Value.Children.ForName("value") != nil
+		hasExpr := opArg.Value.Children.ForName("expr") != nil
+		if !hasValue && !hasExpr {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @default %s.refOnly has no effect without value or expr in the same argument",
+				typ.Name, field.Name, opName)}
+		}
+	}
 	return nil
 }
 

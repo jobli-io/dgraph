@@ -3667,6 +3667,73 @@ invalid_schemas:
         },
       ]
 
+  - name: "@default add.refOnly rejected on scalar field"
+    input: |
+      type X {
+        id: String! @id
+        status: String @default(add:{value:"DRAFT", refOnly:true})
+      }
+    errlist:
+      [
+        {
+          "message":
+            "Type X; Field status: @default add.refOnly can only be used on relation (object)
+            fields, not on scalar or enum type String",
+          "locations": [{ "line": 3, "column": 19 }],
+        },
+      ]
+
+  - name: "@default update.refOnly rejected on enum field"
+    input: |
+      enum Status { ACTIVE DRAFT }
+      type X {
+        id: String! @id
+        status: Status @default(update:{value:"ACTIVE", refOnly:true})
+      }
+    errlist:
+      [
+        {
+          "message":
+            "Type X; Field status: @default update.refOnly can only be used on relation (object)
+            fields, not on scalar or enum type Status",
+          "locations": [{ "line": 4, "column": 19 }],
+        },
+      ]
+
+  - name: "@default add.refOnly rejected without value or expr"
+    input: |
+      type Y { id: String! @id }
+      type X {
+        id: String! @id
+        rel: Y @default(add:{refOnly:true})
+      }
+    errlist:
+      [
+        {
+          "message":
+            "Type X; Field rel: @default add.refOnly has no effect without value or expr in the same
+            argument",
+          "locations": [{ "line": 4, "column": 11 }],
+        },
+      ]
+
+  - name: "@default update.refOnly rejected without value or expr"
+    input: |
+      type Y { id: String! @id }
+      type X {
+        id: String! @id
+        rel: Y @default(update:{refOnly:false})
+      }
+    errlist:
+      [
+        {
+          "message":
+            "Type X; Field rel: @default update.refOnly has no effect without value or expr in the
+            same argument",
+          "locations": [{ "line": 4, "column": 11 }],
+        },
+      ]
+
   - name: "@postValidate expr with unknown function is rejected at schema load time"
     input: |
       type JobAd
