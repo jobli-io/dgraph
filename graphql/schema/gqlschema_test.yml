@@ -3734,6 +3734,23 @@ invalid_schemas:
         },
       ]
 
+  - name: "@default add with unknown field is rejected"
+    input: |
+      type Y { id: String! @id }
+      type X {
+        id: String! @id
+        rel: Y @default(add:{expr:"nil", refOnlyxx:true})
+      }
+    errlist:
+      [
+        {
+          "message":
+            'Type X; Field rel: @default add has unknown field "refOnlyxx"; valid fields are value,
+            expr, evaluationOrder, refOnly',
+          "locations": [{ "line": 4, "column": 11 }],
+        },
+      ]
+
   - name: "@postValidate expr with unknown function is rejected at schema load time"
     input: |
       type JobAd

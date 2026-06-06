@@ -1616,22 +1616,40 @@ func defaultDirectiveValidation(sch *ast.Schema,
 			}
 		}
 	}
-	// Validate refOnly in add: and update: sub-args.
-	//   Gap 1 — refOnly only makes sense on relation (object) fields. Scalar and
-	//            enum fields never go through isRefOnly computation, so the flag
-	//            would be silently ignored.
-	//   Gap 2 — refOnly without a paired value or expr in the same DgraphDefault
-	//            sub-object is a no-op: getDefaultValue returns (nil, nil, nil)
-	//            when found==false and never propagates the refOnly override.
+	// Validate add: and update: DgraphDefault sub-args.
+	//
+	// The GraphQL type system does NOT validate unknown fields in directive
+	// argument input objects during SDL parsing (only query-time variables get
+	// that treatment). We therefore enforce the DgraphDefault field set
+	// explicitly so that typos like `refOnlyxx` are caught at schema load.
+	//
+	// Known fields of DgraphDefault: value, expr, evaluationOrder, refOnly.
+	//
+	// Additional semantic rules:
+	//   Gap 1 — refOnly only makes sense on relation (object) fields.
+	//   Gap 2 — refOnly without a paired value or expr is a no-op.
+	knownDgraphDefaultFields := map[string]bool{
+		"value": true, "expr": true, "evaluationOrder": true, "refOnly": true,
+	}
 	for _, opName := range []string{"add", "update"} {
 		opArg := dir.Arguments.ForName(opName)
 		if opArg == nil {
 			continue
 		}
+		// Unknown-field check.
+		for _, child := range opArg.Value.Children {
+			if !knownDgraphDefaultFields[child.Name] {
+				return []*gqlerror.Error{gqlerror.ErrorPosf(
+					dir.Position,
+					"Type %s; Field %s: @default %s has unknown field %q; valid fields are value, expr, evaluationOrder, refOnly",
+					typ.Name, field.Name, opName, child.Name)}
+			}
+		}
 		ro := opArg.Value.Children.ForName("refOnly")
 		if ro == nil {
 			continue
 		}
+		// Gap 1 — refOnly on scalar/enum.
 		fieldTypeName := field.Type.Name()
 		if isScalar(fieldTypeName) || sch.Types[fieldTypeName].Kind == ast.Enum {
 			return []*gqlerror.Error{gqlerror.ErrorPosf(
@@ -1639,6 +1657,7 @@ func defaultDirectiveValidation(sch *ast.Schema,
 				"Type %s; Field %s: @default %s.refOnly can only be used on relation (object) fields, not on scalar or enum type %s",
 				typ.Name, field.Name, opName, fieldTypeName)}
 		}
+		// Gap 2 — refOnly without value or expr.
 		hasValue := opArg.Value.Children.ForName("value") != nil
 		hasExpr := opArg.Value.Children.ForName("expr") != nil
 		if !hasValue && !hasExpr {
