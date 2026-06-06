@@ -2879,8 +2879,12 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 			}
 			found = true
 		}
-		// Root-level refOnly is not applicable (root-level has no Children structure
-		// matching the DgraphDefault input; it only has top-level value/expr args).
+		// Root-level refOnly applies to both add and update when no
+		// operation-specific arg set it, mirroring how value/expr work.
+		if roArg := dir.Arguments.ForName("refOnly"); roArg != nil && roArg.Value.Raw != "" {
+			b := roArg.Value.Raw == "true"
+			refOnly = &b
+		}
 	}
 
 	if !found {

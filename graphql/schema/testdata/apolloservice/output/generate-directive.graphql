@@ -236,7 +236,7 @@ directive @search(by: [String!]) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
-directive @default(value: String, expr: String, evaluationOrder: Int, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
+directive @default(value: String, expr: String, evaluationOrder: Int, refOnly: Boolean, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
 directive @transform(expr: String, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
 directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int) on FIELD_DEFINITION
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION

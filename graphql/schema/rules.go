@@ -1667,6 +1667,19 @@ func defaultDirectiveValidation(sch *ast.Schema,
 				typ.Name, field.Name, opName)}
 		}
 	}
+	// Validate top-level refOnly (applies to both add and update as a shorthand).
+	// Gap 2 (orphan check) does NOT apply here: the add:/update: sub-objects can
+	// supply their own expr, so a top-level refOnly without a root-level value/expr
+	// is a valid pattern (e.g. @default(add:{expr:"..."}, refOnly:true)).
+	if roArg := dir.Arguments.ForName("refOnly"); roArg != nil && roArg.Value.Raw != "" {
+		fieldTypeName := field.Type.Name()
+		if isScalar(fieldTypeName) || sch.Types[fieldTypeName].Kind == ast.Enum {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @default refOnly can only be used on relation (object) fields, not on scalar or enum type %s",
+				typ.Name, field.Name, fieldTypeName)}
+		}
+	}
 	return nil
 }
 
