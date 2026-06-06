@@ -122,6 +122,7 @@ directive @default(
   value: String # literal value or "$now"
   expr: String # expr-lang expression
   evaluationOrder: Int # execution priority (lower = first)
+  refOnly: Boolean # shorthand for both add & update; see default_transform.md §refOnly
   add: DgraphDefault
   update: DgraphDefault
 ) on FIELD_DEFINITION
@@ -130,6 +131,7 @@ input DgraphDefault {
   value: String
   expr: String
   evaluationOrder: Int
+  refOnly: Boolean # per-operation override; takes precedence over top-level
 }
 ```
 

@@ -18,6 +18,7 @@ directive @default(
   value: String # literal value or "$now"
   expr: String # expr-lang expression
   evaluationOrder: Int # execution priority (lower = earlier)
+  refOnly: Boolean # see §refOnly below; shorthand for both add & update
   add: DgraphDefault # add-specific override
   update: DgraphDefault # update-specific override
 ) on FIELD_DEFINITION
@@ -26,6 +27,7 @@ input DgraphDefault {
   value: String
   expr: String
   evaluationOrder: Int
+  refOnly: Boolean # per-operation override; takes precedence over top-level
 }
 ```
 
@@ -75,7 +77,73 @@ type Workspace {
 }
 ```
 
-Root-level `value`/`expr` applies to both add and update. Operation-specific arms take precedence.
+Root-level `value`/`expr`/`refOnly` applies to both add and update. Operation-specific arms take
+precedence over the root-level shorthand.
+
+### `refOnly` — Controlling Sub-Object Reference Semantics
+
+When a `@default` expression produces a **sub-object** (e.g. an injected `createdBy: User`), the
+mutation rewriter must decide whether that object is:
+
+- A **full node definition** — write all its fields into Dgraph, creating or updating the node.
+- A **ref-only cross-reference** — only link to an existing node by its `@id` field(s); do **not**
+  write any other fields.
+
+By default the engine **computes** this automatically (`isRefOnly`) based on how many non-`@id`
+fields the object contains. A sub-object with only `@id` fields is ref-only; one with additional
+fields is treated as a full node.
+
+This causes a subtle issue when an injected object must include a **required non-`@id` field** (e.g.
+`email` is required on `User`) purely to satisfy schema non-null constraints — the engine mistakenly
+classifies it as a full node definition and may conflict with the actual full node being written by
+the caller in another field of the same mutation.
+
+**`refOnly` lets you override the engine's decision explicitly:**
+
+| Value            | Meaning                                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------ |
+| `true`           | Always treat the sub-object as a ref-only cross-reference, regardless of which non-`@id` fields are present. |
+| `false`          | Always treat the sub-object as a full node definition.                                                       |
+| `null` (default) | Engine computes `isRefOnly` automatically.                                                                   |
+
+**Resolution priority** (highest to lowest):
+
+1. Per-operation `add: { ..., refOnly: true }` or `update: { ..., refOnly: false }`
+2. Top-level `@default(..., refOnly: true)`
+3. Engine automatic computation
+
+```graphql
+type Workspace implements Recordable {
+  # Recordable injects createdBy via @default with sId + email.
+  # email is required on User but is NOT node content here — it's only
+  # present to satisfy the schema. Without refOnly: true the engine would
+  # treat this as a full node definition and potentially conflict with the
+  # ownedBy: User { ..., status: "ACTIVE" } supplied by the caller.
+  createdBy: User
+    @hasInverse(field: hasCreated)
+    @default(
+      add: {
+        expr: """
+        ("email" in auth && "ws" in auth)
+          ? { "sId": "jobli::user::" + auth.ws + "::" + auth.email,
+              "email": auth.email }
+          : nil
+        """
+        evaluationOrder: 10001
+      }
+      refOnly: true # ← top-level shorthand — applies to both add and update
+    )
+}
+```
+
+**Validation rules for `refOnly`:**
+
+- `refOnly` may only be used on **relation (object) fields** — scalar and enum fields never go
+  through `isRefOnly` computation, so the flag would be silently meaningless.
+- Per-operation `refOnly` (inside `add:`/`update:`) must be accompanied by either `value` or `expr`
+  in the same sub-object; a bare `{ refOnly: true }` with no value/expr is rejected.
+- Unknown fields inside `add:`/`update:` (e.g. `refOnlyxx`) are rejected at schema load because the
+  GraphQL type system does not validate directive argument input objects during SDL parsing.
 
 ### `evaluationOrder`
 
@@ -173,6 +241,9 @@ Post-mutation:
 - At least one of `value`, `expr`, `add`, `update` must be present on `@default`.
 - `expr` must compile as a valid expr-lang expression.
 - `$now` is only valid as a `value` token, not inside `expr`.
+- `refOnly` (top-level or per-operation) may only be used on relation (object) fields.
+- Per-operation `refOnly` requires a paired `value` or `expr` in the same `add:`/`update:` block.
+- Unknown fields in `add:`/`update:` sub-objects are rejected at schema load time.
 
 ---
 
