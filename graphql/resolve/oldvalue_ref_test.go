@@ -316,17 +316,9 @@ func TestShouldReRun_DefaultContamination_isRefOnlyInvariant(t *testing.T) {
 	require.True(t, xidNames["email"], "email must be an @id field")
 	require.True(t, xidNames["handle"], "handle must be an @id field")
 
-	// ── isRefOnly invariant: helper that mirrors the engine's isRefOnly loop ──
+	// ── isRefOnly invariant: delegate to the engine's computeIsRefOnly helper ──
 	isRefOnly := func(obj map[string]interface{}) bool {
-		for key := range obj {
-			if isDgraphInternalField(key) {
-				continue
-			}
-			if !xidNames[key] {
-				return false
-			}
-		}
-		return true
+		return computeIsRefOnly(obj, xids, "", nil)
 	}
 
 	// {email, handle} — only @id fields → ref-only.
@@ -380,4 +372,64 @@ func TestShouldReRun_DefaultContamination_isRefOnlyInvariant(t *testing.T) {
 	// error (correct top-level Add behavior). Both are acceptable — what we're testing
 	// is the ABSENCE of EnsureNonNulls failures.
 	_ = frag
+}
+
+// TestComputeIsRefOnly_SkipFields verifies that computeIsRefOnly treats entries
+// in the skipFields map as neutral — they do not prevent an object from being
+// classified as a pure cross-reference even though they are not @id fields.
+//
+// This is Option B from the design: the caller declares which fields were
+// injected for operational reasons (e.g. by a @transform or lambda) and
+// should not count as "node content" for the ref-only determination.
+func TestComputeIsRefOnly_SkipFields(t *testing.T) {
+	accountTyp := getTestMutatedType(t,
+		`mutation { addAccountNode(input:[{email:"a@b.com", handle:"@a@b.com", active:true}]) { accountNode { email } } }`,
+		"AccountNode")
+
+	xids := accountTyp.XIDFields()
+
+	// Without skip: {email, handle, active} is NOT ref-only because "active" is non-XID.
+	require.False(t,
+		computeIsRefOnly(
+			map[string]interface{}{"email": "a@b.com", "handle": "@a@b.com", "active": true},
+			xids, "", nil,
+		),
+		"without skipFields, 'active' must disqualify the object from being ref-only",
+	)
+
+	// With skip: the same object IS ref-only when "active" is declared as skippable.
+	require.True(t,
+		computeIsRefOnly(
+			map[string]interface{}{"email": "a@b.com", "handle": "@a@b.com", "active": true},
+			xids, "", map[string]struct{}{"active": {}},
+		),
+		"with skipFields{active}, the object must be treated as ref-only",
+	)
+
+	// Multiple skipped fields.
+	require.True(t,
+		computeIsRefOnly(
+			map[string]interface{}{"email": "a@b.com", "handle": "@a@b.com", "active": true, "role": "admin"},
+			xids, "", map[string]struct{}{"active": {}, "role": {}},
+		),
+		"all non-XID fields skipped → ref-only",
+	)
+
+	// Skipping only one of two non-XID fields still produces NOT ref-only.
+	require.False(t,
+		computeIsRefOnly(
+			map[string]interface{}{"email": "a@b.com", "active": true, "role": "admin"},
+			xids, "", map[string]struct{}{"active": {}},
+		),
+		"unskipped 'role' must still disqualify the object",
+	)
+
+	// nil skipFields still works (no panic on nil map read).
+	require.True(t,
+		computeIsRefOnly(
+			map[string]interface{}{"email": "a@b.com", "handle": "@a@b.com"},
+			xids, "", nil,
+		),
+		"nil skipFields must not panic and must behave as empty set",
+	)
 }

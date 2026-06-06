@@ -1793,6 +1793,49 @@ func isDgraphInternalField(key string) bool {
 	}
 	return false
 }
+
+// computeIsRefOnly reports whether obj is a pure cross-reference — i.e. every
+// key (after excluding the inverse field, Dgraph-internal fields, and any
+// caller-supplied skipFields) is an @id (XID) field.
+//
+// skipFields is optional (nil is valid). It allows the caller to declare
+// fields that are present in obj for operational reasons (e.g. injected by a
+// @transform or lambda) but should not count as "node content" for the
+// ref-only determination.
+//
+// Typical call with no skips:
+//
+//	computeIsRefOnly(obj, xids, exclude, nil)
+//
+// Typical call skipping a transform-injected field:
+//
+//	computeIsRefOnly(obj, xids, exclude, map[string]struct{}{"inWorkspace": {}})
+func computeIsRefOnly(
+	obj map[string]interface{},
+	xids []schema.FieldDefinition,
+	exclude string,
+	skipFields map[string]struct{},
+) bool {
+	for key := range obj {
+		if key == exclude || isDgraphInternalField(key) {
+			continue
+		}
+		if _, skip := skipFields[key]; skip {
+			continue
+		}
+		fieldIsXid := false
+		for _, xid := range xids {
+			if xid.Name() == key {
+				fieldIsXid = true
+				break
+			}
+		}
+		if !fieldIsXid {
+			return false
+		}
+	}
+	return true
+}
 func asIDReference(
 	ctx context.Context,
 	val interface{},
@@ -2150,33 +2193,11 @@ func rewriteObject(
 			// idExistence (that would suppress the actual node creation when the full
 			// definition is processed next).  Instead we emit a blank-node forward reference
 			// using the same variable name that varGen will produce for the full definition.
-			// isRefOnly is true when every key in obj (excluding the inverse field and
-			// Dgraph-internal DQL fields that never appear in user-supplied GraphQL input)
-			// is an @id (XID) field. Such objects are pure cross-references to a node
+			// isRefOnly is true when every key in obj (excluding the inverse field,
+			// Dgraph-internal DQL fields, and any caller-supplied skipFields) is an
+			// @id (XID) field. Such objects are pure cross-references to a node
 			// that is either already in Dgraph or will be created later in this mutation.
-			isRefOnly := true
-			for key := range obj {
-				if key == exclude {
-					continue
-				}
-				// Skip Dgraph-internal DQL fields returned by existence/oldValue queries.
-				// These are never part of the GraphQL schema and must not disqualify the
-				// object from being treated as a reference-only payload.
-				if isDgraphInternalField(key) {
-					continue
-				}
-				fieldIsXid := false
-				for _, xid := range xids {
-					if xid.Name() == key {
-						fieldIsXid = true
-						break
-					}
-				}
-				if !fieldIsXid {
-					isRefOnly = false
-					break
-				}
-			}
+			isRefOnly := computeIsRefOnly(obj, xids, exclude, nil)
 
 			resolvedObj := xidMetadata.variableObjMap[xidVariables[0]]
 
@@ -2196,26 +2217,8 @@ func rewriteObject(
 				// If the variableObjMap already holds a full definition for this XID, the current
 				// ref-only occurrence is a forward reference to that full definition — just emit a
 				// bare forward ref (no tracking needed; the full definition handles creation).
-				resolvedIsRefOnly := resolvedObj == nil
-				if resolvedObj != nil {
-					resolvedIsRefOnly = true
-					for key := range resolvedObj {
-						if key == exclude || isDgraphInternalField(key) {
-							continue
-						}
-						fieldIsXid := false
-						for _, xid := range xids {
-							if xid.Name() == key {
-								fieldIsXid = true
-								break
-							}
-						}
-						if !fieldIsXid {
-							resolvedIsRefOnly = false
-							break
-						}
-					}
-				}
+				resolvedIsRefOnly := resolvedObj == nil ||
+					computeIsRefOnly(resolvedObj, xids, exclude, nil)
 
 				if !resolvedIsRefOnly {
 					// Exception (b): full definition already in variableObjMap — no tracking
