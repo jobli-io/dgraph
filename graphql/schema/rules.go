@@ -1541,7 +1541,7 @@ func defaultDirectiveValidation(sch *ast.Schema,
 			}
 		} else if v := arg.Value.Children.ForName("expr"); v != nil {
 			exprString := v.Raw
-			_, err := getDefaultValue(sch, field, arg.Name, typ.Name, map[string]interface{}{}, AuthCtx{}, nil, nil)
+			_, _, err := getDefaultValue(sch, field, arg.Name, typ.Name, map[string]interface{}{}, AuthCtx{}, nil, nil)
 			if err != nil {
 				var ce *CompileError
 				if errors.As(err, &ce) {
@@ -1605,7 +1605,7 @@ func defaultDirectiveValidation(sch *ast.Schema,
 		}
 	}
 	if rootExpr := dir.Arguments.ForName("expr"); rootExpr != nil && rootExpr.Value.Raw != "" {
-		_, err := getDefaultValue(sch, field, "add", typ.Name, map[string]interface{}{}, AuthCtx{}, nil, nil)
+		_, _, err := getDefaultValue(sch, field, "add", typ.Name, map[string]interface{}{}, AuthCtx{}, nil, nil)
 		if err != nil {
 			var ce *CompileError
 			if errors.As(err, &ce) {

@@ -308,7 +308,13 @@ type FieldDefinition interface {
 	HasEmbeddingProvider() bool
 	EmbeddingSearchMetric() string
 	HasInterfaceArg() bool
-	GetDefaultValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (interface{}, error)
+	// GetDefaultValue evaluates the @default directive for this field and returns
+	// the computed value and an optional refOnly override.
+	//
+	// refOnly is non-nil only when the @default action arg contains refOnly: true/false.
+	// When non-nil it overrides the engine's computed isRefOnly result for any
+	// sub-object produced by this expression.
+	GetDefaultValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (interface{}, *bool, error)
 	ValidateValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) []error
 	TransformValue(action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (interface{}, error)
 	CascadeDeleteConfig() *CascadeDeleteFieldConfig
@@ -2780,9 +2786,9 @@ func (fd *fieldDefinition) GetDefaultValue(
 	parent map[string]interface{},
 	auth AuthCtx,
 	oldValue map[string]interface{},
-	removeValue map[string]interface{}) (interface{}, error) {
+	removeValue map[string]interface{}) (interface{}, *bool, error) {
 	if fd.fieldDef == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	return getDefaultValue(fd.inSchema.schema, fd.fieldDef, action, parentTypeName, parent, auth, oldValue, removeValue)
 }
@@ -2793,10 +2799,10 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 	parent map[string]interface{},
 	auth AuthCtx,
 	oldValue map[string]interface{},
-	removeValue map[string]interface{}) (interface{}, error) {
+	removeValue map[string]interface{}) (interface{}, *bool, error) {
 	dir := fd.Directives.ForName(defaultDirective)
 	if dir == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// resolveDefaultExpr evaluates an expr string in the standard mutation context.
@@ -2823,12 +2829,24 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 
 	var defaultValue interface{}
 	found := false
+	// refOnly is extracted from the matched action arg (or root-level arg as fallback).
+	// It follows the same resolution priority as value/expr.
+	var refOnly *bool
+
+	// resolveRefOnly reads the refOnly child from an @default argument's value children.
+	resolveRefOnly := func(arg *ast.Argument) *bool {
+		if ro := arg.Value.Children.ForName("refOnly"); ro != nil && ro.Raw != "" {
+			b := ro.Raw == "true"
+			return &b
+		}
+		return nil
+	}
 
 	// 1. Operation-specific arg (add/update) takes highest precedence.
 	if arg := dir.Arguments.ForName(action); arg != nil {
 		if value := arg.Value.Children.ForName("value"); value != nil {
 			if value.Raw == "$now" {
-				return resolveNow(), nil
+				return resolveNow(), resolveRefOnly(arg), nil
 			}
 			defaultValue = value.Raw
 			found = true
@@ -2836,9 +2854,12 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 			var err error
 			defaultValue, err = resolveExpr(exp.Raw)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			found = true
+		}
+		if found {
+			refOnly = resolveRefOnly(arg)
 		}
 	}
 
@@ -2846,7 +2867,7 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 	if !found {
 		if valueArg := dir.Arguments.ForName("value"); valueArg != nil && valueArg.Value.Raw != "" {
 			if valueArg.Value.Raw == "$now" {
-				return resolveNow(), nil
+				return resolveNow(), nil, nil
 			}
 			defaultValue = valueArg.Value.Raw
 			found = true
@@ -2854,14 +2875,16 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 			var err error
 			defaultValue, err = resolveExpr(exprArg.Value.Raw)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			found = true
 		}
+		// Root-level refOnly is not applicable (root-level has no Children structure
+		// matching the DgraphDefault input; it only has top-level value/expr args).
 	}
 
 	if !found {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	// parse value for non-scalar fields
@@ -2869,11 +2892,11 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 		switch defaultValue.(type) {
 		case map[string]interface{}, []interface{}:
 		default:
-			return nil, errors.Errorf("non-scalar field %s failed to parse default value: %v", fd.Name, defaultValue)
+			return nil, nil, errors.Errorf("non-scalar field %s failed to parse default value: %v", fd.Name, defaultValue)
 		}
 	}
 
-	return defaultValue, nil
+	return defaultValue, refOnly, nil
 }
 
 func hashSHA256(input string) string {

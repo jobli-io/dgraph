@@ -200,6 +200,16 @@ input DgraphDefault {
 	value: String
 	expr: String
 	evaluationOrder: Int
+	"""
+	When set, overrides the engine's computed isRefOnly result for the sub-object
+	produced by this @default expression.
+	  true  — treat the sub-object as a pure cross-reference regardless of which
+	          non-@id fields the expression includes (e.g. a required email field
+	          included only to satisfy the schema, not as node content).
+	  false — always treat the sub-object as a full node definition.
+	  null  — (default) let the engine compute isRefOnly normally.
+	"""
+	refOnly: Boolean
 }
 
 input DgraphTransform {
@@ -2756,7 +2766,7 @@ func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
 		// if the field has a @default(add) value it is optional in add input
 		// an error value also indicates that the default value is provided but might encounter a runtime error.
 		var field = createField(schema, fld)
-		if value, err := getDefaultValue(schema, fld, "add", defn.Name, nil, AuthCtx{}, nil, nil); err != nil || value != nil {
+		if value, _, err := getDefaultValue(schema, fld, "add", defn.Name, nil, AuthCtx{}, nil, nil); err != nil || value != nil {
 			field.Type.NonNull = false
 		}
 

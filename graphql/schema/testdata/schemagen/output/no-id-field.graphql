@@ -115,6 +115,16 @@ input DgraphDefault {
 	value: String
 	expr: String
 	evaluationOrder: Int
+	"""
+	When set, overrides the engine's computed isRefOnly result for the sub-object
+	produced by this @default expression.
+	  true  — treat the sub-object as a pure cross-reference regardless of which
+	          non-@id fields the expression includes (e.g. a required email field
+	          included only to satisfy the schema, not as node content).
+	  false — always treat the sub-object as a full node definition.
+	  null  — (default) let the engine compute isRefOnly normally.
+	"""
+	refOnly: Boolean
 }
 
 input DgraphTransform {

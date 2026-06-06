@@ -1788,7 +1788,13 @@ func checkUIDExistsQuery(val interface{}, variable string, typ schema.Type) (*dq
 //   - never mistaken for unknown schema fields that would fail validation.
 func isDgraphInternalField(key string) bool {
 	switch key {
-	case "uid", "dgraph.type", "__typename":
+	case "uid", "dgraph.type", "__typename",
+		// __refOnly is a transient sentinel injected by the @default loop when a
+		// DgraphDefault action arg declares refOnly: true/false. It is stripped at
+		// the top of rewriteObject before any field processing. This case is a
+		// belt-and-suspenders guard so the sentinel is treated as inert even if it
+		// somehow reaches computeIsRefOnly.
+		"__refOnly":
 		return true
 	}
 	return false
@@ -1911,6 +1917,17 @@ func rewriteObject(
 	atTopLevel := srcField == nil
 	var retErrors []error
 	variable := ""
+
+	// Extract the __refOnly sentinel injected by the @default loop when a field
+	// carries refOnly: true/false in its DgraphDefault action arg.
+	// Strip it immediately so it does not participate in any field processing.
+	var refOnlyOverride *bool
+	if v, ok := obj["__refOnly"]; ok {
+		if b, ok := v.(bool); ok {
+			refOnlyOverride = &b
+		}
+		delete(obj, "__refOnly")
+	}
 
 	id := typ.IDField()
 	if id != nil {
@@ -2134,7 +2151,7 @@ func rewriteObject(
 								}
 								// @id field not present in user input → may be a @default-computed XID.
 								// Compute the default value using the current obj.
-								defVal, err := xid.GetDefaultValue(defaultDirectiveAddAct, typ.Name(), obj, schema.AuthCtx{}, nil, nil)
+								defVal, _, err := xid.GetDefaultValue(defaultDirectiveAddAct, typ.Name(), obj, schema.AuthCtx{}, nil, nil)
 								if err != nil || defVal == nil {
 									continue
 								}
@@ -2197,7 +2214,14 @@ func rewriteObject(
 			// Dgraph-internal DQL fields, and any caller-supplied skipFields) is an
 			// @id (XID) field. Such objects are pure cross-references to a node
 			// that is either already in Dgraph or will be created later in this mutation.
-			isRefOnly := computeIsRefOnly(obj, xids, exclude, nil)
+			// refOnlyOverride (from a @default(add:{refOnly:true/false}) annotation)
+			// takes precedence over the computed value.
+			var isRefOnly bool
+			if refOnlyOverride != nil {
+				isRefOnly = *refOnlyOverride
+			} else {
+				isRefOnly = computeIsRefOnly(obj, xids, exclude, nil)
+			}
 
 			resolvedObj := xidMetadata.variableObjMap[xidVariables[0]]
 
@@ -2484,13 +2508,28 @@ func rewriteObject(
 			}
 
 			oldValue := xidMetadata.variableOldValueMap[variable] // retrieve the old value
-			value, err := field.GetDefaultValue(action, typ.Name(), obj, authCtx, oldValue, objDel)
+			value, refOnly, err := field.GetDefaultValue(action, typ.Name(), obj, authCtx, oldValue, objDel)
 			if err != nil {
 				retErrors = append(retErrors, errors.Errorf("Type %s; %s", typ.Name(), err.Error()))
 				continue
 			}
 
 			if value != nil {
+				// When the @default action arg declares refOnly: true/false, inject a
+				// __refOnly sentinel into any map sub-object so that the recursive
+				// rewriteObject call picks it up and overrides the isRefOnly computation.
+				if refOnly != nil {
+					switch v := value.(type) {
+					case map[string]interface{}:
+						v["__refOnly"] = *refOnly
+					case []interface{}:
+						for _, elem := range v {
+							if m, ok := elem.(map[string]interface{}); ok {
+								m["__refOnly"] = *refOnly
+							}
+						}
+					}
+				}
 				obj[field.Name()] = value
 				shouldReRun := false
 
