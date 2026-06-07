@@ -1100,7 +1100,17 @@ func (authRw *authRewriter) addAuthQueries(
 				continue
 			}
 
-			// Form Query Like Todo_1 as var(func: type(Todo))
+			// Form Query Like Todo_1 as var(func: type(Todo)).
+			// NOTE: the variable name is allocated now so that rewriteAuthQueries
+			// can pass it as varName to auth sub-rules, but the var block itself is
+			// NOT emitted yet. We defer the emit until we know whether the resulting
+			// auth queries actually consume it (see below).
+			//
+			// Background: Dgraph rejects queries where a variable is defined but
+			// never referenced. For types whose @auth rules traverse from
+			// type(Workspace) (e.g. Note, EmailOutbound), none of the generated DQL
+			// auth blocks are rooted at uid(queryVar), so emitting the root
+			// type-scan var unconditionally would create a phantom variable.
 			queryVar := authRw.varGen.Next(object, "", "", authRw.isWritingAuth)
 			varQry := &dql.GraphQuery{
 				Attr: "var",
@@ -1110,7 +1120,6 @@ func (authRw *authRewriter) addAuthQueries(
 					Args: []dql.Arg{{Value: object.Name()}},
 				},
 			}
-			qrys = append(qrys, varQry)
 
 			// Form Auth Queries for the given object
 			objAuthQueries, objfilter := (&authRewriter{
@@ -1126,11 +1135,15 @@ func (authRw *authRewriter) addAuthQueries(
 			// 1. If there is no Auth Query for the Given type then it means that
 			// neither the inherited interface, nor this type has any Auth rules.
 			// In this case the query must return all the nodes of this type.
-			// then simply we need to Put uid(Todo1) with OR in the main query filter.
+			// Then we put uid(queryVar) with OR in the main query filter, and
+			// rootQry will reference it — so the var block must be emitted.
 			// 2. If rbac evaluates to `Positive` which means RBAC rule is satisfied.
 			// Either it is the only auth rule, or it is present with `OR`, which means
-			// query must return all the nodes of this type.
+			// query must return all the nodes of this type. rootQry will reference
+			// uid(queryVar) directly — so the var block must be emitted.
 			if len(objAuthQueries) == 0 || rbac == schema.Positive {
+				// Both paths produce uid(queryVar) in rootQry's OR-filter; emit the block.
+				qrys = append(qrys, varQry)
 				objfilter = &dql.FilterTree{
 					Func: &dql.Function{
 						Name: "uid",
@@ -1139,6 +1152,16 @@ func (authRw *authRewriter) addAuthQueries(
 				}
 				filts = append(filts, objfilter)
 			} else {
+				// Auth queries exist. Only emit the root type-scan var block when
+				// the auth queries are actually rooted at uid(queryVar) — i.e. they
+				// use direct entity traversal (Job, Candidate, Company, Contact…).
+				// Workspace-traversal auth rules (Note, EmailOutbound…) start from
+				// type(Workspace) and never reference the entity root var, so
+				// emitting varQry for them would produce a phantom variable that
+				// causes Dgraph to reject the query with "defined but not used".
+				if authQueriesReferenceVar(objAuthQueries, queryVar) {
+					qrys = append(qrys, varQry)
+				}
 				qrys = append(qrys, objAuthQueries...)
 				filts = append(filts, objfilter)
 			}
@@ -1289,6 +1312,38 @@ func (authRw *authRewriter) addVariableUIDFunc(q *dql.GraphQuery) {
 		Name: "uid",
 		Args: []dql.Arg{{Value: varName}},
 	}
+}
+
+// authQueriesReferenceVar reports whether any of the given DQL auth var blocks
+// use uid(varName) as their root traversal function.
+//
+// Direct entity auth rules (e.g. for Job, Candidate, Company, Contact) anchor
+// their auth var at the entity root:
+//
+//	Job_Auth2 as var(func: uid(Job_1)) @filter(...) @cascade
+//
+// Workspace-traversal auth rules (e.g. for Note, EmailOutbound) start from a
+// workspace or owner type instead:
+//
+//	Note_Auth18 as var(func: type(Workspace)) @filter(...) @cascade
+//
+// Only when at least one auth query IS rooted at uid(varName) should the
+// corresponding root type-scan block (e.g. "Note_17 as var(func: type(Note))")
+// be emitted. If none of the auth queries reference varName, emitting the
+// type-scan block would produce a phantom variable that Dgraph rejects with
+// "Some variables are defined but not used".
+func authQueriesReferenceVar(queries []*dql.GraphQuery, varName string) bool {
+	for _, q := range queries {
+		if q == nil || q.Func == nil || q.Func.Name != "uid" {
+			continue
+		}
+		for _, arg := range q.Func.Args {
+			if arg.Value == varName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func queryAuthSelector(t schema.Type) *schema.RuleNode {
