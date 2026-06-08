@@ -509,7 +509,7 @@ func buildCascadeRule(
 		if implRule == nil {
 			return nil, nil
 		}
-		implRule, err := resolveAuthVarsInRuleNode(implRule, edge, outerChildTypeName, immediateChildTypeName, sch)
+		implRule, err := resolveAuthVarsInRuleNode(implRule, edge, outerChildTypeName, immediateChildTypeName, incomingEdges, visited, sch)
 		if err != nil {
 			return nil, err
 		}
@@ -540,7 +540,7 @@ func buildCascadeRule(
 	}
 	if authorityOwnRule != nil {
 		var err error
-		authorityOwnRule, err = resolveAuthVarsInRuleNode(authorityOwnRule, edge, outerChildTypeName, immediateChildTypeName, sch)
+		authorityOwnRule, err = resolveAuthVarsInRuleNode(authorityOwnRule, edge, outerChildTypeName, immediateChildTypeName, incomingEdges, visited, sch)
 		if err != nil {
 			return nil, err
 		}
@@ -557,13 +557,18 @@ func buildCascadeRule(
 	}
 	authorityPolicy := authorityAstType.CascadeAuthPolicyConfig()
 
+	// Determine the outerChildTypeName to thread into recursive (grandparent) calls.
+	// For "parent" and "propagate", the effective donor type must advance at each hop
+	// so that the correct vars propagate through the full chain.
+	nextOuterChildTypeName := computeNextOuterChildTypeName(edge, outerChildTypeName, immediateChildTypeName, incomingEdges, visited, sch)
+
 	parentEdges := incomingEdges[edge.parentTypeName]
 	var parentCascadeRules []*RuleNode
 	for _, parentEdge := range parentEdges {
 		// immediateChildTypeName for the recursive call = edge.parentTypeName:
 		// the authority at this depth becomes the immediate child at depth+1.
 		gpRule, err := buildCascadeRule(
-			parentEdge, outerChildTypeName, edge.parentTypeName, op,
+			parentEdge, nextOuterChildTypeName, edge.parentTypeName, op,
 			incomingEdges, authRulesSnapshot, visited, depth+1, sch,
 		)
 		if err != nil {
@@ -734,7 +739,7 @@ func cascadeAuthRuleForEdge(edge cascadeAuthIncomingEdge, childTypeName, immedia
 	// queried type. The immediate child is the type that HAS the @cascadeAuth field
 	// pointing to edge.parentTypeName (the authority). That type was passed as
 	// immediateChildTypeName from the outer frame.
-	parentRule, err := resolveAuthVarsInRuleNode(authorityRule, edge, childTypeName, immediateChildTypeName, sch)
+	parentRule, err := resolveAuthVarsInRuleNode(authorityRule, edge, childTypeName, immediateChildTypeName, incomingEdges, visited, sch)
 	if err != nil {
 		return nil, err
 	}
@@ -844,25 +849,31 @@ func withCascadeEdgePred(rn *RuleNode, pred string) *RuleNode {
 // resolveAuthVarsInRuleNode applies the variableContext strategy to produce the
 // rule template with the appropriate @authVariables applied.
 //
-//   - variableContext: ""        — unset; treated as "adaptive" (the doc default).
-//   - variableContext: "adaptive" — uses outermost child's @authVariables if present;
-//     silently falls back to authority's rule if not. No schema error.
-//   - variableContext: "self"    — re-substitutes using the IMMEDIATE child's
-//     @authVariables (the type declaring the @cascadeAuth field at this depth).
-//     REQUIRES @authVariables on immediateChildTypeName; schema load error if missing.
-//   - variableContext: "parent"  — returns authority's already-substituted rule as-is.
+//   - variableContext: ""          — unset; treated as "adaptive" (the doc default).
+//   - variableContext: "self"      — re-substitutes using the outermost queried type's
+//     @authVariables (A's vars for the full chain A→B→C). Validates that the
+//     IMMEDIATE child at this depth has @authVariables; schema load error if missing.
+//   - variableContext: "parent"    — re-substitutes using the IMMEDIATE authority's
+//     (B's) own @authVariables. Schema load error if B has no @authVariables.
+//     For recursive calls, outerChildTypeName advances to B so B's vars propagate
+//     through the whole chain (see computeNextOuterChildTypeName).
+//   - variableContext: "adaptive"  — tries the outermost child's vars (A) first;
+//     falls back to the immediate child's vars at this depth. Schema error if
+//     neither A nor any ancestor in the chain has @authVariables.
+//   - variableContext: "propagate" — uses the nearest ancestor with @authVariables,
+//     starting from the immediate authority (B). Schema error if none found.
 //
-// childTypeName is the outermost queried type (used for @authVariables substitution).
-// immediateChildTypeName is the type declaring @cascadeAuth at this specific depth
-// (used only for variableContext:self validation).
+// incomingEdges and visited are needed only for "propagate" to walk the chain.
 func resolveAuthVarsInRuleNode(parentRule *RuleNode, edge cascadeAuthIncomingEdge,
-	childTypeName, immediateChildTypeName string, sch *schema) (*RuleNode, error) {
+	childTypeName, immediateChildTypeName string,
+	incomingEdges map[string][]cascadeAuthIncomingEdge,
+	visited map[string]bool,
+	sch *schema) (*RuleNode, error) {
 
 	switch edge.cfg.VariableContext {
 	case "self":
-		// "self" validates that the IMMEDIATE child (not the outermost queried type)
-		// has @authVariables — it's the type that explicitly declared the @cascadeAuth
-		// field with variableContext:self that must opt in with @authVariables.
+		// Validates that the IMMEDIATE child (not the outermost queried type)
+		// has @authVariables — ensures every hop in the chain has opted in.
 		immediateTypeDef := sch.schema.Types[immediateChildTypeName]
 		if immediateTypeDef == nil || immediateTypeDef.Directives.ForName(authVariablesDirective) == nil {
 			return nil, gqlerror.Errorf(
@@ -871,19 +882,99 @@ func resolveAuthVarsInRuleNode(parentRule *RuleNode, edge cascadeAuthIncomingEdg
 					"Either add @authVariables to %s or change variableContext to adaptive.",
 				immediateChildTypeName, edge.fieldName, immediateChildTypeName, immediateChildTypeName)
 		}
-		// Substitution uses the outermost childTypeName (may differ from immediateChild
-		// when the chain A→B→C uses A's vars throughout).
+		// Substitution uses the outermost childTypeName — A's vars propagate
+		// through the entire chain (A→B→C all use A's @authVariables).
 		return resubstituteRuleNode(parentRule, edge, childTypeName, sch)
-	case "adaptive", "": // "" = unset; adaptive is the documented default
-		// Use the outermost child's @authVariables for substitution if present.
-		childTypeDef := sch.schema.Types[childTypeName]
-		if childTypeDef != nil && childTypeDef.Directives.ForName(authVariablesDirective) != nil {
+
+	case "parent":
+		// Use the IMMEDIATE authority's (edge.parentTypeName = B's) own vars.
+		// Validation (cascade_auth_validation.go) ensures B has @authVariables.
+		// For recursive grandparent calls, computeNextOuterChildTypeName will
+		// advance outerChildTypeName to B, so B's vars propagate to all deeper hops.
+		return resubstituteRuleNode(parentRule, edge, edge.parentTypeName, sch)
+
+	case "propagate":
+		// Walk from the immediate authority upward to find the nearest ancestor
+		// with @authVariables, then freeze those vars for this substitution.
+		// Validation ensures at least one ancestor exists.
+		donor := findNearestAncestorWithAuthVars(sch, edge.parentTypeName, incomingEdges, visited)
+		if donor == "" {
+			// Validation should have caught this; fall back to as-is.
+			return parentRule, nil
+		}
+		return resubstituteRuleNode(parentRule, edge, donor, sch)
+
+	default: // "adaptive" or "" (unset — treated as adaptive)
+		// Try the outermost queried type (A) first.
+		if hasAuthVariables(sch, childTypeName) {
 			return resubstituteRuleNode(parentRule, edge, childTypeName, sch)
 		}
-		// No @authVariables on outermost child — fall back to authority's rule as-is.
+		// Fall back to the nearest ancestor with vars starting from the immediate
+		// child at this depth (advances at each recursive level).
+		if hasAuthVariables(sch, immediateChildTypeName) {
+			return resubstituteRuleNode(parentRule, edge, immediateChildTypeName, sch)
+		}
+		// No @authVariables found at this level — return authority's pre-compiled rule.
+		// Validation ensures at least one ancestor has vars (schema error if none).
 		return parentRule, nil
-	default: // "parent" or unrecognised value
-		return parentRule, nil
+	}
+}
+
+// findNearestAncestorWithAuthVars walks the cascade chain starting from typeName
+// and returns the first type that has @authVariables. Returns "" if none found.
+// visited is a read-only snapshot from buildCascadeRule — we do NOT modify it here.
+func findNearestAncestorWithAuthVars(
+	sch *schema,
+	typeName string,
+	incomingEdges map[string][]cascadeAuthIncomingEdge,
+	visited map[string]bool,
+) string {
+	seen := make(map[string]bool)
+	var walk func(t string) string
+	walk = func(t string) string {
+		if seen[t] || visited[t] {
+			return ""
+		}
+		seen[t] = true
+		if hasAuthVariables(sch, t) {
+			return t
+		}
+		for _, parentEdge := range incomingEdges[t] {
+			if result := walk(parentEdge.parentTypeName); result != "" {
+				return result
+			}
+		}
+		return ""
+	}
+	return walk(typeName)
+}
+
+// computeNextOuterChildTypeName determines what outerChildTypeName to pass to
+// recursive grandparent calls in buildCascadeRule, based on the current edge's
+// variableContext:
+//
+//   - "parent":    advance to edge.parentTypeName (B's vars propagate through chain)
+//   - "propagate": advance to the nearest ancestor with @authVariables (freezes donor)
+//   - others:      pass outerChildTypeName unchanged
+func computeNextOuterChildTypeName(
+	edge cascadeAuthIncomingEdge,
+	outerChildTypeName, immediateChildTypeName string,
+	incomingEdges map[string][]cascadeAuthIncomingEdge,
+	visited map[string]bool,
+	sch *schema,
+) string {
+	switch edge.cfg.VariableContext {
+	case "parent":
+		// Advance to the immediate authority so its vars propagate further.
+		return edge.parentTypeName
+	case "propagate":
+		// Find the donor type and freeze it for all recursive calls.
+		if donor := findNearestAncestorWithAuthVars(sch, edge.parentTypeName, incomingEdges, visited); donor != "" {
+			return donor
+		}
+		return outerChildTypeName // fallback (validation should prevent reaching here)
+	default:
+		return outerChildTypeName
 	}
 }
 

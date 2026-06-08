@@ -18,7 +18,11 @@ import (
 //   - May only appear on edge (non-scalar, non-enum) fields
 //   - Not allowed on @remote types, @custom or @lambda fields
 //   - depth must be ≥ 1 or -1 if supplied
-//   - variableContext must be "self" or "parent" if supplied
+//   - variableContext must be "self", "parent", "adaptive", or "propagate" if supplied
+//   - self:      host type must have @authVariables
+//   - parent:    immediate authority must have @authVariables
+//   - adaptive:  host type OR at least one ancestor must have @authVariables
+//   - propagate: at least one ancestor (starting from authority) must have @authVariables
 //   - No circular cascade chains (detected via DFS over @cascadeAuth edges)
 func cascadeAuthDirectiveValidation(sch *ast.Schema,
 	typ *ast.Definition,
@@ -149,19 +153,18 @@ func cascadeAuthDirectiveValidation(sch *ast.Schema,
 	// Validate variableContext: must be "self", "parent", or "adaptive" if supplied.
 	if vcArg := dir.Arguments.ForName("variableContext"); vcArg != nil && vcArg.Value.Raw != "" {
 		vc := vcArg.Value.Raw
-		if vc != "self" && vc != "parent" && vc != "adaptive" {
+		if vc != "self" && vc != "parent" && vc != "adaptive" && vc != "propagate" {
 			return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
-				`Type %s; Field %s: @cascadeAuth variableContext must be "self", "parent", or "adaptive", got %q`,
+				`Type %s; Field %s: @cascadeAuth variableContext must be "self", "parent", "adaptive", or "propagate", got %q`,
 				typ.Name, field.Name, vc)}
 		}
 
-		if vc == "self" && typ.Kind != ast.Interface {
-			// Interfaces can't carry @authVariables — their concrete implementors do.
-			// These checks only apply to concrete types placing @cascadeAuth directly.
-
-			// Check: the host type must have @authVariables — without it, self-substitution
-			// falls back silently to the authority's own permissions, which is almost
-			// certainly wrong. Use variableContext: "adaptive" to allow this explicitly.
+		switch vc {
+		case "self":
+			if typ.Kind == ast.Interface {
+				break // Interfaces carry @cascadeAuth but not @authVariables.
+			}
+			// Check: the host type must have @authVariables.
 			if typ.Directives.ForName(authVariablesDirective) == nil {
 				return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
 					"Type %s; Field %s: @cascadeAuth variableContext \"self\" requires "+
@@ -170,7 +173,6 @@ func cascadeAuthDirectiveValidation(sch *ast.Schema,
 						"Use variableContext: \"adaptive\" to allow this fallback explicitly",
 					typ.Name, field.Name, typ.Name)}
 			}
-
 			// Check: all {{KEY}} placeholders in the authority type's @auth rule
 			// must be covered by the host type's @authVariables.
 			authorityDef := sch.Types[fieldTypeName]
@@ -193,10 +195,35 @@ func cascadeAuthDirectiveValidation(sch *ast.Schema,
 					return errs
 				}
 			}
-		}
-		// "adaptive": no additional validation — intentional best-effort mode.
-		// "parent": no additional validation — uses authority's rule unchanged.
-	}
+
+		case "parent":
+			// Immediate authority must have @authVariables — parent relies on B's vars.
+			if sch.Types[fieldTypeName] != nil &&
+				sch.Types[fieldTypeName].Directives.ForName(authVariablesDirective) == nil {
+				return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+					"Type %s; Field %s: @cascadeAuth variableContext \"parent\" requires "+
+						"the authority type %s to declare @authVariables. "+
+						"Use variableContext: \"propagate\" to search further up the chain instead",
+					typ.Name, field.Name, fieldTypeName)}
+			}
+
+		case "adaptive", "propagate":
+			// At least one type in the cascade chain must have @authVariables.
+			// For "adaptive": start from the host type (typ) then walk ancestors.
+			// For "propagate": start from the authority (fieldTypeName) and walk ancestors.
+			startType := fieldTypeName // propagate starts from authority
+			if vc == "adaptive" && typ.Directives.ForName(authVariablesDirective) != nil {
+				break // host type already has vars — satisfied
+			}
+			if !chainHasAuthVariables(sch, startType, map[string]bool{}) {
+				return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+					"Type %s; Field %s: @cascadeAuth variableContext %q requires at least one type "+
+						"in the cascade chain to declare @authVariables, but none were found. "+
+						"Add @authVariables to %s or an ancestor type",
+					typ.Name, field.Name, vc, fieldTypeName)}
+			}
+		} // end switch vc
+	} // end if vcArg
 
 	// Cycle detection: DFS over @cascadeAuth edges from this field's target type.
 	visited := map[string]bool{}
@@ -374,5 +401,32 @@ func hasInverseForCascadeAuth(
 		}
 	}
 
+	return false
+}
+
+// chainHasAuthVariables DFS-walks the cascade chain starting from typeName
+// (through @cascadeAuth field edges) and returns true if any type it reaches
+// declares @authVariables. visited prevents re-visiting in cycles.
+func chainHasAuthVariables(sch *ast.Schema, typeName string, visited map[string]bool) bool {
+	if visited[typeName] {
+		return false
+	}
+	visited[typeName] = true
+	def := sch.Types[typeName]
+	if def == nil {
+		return false
+	}
+	if def.Directives.ForName(authVariablesDirective) != nil {
+		return true
+	}
+	// Walk to any authority type reachable via @cascadeAuth fields.
+	for _, f := range def.Fields {
+		if f.Directives.ForName(cascadeAuthDirective) == nil {
+			continue
+		}
+		if chainHasAuthVariables(sch, f.Type.Name(), visited) {
+			return true
+		}
+	}
 	return false
 }

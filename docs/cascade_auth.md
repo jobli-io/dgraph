@@ -25,9 +25,10 @@ enum CascadeAuthOperation {
   delete
 }
 enum CascadeAuthVariableContext {
-  self
-  parent
-  adaptive
+  self # A's vars for the full chain
+  parent # immediate authority's (B's) vars, frozen for full chain
+  adaptive # A's vars if present, else nearest ancestor's
+  propagate # nearest ancestor's vars starting from B, frozen for full chain
 }
 ```
 
@@ -85,16 +86,33 @@ cascade auth at all.
 
 ### `variableContext`
 
-Controls which type's `@authVariables` are substituted into the authority's rule template:
+Controls which type's `@authVariables` are substituted into the authority's rule template across a
+cascade chain `A → B → C` (A's authority is B, B's authority is C):
 
-| Value                    | Behaviour                                                                                                                                                      |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `"self"`                 | Child type's `@authVariables` — child-specific permissions. **Requires** `@authVariables` on the child; schema load error if missing.                          |
-| `"parent"`               | Authority type's own already-substituted rule — used as-is. No `@authVariables` required on the child.                                                         |
-| `"adaptive"` _(default)_ | Uses child's `@authVariables` if the child has them (`self` path); silently falls back to authority's rule if not (`parent` path). No schema error either way. |
+| Value                    | B's rule uses                                          | C's rule uses                     | Schema error if…                                |
+| ------------------------ | ------------------------------------------------------ | --------------------------------- | ----------------------------------------------- |
+| `"self"`                 | A's vars                                               | A's vars                          | A has no `@authVariables`                       |
+| `"parent"`               | B's vars (frozen for whole chain)                      | B's vars (frozen for whole chain) | B has no `@authVariables`                       |
+| `"adaptive"` _(default)_ | A's vars (if A has them) else nearest ancestor's       | same                              | Neither A nor any ancestor has `@authVariables` |
+| `"propagate"`            | C's vars (nearest ancestor with vars, starting from B) | C's vars (same donor, frozen)     | No ancestor has `@authVariables`                |
+
+**`self`** — the outermost queried type's vars propagate through the entire chain. Every
+intermediate type in the chain must also have `@authVariables` (schema error if missing at any hop).
+
+**`parent`** — the immediate authority's (B's) vars are substituted into every rule in the chain.
+`outerChildTypeName` is advanced to B at depth=0, so all deeper hops use B's vars too. Requires B to
+declare `@authVariables`; schema error if missing.
+
+**`adaptive`** _(default)_ — tries A's vars first; if absent, falls back to each hop's nearest
+ancestor with vars. At least one type in the chain must have `@authVariables`; schema error if none.
+
+**`propagate`** — walks from B upward to find the first ancestor with `@authVariables`, then
+_freezes_ those vars for the entire chain. Use this when the authority type (B) may not always have
+vars but a grandparent (C) always does. Requires at least one ancestor to have `@authVariables`;
+schema error if none found.
 
 ```graphql
-# Workspace's @auth(query:...) template uses {{PERMISSIONS}}
+# Workspace's @auth template uses {{PERMISSIONS}}
 # Candidate provides its own PERMISSIONS via @authVariables
 interface WorkspaceMember {
   inWorkspace: Workspace! @cascadeAuth(variableContext: self)
@@ -127,6 +145,29 @@ type Candidate
 At schema load, `expandCascadeAuth()` generates a rule for `Candidate` using Workspace's template
 with **Candidate's** `PERMISSIONS` substituted — identical to the hand-written `@auth` rule, but
 automatic.
+
+### Chained `variableContext` — three-hop example `A → B → C`
+
+For a chain where A has `variableContext: parent` on its A→B edge and B has
+`variableContext: parent` on its B→C edge:
+
+```
+depth=0 (A→B, parent): outerChildTypeName advances to B → B's vars for B's rule
+depth=1 (B→C, parent): outerChildTypeName advances to C → C's vars for C's rule
+
+Result: B's rule uses B's vars ✓   C's rule uses C's vars ✓
+```
+
+Each `parent` hop advances the substitution anchor to its own immediate authority. They compose
+naturally — no conflict.
+
+For `propagate` when B has no vars:
+
+```
+depth=0 (A→B, propagate): walk up from B → no vars → walk to C → C has vars → freeze C
+  B's rule: C's vars substituted in
+  C's rule: C's vars substituted in
+```
 
 ---
 
@@ -321,16 +362,19 @@ This is the right fix when:
 
 ## Validation Rules
 
-| Violation                                                                                          | Error                                                    |
-| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| Used on a scalar or enum field                                                                     | `@cascadeAuth can only be used on edge fields`           |
-| Used on a `@remote` type                                                                           | `@cascadeAuth cannot be used on a @remote type`          |
-| Target type has no `@auth` rules and is not an interface with implementing types that have `@auth` | `@cascadeAuth: target type "T" has no @auth rules`       |
-| `depth` not ≥ 1 or -1                                                                              | `@cascadeAuth: depth must be ≥ 1 or -1`                  |
-| `variableContext` not `"self"`, `"parent"`, or `"adaptive"`                                        | Validation error                                         |
-| `variableContext: "self"` used but child has no `@authVariables`                                   | Schema load error                                        |
-| `{{KEY}}` referenced in template has no matching entry in `@authVariables`                         | Left as literal string — likely a parse error downstream |
-| Circular cascade chain (A → B → A)                                                                 | `@cascadeAuth forms a cycle through type B`              |
+| Violation                                                                                          | Error                                              |
+| -------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| Used on a scalar or enum field                                                                     | `@cascadeAuth can only be used on edge fields`     |
+| Used on a `@remote` type                                                                           | `@cascadeAuth cannot be used on a @remote type`    |
+| Target type has no `@auth` rules and is not an interface with implementing types that have `@auth` | `@cascadeAuth: target type "T" has no @auth rules` |
+| `depth` not ≥ 1 or -1                                                                              | `@cascadeAuth: depth must be ≥ 1 or -1`            |
+| `variableContext` not one of `"self"`, `"parent"`, `"adaptive"`, `"propagate"`                     | Validation error                                   |
+| `variableContext: "self"` and child has no `@authVariables`                                        | Schema load error                                  |
+| `variableContext: "parent"` and immediate authority has no `@authVariables`                        | Schema load error                                  |
+| `variableContext: "adaptive"` and neither child nor any ancestor has `@authVariables`              | Schema load error                                  |
+| `variableContext: "propagate"` and no ancestor in the chain has `@authVariables`                   | Schema load error                                  |
+| `{{KEY}}` referenced in template has no matching entry in `@authVariables`                         | Unresolved placeholder error at schema load        |
+| Circular cascade chain (A → B → A)                                                                 | `@cascadeAuth forms a cycle through type B`        |
 
 ---
 

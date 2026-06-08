@@ -23,7 +23,9 @@ type CascadeAuthFieldConfig struct {
 	OperationsProvided bool
 	// Bidirectional propagates child auth rules back to the parent.
 	Bidirectional bool
-	// VariableContext controls @authVariables resolution: "parent", "self", or "adaptive".
+	// VariableContext controls @authVariables resolution:
+	// "self" (queried type), "parent" (immediate authority), "adaptive" (self→parent chain),
+	// or "propagate" (nearest ancestor with vars, starting from authority).
 	VariableContext string
 	// Depth limits cascade hops (-1 = unlimited).
 	Depth int
@@ -170,6 +172,21 @@ func (t *astType) AuthVariables() map[string]string {
 // ---------------------------------------------------------------------------
 // Helper functions used by cascade_auth_expand.go
 // ---------------------------------------------------------------------------
+
+// hasAuthVariables reports whether the named type has an @authVariables directive
+// with at least one key declared. Returns false if typeName is not found in sch.
+func hasAuthVariables(sch *schema, typeName string) bool {
+	def := sch.schema.Types[typeName]
+	if def == nil {
+		return false
+	}
+	dir := def.Directives.ForName(authVariablesDirective)
+	if dir == nil {
+		return false
+	}
+	varsArg := dir.Arguments.ForName("vars")
+	return varsArg != nil && varsArg.Value != nil && len(varsArg.Value.Children) > 0
+}
 
 // unresolvedAuthVarKeys returns placeholder keys still unresolved after
 // substitutAuthVars (i.e. still matching the {{…}} pattern).
