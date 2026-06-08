@@ -132,6 +132,58 @@ quota: Int
 > When `expr` calls `error(msg)`, the expression returns false and `{{.error}}` is populated with
 > `msg`. When `expr` simply returns `false`, `{{.error}}` is an empty string `""`.
 
+> [!IMPORTANT] `{{.error}}` requires `expr:` to call `error()` explicitly. It is **not** populated
+> by runtime exceptions (nil dereference, etc.) — those panic and surface as a different error. Use
+> `error()` as the last step in any conditional that wants to emit a human-readable message:
+>
+> ```graphql
+> # ✅ correct — error() propagates the message into {{.error}}
+> expr: "value < 100 || error('limit is 100, got ' + string(value))"
+> reason: "Validation failed: {{.error}}"
+>
+> # ❌ wrong — expr returns false; {{.error}} is always empty
+> expr: "value < 100"
+> reason: "Validation failed: {{.error}}"   ← renders as "Validation failed: "
+> ```
+
+#### `callLambda` + `{{.error}}` pattern
+
+The most powerful use of `{{.error}}` is with `callLambda` for server-side uniqueness or quota
+checks. The lambda can return a structured response; the expression extracts the message and calls
+`error()` so the reason template receives it:
+
+```graphql
+email: String @search(by: [hash, regexp]) @oldValue
+  @validate(
+    expr: """
+      let res = ((before?.email ?? "") != input.email)
+        ? callLambda("Candidate.checkUniqueEmail", {"args": {
+            "inWorkspace": auth.ws,
+            "sId": after.sId,
+            "email": input.email,
+          }})
+        : nil;
+      (res?.code ?? 200) == 200 ? true : error(res?.message)
+    """,
+    reason: "Email validation failed: {{.error}}"
+  )
+```
+
+When the lambda returns `{ code: 409, message: "email already in use" }`, the client receives:
+
+```
+"Email validation failed: email already in use"
+```
+
+When the email hasn't changed (`before.email == input.email`), `res` is `nil`, `res?.code` is `nil`,
+`nil ?? 200` is `200`, and the expression returns `true` — the lambda is skipped entirely.
+
+> [!NOTE] `{{.error}}` in `@validate` works the same way as in `@postValidate`. Both renderers
+> extract the `ExprError.Message` from the `error()` call and pass it as the `{{.error}}` template
+> variable. `@validate` required a pointer-receiver fix to `validateExpr` so that the error message
+> written inside the validator closure is visible to the `renderValidateReason` call that follows —
+> prior to that fix, `{{.error}}` always rendered as `""`.
+
 ---
 
 ## Operation-Specific Arms

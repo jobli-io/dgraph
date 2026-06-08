@@ -388,6 +388,11 @@ The lambda receives the full `nodes` batch (with `uid`, `before`, `after`, `new`
 external systems or Dgraph directly, and must return a response that the expression can evaluate.
 The caller's JWT is forwarded automatically.
 
+> [!NOTE] `@validate` supports the same `callLambda` + `{{.error}}` pattern at the **field level**.
+> See [validate.md §`callLambda` + `{{.error}}` pattern](validate.md#calllambda--error-pattern) for
+> the field-level equivalent and important notes on how `error()` must be called explicitly for
+> `{{.error}}` to be populated.
+
 ### Validate on add only; skip on update
 
 ```graphql
