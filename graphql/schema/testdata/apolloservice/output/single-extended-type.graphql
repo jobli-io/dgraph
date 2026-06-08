@@ -358,7 +358,6 @@ enum CascadeAuthVariableContext {
 	self
 	parent
 	adaptive
-	propagate
 }
 
 enum ProductHasFilter {

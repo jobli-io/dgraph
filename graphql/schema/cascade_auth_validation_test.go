@@ -8,7 +8,7 @@ package schema
 // Tests for @cascadeAuth directive validation — variableContext modes.
 //
 // These tests exercise cascadeAuthDirectiveValidation and the helpers it calls
-// (chainHasAuthVariables, authVarKeysFromDef, collectUnresolvedKeys).
+// (authVarKeysFromDef, collectUnresolvedKeys).
 // Each test calls NewHandler directly and asserts either success or a specific
 // error message fragment.
 
@@ -117,8 +117,9 @@ type Group implements WorkspaceMember
 // variableContext: "parent"
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestCascadeAuthValidation_Parent_RequiresAuthVariablesOnImmediateAuthority(t *testing.T) {
-	// Workspace has no @authVariables but parent requires it → schema error.
+func TestCascadeAuthValidation_Parent_PassesWhenAuthorityHasNoPlaceholdersAndNoAuthVars(t *testing.T) {
+	// Workspace's @auth rule has no {{KEY}} placeholders — the rule is
+	// self-contained. parent is valid even without @authVariables on Workspace.
 	const noVarsWorkspace = `
 type Workspace
   @auth(query: { rule: """
@@ -137,11 +138,7 @@ type Group implements WorkspaceMember {
   name: String
 }
 `
-	buildSchemaErr(t, noVarsWorkspace,
-		"parent",
-		"@authVariables",
-		"Workspace",
-	)
+	buildSchemaOK(t, noVarsWorkspace)
 }
 
 func TestCascadeAuthValidation_Parent_PassesWhenImmediateAuthorityHasAuthVariables(t *testing.T) {
@@ -158,8 +155,9 @@ type Group implements WorkspaceMember {
 	buildSchemaOK(t, input)
 }
 
-func TestCascadeAuthValidation_Parent_SuggestsPropagateInErrorMessage(t *testing.T) {
-	// Error message should suggest "propagate" as the alternative.
+func TestCascadeAuthValidation_Parent_PassesWhenAuthorityRuleHasNoPlaceholders(t *testing.T) {
+	// Workspace's @auth rule has no {{KEY}} placeholders — the rule is
+	// self-contained. parent is valid even without @authVariables on Workspace.
 	const input = `
 type Workspace
   @auth(query: { rule: """
@@ -178,7 +176,35 @@ type Group implements WorkspaceMember {
   name: String
 }
 `
-	buildSchemaErr(t, input, "propagate")
+	buildSchemaOK(t, input)
+}
+
+func TestCascadeAuthValidation_Parent_ErrorsWhenAuthorityRuleHasUnresolvedPlaceholders(t *testing.T) {
+	// Workspace's @auth rule contains {{PERMISSIONS}} — it requires substitution.
+	// parent must fail because Workspace has no @authVariables to supply the value.
+	const input = `
+type Workspace
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryWorkspace(filter: {
+        hasIAMBinding: { forRole: { permission: { in: {{PERMISSIONS}} } } }
+      }) { __typename }
+    }
+  """ })
+{
+  name: String
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(variableContext: parent)
+}
+
+type Group implements WorkspaceMember {
+  name: String
+}
+`
+	buildSchemaErr(t, input, "PERMISSIONS")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -187,10 +213,16 @@ type Group implements WorkspaceMember {
 
 func TestCascadeAuthValidation_Adaptive_ErrorsWhenNoAncestorHasAuthVariables(t *testing.T) {
 	// Neither Group (child) nor Workspace (authority) has @authVariables.
+	// Workspace's @auth rule has {{PERMISSIONS}} — substitution is needed.
+	// adaptive must fail — no type in the chain supplies @authVariables.
 	const input = `
 type Workspace
   @auth(query: { rule: """
-    query { queryWorkspace { __typename } }
+    query($sub: String!) {
+      queryWorkspace(filter: {
+        hasIAMBinding: { forRole: { permission: { in: {{PERMISSIONS}} } } }
+      }) { __typename }
+    }
   """ })
 {
   name: String
@@ -287,130 +319,13 @@ type Ad implements GroupMember {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// variableContext: "propagate"
-// ─────────────────────────────────────────────────────────────────────────────
-
-func TestCascadeAuthValidation_Propagate_ErrorsWhenNoAncestorHasAuthVariables(t *testing.T) {
-	// Workspace (immediate authority) has no @authVariables and no further
-	// ancestors → propagate must fail.
-	const input = `
-type Workspace
-  @auth(query: { rule: """
-    query { queryWorkspace { __typename } }
-  """ })
-{
-  name: String
-  hasGroups: [Group] @hasInverse(field: inWorkspace)
-}
-
-interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth(variableContext: propagate)
-}
-
-type Group implements WorkspaceMember {
-  name: String
-}
-`
-	buildSchemaErr(t, input, "propagate", "@authVariables")
-}
-
-func TestCascadeAuthValidation_Propagate_PassesWhenImmediateAuthorityHasAuthVariables(t *testing.T) {
-	// Workspace (immediate authority) has @authVariables → propagate satisfied.
-	const input = baseWorkspaceType + `
-interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth(variableContext: propagate)
-}
-
-type Group implements WorkspaceMember {
-  name: String
-}
-`
-	buildSchemaOK(t, input)
-}
-
-func TestCascadeAuthValidation_Propagate_PassesWhenGrandparentHasAuthVariables(t *testing.T) {
-	// A→B (propagate), B has no vars, C has vars → propagate finds C → passes.
-	const input = `
-type Workspace
-  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_WORKSPACE"]}])
-  @auth(query: { rule: """
-    query { queryWorkspace { __typename } }
-  """ })
-{
-  name: String
-  hasGroups: [Group] @hasInverse(field: inWorkspace)
-}
-
-interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth(variableContext: propagate)
-}
-
-type Group implements WorkspaceMember
-  @auth(query: { rule: """
-    query { queryGroup { __typename } }
-  """ })
-{
-  name: String
-  hasAds: [Ad] @hasInverse(field: inGroup)
-}
-
-interface GroupMember {
-  inGroup: Group @cascadeAuth(variableContext: propagate)
-}
-
-type Ad implements GroupMember {
-  name: String
-}
-`
-	// Group has no vars, but Workspace does → propagate on Ad→Group walks to Workspace → passes.
-	buildSchemaOK(t, input)
-}
-
-func TestCascadeAuthValidation_Propagate_ErrorsWhenChainHasNoVarsAtAll(t *testing.T) {
-	// A→B→C, none has @authVariables → propagate on A→B fails.
-	const input = `
-type Workspace
-  @auth(query: { rule: """
-    query { queryWorkspace { __typename } }
-  """ })
-{
-  name: String
-  hasGroups: [Group] @hasInverse(field: inWorkspace)
-}
-
-interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth(variableContext: propagate)
-}
-
-type Group implements WorkspaceMember
-  @auth(query: { rule: """
-    query { queryGroup { __typename } }
-  """ })
-{
-  name: String
-  hasAds: [Ad] @hasInverse(field: inGroup)
-}
-
-interface GroupMember {
-  inGroup: Group @cascadeAuth(variableContext: propagate)
-}
-
-type Ad implements GroupMember {
-  name: String
-}
-`
-	buildSchemaErr(t, input, "propagate", "@authVariables")
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Multi-mode chain: propagate + self interaction (user scenario)
-// A→B (propagate), B→C (propagate), C→D (self)
+// Multi-mode chain: adaptive + self interaction (user scenario)
+// A→B (adaptive), B→C (adaptive), C→D (self)
 // C has no @authVariables → self on C→D fails.
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestCascadeAuthValidation_SelfOnCFailsWhenCHasNoVars_PropagateSatisfied(t *testing.T) {
-	// A→B (propagate): B has no vars, D does → propagate finds D → passes.
-	// B→C (propagate): C has no vars, D does → propagate finds D → passes.
+func TestCascadeAuthValidation_SelfOnCFailsWhenCHasNoVars(t *testing.T) {
+	// A→B (adaptive), B→C (adaptive): both pass (no error required for adaptive).
 	// C→D (self): C has no @authVariables → schema error (self requires C to have vars).
 	const input = `
 type DType
@@ -437,7 +352,7 @@ type CType implements DMember
 }
 
 interface CMember {
-  inC: CType @cascadeAuth(variableContext: propagate)
+  inC: CType @cascadeAuth(variableContext: adaptive)
 }
 
 type BType implements CMember
@@ -450,7 +365,7 @@ type BType implements CMember
 }
 
 interface BMember {
-  inB: BType @cascadeAuth(variableContext: propagate)
+  inB: BType @cascadeAuth(variableContext: adaptive)
 }
 
 type AType implements BMember {
@@ -461,7 +376,7 @@ type AType implements BMember {
 	buildSchemaErr(t, input, "self", "@authVariables")
 }
 
-func TestCascadeAuthValidation_SelfOnCPassesWhenCHasVars_PropagateChain(t *testing.T) {
+func TestCascadeAuthValidation_SelfOnCPassesWhenCHasVars(t *testing.T) {
 	// Same chain but C now has @authVariables → all edges pass.
 	const input = `
 type DType
@@ -489,7 +404,7 @@ type CType implements DMember
 }
 
 interface CMember {
-  inC: CType @cascadeAuth(variableContext: propagate)
+  inC: CType @cascadeAuth(variableContext: adaptive)
 }
 
 type BType implements CMember
@@ -502,7 +417,7 @@ type BType implements CMember
 }
 
 interface BMember {
-  inB: BType @cascadeAuth(variableContext: propagate)
+  inB: BType @cascadeAuth(variableContext: adaptive)
 }
 
 type AType implements BMember {
