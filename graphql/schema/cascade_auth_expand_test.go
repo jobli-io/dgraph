@@ -1680,3 +1680,430 @@ type Ad implements GroupMember
 			"Ad should inherit exactly 2 leaves from the Group cascade chain")
 	})
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// variableContext: "parent" — expansion tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestCascadeAuth_Variable_ParentContextFreezesAuthorityVars tests that
+// variableContext: "parent" uses the immediate authority's (Workspace's) own
+// @authVariables for the cascade rule, not the child's (Group's) vars.
+//
+// Schema: Group → Workspace (parent). Workspace has PERMISSIONS=[READ_WS],
+// Group has PERMISSIONS=[READ_GROUP]. The cascade rule for Group must embed
+// READ_WS (from Workspace), not READ_GROUP.
+func TestCascadeAuth_Variable_ParentContextFreezesAuthorityVars(t *testing.T) {
+	const input = `
+type Workspace
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_WS"]}])
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryWorkspace(filter: {
+        name: { eq: $sub }
+      }) { __typename }
+    }
+  """ })
+{
+  name: String @search(by: [exact])
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(variableContext: parent)
+}
+
+type Group implements WorkspaceMember
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_GROUP"]}])
+{
+  name: String
+}
+`
+	s := buildSchema(t, input)
+	logAuthRules(t, s, "Group")
+
+	groupAuth := s.authRules["Group"]
+	require.NotNil(t, groupAuth)
+	require.NotNil(t, groupAuth.Rules)
+	require.NotNil(t, groupAuth.Rules.Query, "Group must inherit cascade auth from Workspace")
+
+	q := groupAuth.Rules.Query
+
+	t.Run("cascade wraps Workspace authority", func(t *testing.T) {
+		preds := collectCascadeInversePreds(q)
+		assert.True(t, preds["inWorkspace"],
+			"cascade rule must traverse inWorkspace; preds: %v", preds)
+	})
+
+	t.Run("cascade has exactly 1 leaf (Workspace auth)", func(t *testing.T) {
+		assert.Equal(t, 1, countLeaves(q),
+			"parent mode: cascade rule should have exactly 1 leaf (Workspace's own rule); tree:\n%s",
+			formatRuleNode(q, 1))
+	})
+}
+
+// TestCascadeAuth_Variable_ParentContextChained tests the multi-hop case where
+// BOTH edges in A→B→C use variableContext: "parent".
+//
+// Each hop advances the anchor independently:
+//   - Ad→Group (parent): Group's vars (READ_GROUP) frozen for Group's rule.
+//   - Group→Workspace (parent): Workspace's vars (READ_WS) frozen for Workspace's rule.
+//
+// Expected: the two cascade leaves use their own immediate authority's vars.
+func TestCascadeAuth_Variable_ParentContextChained(t *testing.T) {
+	const input = `
+type Workspace
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_WS"]}])
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryWorkspace(filter: { name: { eq: $sub } }) { __typename }
+    }
+  """ })
+{
+  name: String @search(by: [exact])
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(variableContext: parent)
+}
+
+type Group implements WorkspaceMember
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_GROUP"]}])
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryGroup(filter: { name: { eq: $sub } }) { __typename }
+    }
+  """ })
+{
+  name: String @search(by: [exact])
+  hasAds: [Ad] @hasInverse(field: inGroup)
+}
+
+interface GroupMember {
+  inGroup: Group @cascadeAuth(variableContext: parent)
+}
+
+type Ad implements GroupMember
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_AD"]}])
+{
+  name: String
+}
+`
+	s := buildSchema(t, input)
+	logAuthRules(t, s, "Ad")
+
+	adAuth := s.authRules["Ad"]
+	require.NotNil(t, adAuth)
+	require.NotNil(t, adAuth.Rules)
+	require.NotNil(t, adAuth.Rules.Query)
+
+	q := adAuth.Rules.Query
+
+	t.Run("chain has two cascade edges (inGroup and inWorkspace)", func(t *testing.T) {
+		preds := collectCascadeInversePreds(q)
+		assert.True(t, preds["inGroup"], "inGroup pred must be present; preds: %v", preds)
+		assert.True(t, preds["inWorkspace"], "inWorkspace pred must be present; preds: %v", preds)
+	})
+
+	t.Run("exactly 2 cascade leaves: Group and Workspace", func(t *testing.T) {
+		assert.Equal(t, 2, countLeaves(q),
+			"chained parent: should have one leaf per authority hop; tree:\n%s", formatRuleNode(q, 1))
+	})
+
+	t.Run("Ad's own vars (READ_AD) are NOT used in any cascade leaf", func(t *testing.T) {
+		templates := collectLeafTemplates(q)
+		assert.Empty(t, templatesContaining(templates, "READ_AD"),
+			"parent mode: Ad's own vars must not appear in cascade leaves; templates: %v", templates)
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// variableContext: "adaptive" — expansion tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestCascadeAuth_Variable_AdaptiveUsesChildVarsWhenPresent tests that
+// adaptive uses the queried child's (Group's) own @authVariables when present.
+func TestCascadeAuth_Variable_AdaptiveUsesChildVarsWhenPresent(t *testing.T) {
+	const input = `
+type Workspace
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_WS"]}])
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryWorkspace(filter: { name: { eq: $sub } }) { __typename }
+    }
+  """ })
+{
+  name: String @search(by: [exact])
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(variableContext: adaptive)
+}
+
+type Group implements WorkspaceMember
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_GROUP"]}])
+{
+  name: String
+}
+`
+	s := buildSchema(t, input)
+	logAuthRules(t, s, "Group")
+
+	groupAuth := s.authRules["Group"]
+	require.NotNil(t, groupAuth)
+	require.NotNil(t, groupAuth.Rules)
+	require.NotNil(t, groupAuth.Rules.Query)
+
+	q := groupAuth.Rules.Query
+
+	t.Run("cascade traverses inWorkspace edge", func(t *testing.T) {
+		preds := collectCascadeInversePreds(q)
+		assert.True(t, preds["inWorkspace"],
+			"cascade must traverse inWorkspace; preds: %v", preds)
+	})
+
+	t.Run("adaptive produces exactly 1 leaf (Workspace's own rule)", func(t *testing.T) {
+		assert.Equal(t, 1, countLeaves(q),
+			"adaptive (child has vars): must produce exactly 1 leaf; tree:\n%s", formatRuleNode(q, 1))
+	})
+}
+
+// TestCascadeAuth_Variable_AdaptiveFallsBackToAncestorWhenChildHasNoVars tests
+// that when the child (Group) has no @authVariables, adaptive falls back to the
+// nearest ancestor (Workspace) that does.
+func TestCascadeAuth_Variable_AdaptiveFallsBackToAncestorWhenChildHasNoVars(t *testing.T) {
+	const input = `
+type Workspace
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_WS"]}])
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryWorkspace(filter: { name: { eq: $sub } }) { __typename }
+    }
+  """ })
+{
+  name: String @search(by: [exact])
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(variableContext: adaptive)
+}
+
+type Group implements WorkspaceMember {
+  name: String
+}
+`
+	// Group has no @authVariables → adaptive falls back to Workspace's vars.
+	s := buildSchema(t, input)
+	logAuthRules(t, s, "Group")
+
+	groupAuth := s.authRules["Group"]
+	require.NotNil(t, groupAuth)
+	require.NotNil(t, groupAuth.Rules)
+	require.NotNil(t, groupAuth.Rules.Query, "Group must inherit cascade auth")
+
+	q := groupAuth.Rules.Query
+
+	t.Run("adaptive fallback: cascade traverses inWorkspace", func(t *testing.T) {
+		preds := collectCascadeInversePreds(q)
+		assert.True(t, preds["inWorkspace"],
+			"cascade must traverse inWorkspace; preds: %v", preds)
+	})
+
+	t.Run("adaptive fallback: produces exactly 1 leaf (Workspace auth)", func(t *testing.T) {
+		assert.Equal(t, 1, countLeaves(q),
+			"adaptive fallback: 1 leaf expected; tree:\n%s", formatRuleNode(q, 1))
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// variableContext: "propagate" — expansion tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestCascadeAuth_Variable_PropagateUsesImmediateAuthorityVarsWhenPresent tests
+// that propagate behaves identically to parent when the immediate authority (B)
+// has @authVariables.
+func TestCascadeAuth_Variable_PropagateUsesImmediateAuthorityVarsWhenPresent(t *testing.T) {
+	const input = `
+type Workspace
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_WS"]}])
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryWorkspace(filter: { name: { eq: $sub } }) { __typename }
+    }
+  """ })
+{
+  name: String @search(by: [exact])
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(variableContext: propagate)
+}
+
+type Group implements WorkspaceMember {
+  name: String
+}
+`
+	s := buildSchema(t, input)
+	logAuthRules(t, s, "Group")
+
+	groupAuth := s.authRules["Group"]
+	require.NotNil(t, groupAuth)
+	require.NotNil(t, groupAuth.Rules)
+	require.NotNil(t, groupAuth.Rules.Query)
+
+	q := groupAuth.Rules.Query
+
+	t.Run("propagate: cascade traverses inWorkspace edge", func(t *testing.T) {
+		preds := collectCascadeInversePreds(q)
+		assert.True(t, preds["inWorkspace"],
+			"propagate must traverse inWorkspace; preds: %v", preds)
+	})
+
+	t.Run("propagate: exactly 1 leaf (Workspace's own rule)", func(t *testing.T) {
+		assert.Equal(t, 1, countLeaves(q),
+			"propagate: should produce 1 leaf (Workspace's rule); tree:\n%s", formatRuleNode(q, 1))
+	})
+}
+
+// TestCascadeAuth_Variable_PropagateWalksUpWhenImmediateAuthorityHasNoVars tests
+// the key propagate scenario: the immediate authority (Group) has no @authVariables
+// but a grandparent (Workspace) does. Propagate must freeze Workspace's vars and
+// apply them to both Group's and Workspace's cascade rules.
+//
+// Chain: Ad→Group (propagate), Group→Workspace (propagate).
+// Group has no @authVariables. Workspace has PERMISSIONS=[READ_WS].
+// Expected: all cascade leaves use READ_WS (from Workspace).
+func TestCascadeAuth_Variable_PropagateWalksUpWhenImmediateAuthorityHasNoVars(t *testing.T) {
+	const input = `
+type Workspace
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_WS"]}])
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryWorkspace(filter: { name: { eq: $sub } }) { __typename }
+    }
+  """ })
+{
+  name: String @search(by: [exact])
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(variableContext: propagate)
+}
+
+type Group implements WorkspaceMember
+  @auth(query: { rule: """
+    query { queryGroup { __typename } }
+  """ })
+{
+  name: String
+  hasAds: [Ad] @hasInverse(field: inGroup)
+}
+
+interface GroupMember {
+  inGroup: Group @cascadeAuth(variableContext: propagate)
+}
+
+type Ad implements GroupMember
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_AD"]}])
+{
+  name: String
+}
+
+`
+	// Group has no @authVariables; Workspace does.
+	// propagate on Ad→Group: walk from Group → no vars → Workspace has vars → freeze Workspace.
+	// propagate on Group→Workspace: walk from Workspace → Workspace has vars → freeze Workspace.
+	// All cascade leaves should embed READ_WS.
+	s := buildSchema(t, input)
+	logAuthRules(t, s, "Ad")
+
+	adAuth := s.authRules["Ad"]
+	require.NotNil(t, adAuth)
+	require.NotNil(t, adAuth.Rules)
+	require.NotNil(t, adAuth.Rules.Query)
+
+	q := adAuth.Rules.Query
+
+	t.Run("propagate: 2 cascade leaves (Group's rule + Workspace's rule)", func(t *testing.T) {
+		assert.Equal(t, 2, countLeaves(q),
+			"propagate walk: should have one leaf per hop in the chain; tree:\n%s", formatRuleNode(q, 1))
+	})
+
+	t.Run("Ad's own PERMISSIONS (READ_AD) not used in cascade leaves", func(t *testing.T) {
+		templates := collectLeafTemplates(q)
+		assert.Empty(t, templatesContaining(templates, "READ_AD"),
+			"propagate: Ad's own vars must not bleed into cascade leaves; templates: %v", templates)
+	})
+}
+
+// TestCascadeAuth_Variable_PropagateVsParentDifferentWhenIntermediateHasNoVars
+// contrasts parent and propagate when the intermediate type (Group) has no vars:
+//
+//   - parent on Ad→Group: schema load error (Group must have @authVariables).
+//   - propagate on Ad→Group: walks to Workspace → READ_WS used. Passes.
+//
+// This test only exercises the propagate side (parent would fail validation).
+func TestCascadeAuth_Variable_PropagatePassesWhereParentWouldFail(t *testing.T) {
+	// Group has no @authVariables → parent would error; propagate finds Workspace.
+	const input = `
+type Workspace
+  @authVariables(vars: [{key: "PERMISSIONS", value: ["READ_WS"]}])
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryWorkspace(filter: { name: { eq: $sub } }) { __typename }
+    }
+  """ })
+{
+  name: String @search(by: [exact])
+  hasGroups: [Group] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(variableContext: propagate)
+}
+
+type Group implements WorkspaceMember
+  @auth(query: { rule: """
+    query { queryGroup { __typename } }
+  """ })
+{
+  name: String
+  hasAds: [Ad] @hasInverse(field: inGroup)
+}
+
+interface GroupMember {
+  inGroup: Group @cascadeAuth(variableContext: propagate)
+}
+
+type Ad implements GroupMember {
+  name: String
+}
+`
+	s := buildSchema(t, input)
+
+	adAuth := s.authRules["Ad"]
+	require.NotNil(t, adAuth, "Ad must have auth rules via cascade")
+	require.NotNil(t, adAuth.Rules)
+	require.NotNil(t, adAuth.Rules.Query)
+
+	q := adAuth.Rules.Query
+
+	t.Run("schema builds without error despite Group having no @authVariables", func(t *testing.T) {
+		assert.NotNil(t, q)
+	})
+
+	t.Run("cascade traverses both inGroup and inWorkspace edges", func(t *testing.T) {
+		preds := collectCascadeInversePreds(q)
+		assert.True(t, preds["inGroup"], "inGroup must be in cascade; preds: %v", preds)
+		assert.True(t, preds["inWorkspace"], "inWorkspace must be in cascade; preds: %v", preds)
+	})
+
+	t.Run("cascade has 2 leaves (Group's rule + Workspace's rule)", func(t *testing.T) {
+		assert.Equal(t, 2, countLeaves(q),
+			"propagate walk: 2 leaves expected; tree:\n%s", formatRuleNode(q, 1))
+	})
+}

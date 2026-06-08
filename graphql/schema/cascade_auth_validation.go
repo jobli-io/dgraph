@@ -208,14 +208,44 @@ func cascadeAuthDirectiveValidation(sch *ast.Schema,
 			}
 
 		case "adaptive", "propagate":
-			// At least one type in the cascade chain must have @authVariables.
-			// For "adaptive": start from the host type (typ) then walk ancestors.
-			// For "propagate": start from the authority (fieldTypeName) and walk ancestors.
-			startType := fieldTypeName // propagate starts from authority
-			if vc == "adaptive" && typ.Directives.ForName(authVariablesDirective) != nil {
-				break // host type already has vars — satisfied
+			// adaptive:  satisfied if the child type (typ), any concrete implementor
+			//            of typ (when typ is an interface), OR any type reachable
+			//            from the authority (fieldTypeName) has @authVariables.
+			// propagate: satisfied if any type reachable from the authority has
+			//            @authVariables (child's own vars are irrelevant).
+			if vc == "adaptive" {
+				// Check the declaring type first.
+				if typ.Directives.ForName(authVariablesDirective) != nil {
+					break // satisfied
+				}
+				// When the field is declared on an interface, check concrete implementors.
+				// Interfaces cannot carry @authVariables themselves, but their concrete
+				// types do. Any implementor having vars satisfies adaptive.
+				if typ.Kind == ast.Interface {
+					implementorHasVars := false
+					for _, candDef := range sch.Types {
+						if candDef.Kind != ast.Object {
+							continue
+						}
+						for _, iface := range candDef.Interfaces {
+							if iface == typ.Name {
+								if candDef.Directives.ForName(authVariablesDirective) != nil {
+									implementorHasVars = true
+								}
+								break
+							}
+						}
+						if implementorHasVars {
+							break
+						}
+					}
+					if implementorHasVars {
+						break // satisfied by a concrete implementor
+					}
+				}
 			}
-			if !chainHasAuthVariables(sch, startType, map[string]bool{}) {
+			// Walk from the authority upward for both adaptive and propagate.
+			if !chainHasAuthVariables(sch, fieldTypeName, map[string]bool{}) {
 				return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
 					"Type %s; Field %s: @cascadeAuth variableContext %q requires at least one type "+
 						"in the cascade chain to declare @authVariables, but none were found. "+
