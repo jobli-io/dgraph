@@ -3504,7 +3504,15 @@ func (pwe *CompileError) Unwrap() error {
 // Returns `false` if the expression evaluates to a falsy value (e.g., boolean false, 0, empty string, nil).
 // Designed to cause a panic if expression compilation or evaluation results in a critical error,
 // which is then caught by the `ValidateValue`'s defer function.
-func (eec exprEvaluationContext) validateExpr(exprString string) func(fl validator.FieldLevel) bool {
+//
+// IMPORTANT: this method must use a POINTER receiver so that the assignment
+//
+//	eec.exprErrorMsg = exprErr.Message
+//
+// writes through to the original exprEvaluationContext held by validateValue.
+// With a value receiver Go copies the struct into the method, so the write
+// is discarded and {{.error}} in the reason template always renders as "".
+func (eec *exprEvaluationContext) validateExpr(exprString string) func(fl validator.FieldLevel) bool {
 	return func(fl validator.FieldLevel) bool {
 		// Compile the expression. If this fails, it indicates a syntactically invalid expression
 		// in the schema (a developer error), which should ideally be caught at schema definition time.
@@ -3522,7 +3530,7 @@ func (eec exprEvaluationContext) validateExpr(exprString string) func(fl validat
 			// Other runtime errors (e.g. nil dereference) are panicked as before.
 			var exprErr *ExprError
 			if errors.As(runErr, &exprErr) {
-				eec.exprErrorMsg = exprErr.Message
+				eec.exprErrorMsg = exprErr.Message // writes to original eev via pointer
 				return false
 			}
 			panic(fmt.Errorf("expression execution failed for field '%s' with rule '%s': %w", fl.FieldName(), exprString, runErr))
