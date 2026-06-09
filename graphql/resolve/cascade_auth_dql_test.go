@@ -1639,3 +1639,131 @@ func TestCascadeAuthDQL_OwnAuthPlusCascadeOrPolicy(t *testing.T) {
 		``, // wantDQL empty: validate parse + log only; var numbering not asserted
 	)
 }
+
+// ---------------------------------------------------------------------------
+// TestCascadeAuthDQL_InterfaceOrMerge_AuthorityHasDifferentQueriedType
+//
+// Regression test for: "cascadeAuth drops IAM arm when authority type
+// OR-merges an interface rule that queries a different type"
+//
+// Schema structure mirrors the real Jobli production case:
+//   - IAMResource interface has @auth(mergeInto: "or") with a rule that queries
+//     queryIAMResource (NOT queryWorkspace).
+//   - Workspace implements IAMResource — so Workspace.Rules.Query becomes:
+//     OR(Workspace_owner_check, IAMResource_check)
+//   - EmailOutbound implements WorkspaceMember with no own @auth.
+//     It inherits the full cascaded Workspace auth via @cascadeAuth on inWorkspace.
+//
+// Bug (before fix): In rewriteRuleNode Case C, cascadeAuthorityType = "Workspace"
+// was applied to ALL rule leaves in the inner Or tree, including the IAMResource
+// leaf which queries queryIAMResource. This produced:
+//
+//	Auth_N as var(func: type(Workspace)) @filter(uid_in(hasIAMBinding, ...))
+//
+// Dgraph scans Workspace nodes but hasIAMBinding lives on IAMResource nodes —
+// zero results every time. The IAM arm was silently absent from all generated DQL.
+//
+// Fix: use qry.Type().DgraphName() when available, fall back to cascadeAuthorityType.
+// ---------------------------------------------------------------------------
+const cascadeAuthInterfaceOrMergeSchema = `
+interface IAMResource @auth(
+  mergeInto: "or"
+  query: {
+    rule: """
+    query ($azp: String!) {
+      queryIAMResource(filter: {
+        clientId: { eq: $azp }
+        permission: { in: {{QRY_PERMISSIONS}} }
+      }) { __typename }
+    }
+    """
+  }
+) @authVariables(vars: [
+  { key: "QRY_PERMISSIONS", value: [] }
+]) {
+  id:         ID!
+  clientId:   String @search(by: [hash])
+  permission: String @search(by: [hash])
+}
+
+type Workspace implements IAMResource
+  @authVariables(vars: [
+    { key: "QRY_PERMISSIONS", value: ["_WORKSPACE" "_ALL"] }
+  ])
+  @auth(
+    query: {
+      rule: """
+      query ($EMAIL: String!) {
+        queryWorkspace {
+          inUsers(filter: { email: { eq: $EMAIL } }) { __typename }
+        }
+      }
+      """
+    }
+  )
+{
+  name:     String @id
+  inUsers:  [User]
+  hasEmailOutbounds: [EmailOutbound] @hasInverse(field: inWorkspace)
+}
+
+type User {
+  email: String @id
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(operations: [query])
+}
+
+type EmailOutbound implements WorkspaceMember
+  @authVariables(vars: [
+    { key: "QRY_PERMISSIONS", value: ["_EMAIL" "_ALL"] }
+  ])
+  @cascadeAuthPolicy(aggregation: "or")
+{
+  subject: String
+}
+`
+
+func TestCascadeAuthDQL_InterfaceOrMerge_AuthorityHasDifferentQueriedType(t *testing.T) {
+	gqlSchema, metaInfo := cascadeAuthSchemaAndMeta(t, cascadeAuthInterfaceOrMergeSchema)
+
+	// App-token: $azp (client ID) is set, $sub is "anonymous" (no real user).
+	// Before the fix: only the Workspace-owner arm appeared — the IAM arm was silently
+	// dropped because it was rooted at type(Workspace) instead of type(IAMResource).
+	// After the fix: both arms appear; the IAM arm is rooted at type(IAMResource).
+	op, err := gqlSchema.Operation(&schema.Request{Query: `query { queryEmailOutbound { subject } }`})
+	require.NoError(t, err)
+	gqlQuery := test.GetQuery(t, op)
+
+	metaInfo.AuthVars = map[string]interface{}{
+		"azp": "my-app-client-id",
+		"sub": "anonymous",
+		"ws":  "my-workspace",
+	}
+	ctx, err := metaInfo.AddClaimsToContext(context.Background())
+	require.NoError(t, err)
+
+	rewriter := NewQueryRewriter()
+	dgQuery, err := rewriter.Rewrite(ctx, gqlQuery)
+	require.NoError(t, err)
+
+	actual := dgraph.AsString(dgQuery)
+	t.Logf("Generated DQL:\n%s", actual)
+
+	// DQL must parse cleanly (no unused-variable errors).
+	_, parseErr := dql.Parse(dql.Request{Str: actual})
+	require.NoError(t, parseErr, "DQL should parse without unused-variable errors")
+
+	// IAM arm must be rooted at type(IAMResource), not type(Workspace).
+	// Before the fix this assertion failed because the arm was silently dropped —
+	// it was rooted at type(Workspace) which has no IAMResource predicates.
+	require.Contains(t, actual, "type(IAMResource)",
+		"IAM arm must be rooted at type(IAMResource). "+
+			"If absent, the fix for interface-OR-merge cascade DQL generation regressed.")
+
+	// IAM arm must reference the IAMResource clientId filter predicate (from the
+	// IAMResource interface @auth rule), confirming the arm's content is correct.
+	require.Contains(t, actual, "IAMResource.clientId",
+		"IAM arm must include the IAMResource.clientId filter from the interface auth rule")
+}

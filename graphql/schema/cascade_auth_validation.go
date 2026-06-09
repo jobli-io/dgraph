@@ -423,9 +423,9 @@ func collectUnresolvedKeys(val *ast.Value, childVarKeys map[string]bool,
 	if val.Raw != "" {
 		raw := val.Raw
 		for i := 0; i < len(raw)-3; i++ {
-			if raw[i] == '{' && raw[i+1] == '{' {
+			if raw[i] == '<' && raw[i+1] == '<' {
 				end := i + 2
-				for end < len(raw)-1 && !(raw[end] == '}' && raw[end+1] == '}') {
+				for end < len(raw)-1 && !(raw[end] == '>' && raw[end+1] == '>') {
 					end++
 				}
 				if end < len(raw)-1 {
@@ -433,7 +433,7 @@ func collectUnresolvedKeys(val *ast.Value, childVarKeys map[string]bool,
 					if !childVarKeys[key] {
 						*errs = append(*errs, gqlerror.ErrorPosf(dir.Position,
 							"Type %s; Field %s: @cascadeAuth variableContext \"self\" — "+
-								"authority type %s uses {{%s}} in its @auth rule but "+
+								"authority type %s uses <<%s>> in its @auth rule but "+
 								"Type %s does not declare key %q in @authVariables",
 							typName, fieldName, authorityTypeName, key, typName, key))
 					}
@@ -688,9 +688,9 @@ func extractTemplateKeys(val *ast.Value, out map[string]bool) {
 	if val.Raw != "" {
 		raw := val.Raw
 		for i := 0; i < len(raw)-3; i++ {
-			if raw[i] == '{' && raw[i+1] == '{' {
+			if raw[i] == '<' && raw[i+1] == '<' {
 				end := i + 2
-				for end < len(raw)-1 && !(raw[end] == '}' && raw[end+1] == '}') {
+				for end < len(raw)-1 && !(raw[end] == '>' && raw[end+1] == '>') {
 					end++
 				}
 				if end < len(raw)-1 {

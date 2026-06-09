@@ -189,15 +189,15 @@ func hasAuthVariables(sch *schema, typeName string) bool {
 }
 
 // unresolvedAuthVarKeys returns placeholder keys still unresolved after
-// substitutAuthVars (i.e. still matching the {{…}} pattern).
+// substitutAuthVars (i.e. still matching the <<…>> pattern).
 func unresolvedAuthVarKeys(rule string) []string {
 	var keys []string
 	for {
-		start := strings.Index(rule, "{{")
+		start := strings.Index(rule, "<<")
 		if start == -1 {
 			break
 		}
-		end := strings.Index(rule[start:], "}}")
+		end := strings.Index(rule[start:], ">>")
 		if end == -1 {
 			break
 		}

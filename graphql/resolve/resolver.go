@@ -510,6 +510,13 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 			}
 			glog.Infof("Resolving GQL request: \n%s\nWith Variables: \n%s\n",
 				gqlReq.Query, string(b))
+
+			// Log decoded JWT auth payload so scope/azp/sub/ws are visible per-request.
+			if claims, claimsErr := r.schema.Meta().AuthMeta().ExtractCustomClaims(ctx); claimsErr == nil {
+				if authB, jsonErr := json.Marshal(claims.AuthVariables); jsonErr == nil {
+					glog.Infof("Auth payload: %s\n", string(authB))
+				}
+			}
 		}
 	}
 

@@ -1999,26 +1999,11 @@ func (authRw *authRewriter) rewriteRuleNode(
 		r1[0].Attr = "var"
 
 		if authRw.cascadeAuthorityType != "" {
-			// This Rule leaf is compiled inside a CascadeWrap Case C context.
-			// The rule belongs to the authority type (e.g. Group's IAMResource auth),
-			// not the child type (e.g. JobAd). We need:
-			//
-			//   Auth3 as var(func: type(Group)) @cascade {
-			//       IAMResource.hasIAMBinding @filter(uid(Role_var) AND uid(User_var) AND uid(Ws_var)) {
-			//           dgraph.type
-			//       }
-			//   }
-			//
-			// The rewriteAsQuery output in r1[0] was rooted at the child type (uid(JobAd_1))
-			// with the traversal body in its Children. We keep those children (the hasIAMBinding
-			// traversal) but swap the root func to type(cascadeAuthorityType) and ensure @cascade.
-			// This is semantically identical to Case B (CascadeEdgePred path) for simple rules.
+			// REVERTED: always use cascadeAuthorityType as the var root.
 			r1[0].Func = &dql.Function{
 				Name: "type",
 				Args: []dql.Arg{{Value: authRw.cascadeAuthorityType}},
 			}
-			// Keep r1[0].Children — they contain the @cascade traversal body (hasIAMBinding etc.)
-			// that makes the inline filter work correctly. Do NOT clear them.
 			if len(r1[0].Cascade) == 0 {
 				r1[0].Cascade = append(r1[0].Cascade, "__all__")
 			}

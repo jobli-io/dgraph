@@ -452,6 +452,29 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 		}
 	}
 
+	// Post-substitution validation: after both resolveTemplateLeaves passes, scan
+	// all rule nodes for remaining <<KEY>> placeholders. An unresolved placeholder
+	// means the key is either misspelled or not declared in @authVariables — the
+	// rule would silently become a no-op, leaving the type unprotected.
+	for typName, ta := range authRules {
+		if ta == nil {
+			continue
+		}
+		if ta.Rules != nil {
+			if err := scanUnresolvedInContainer(ta.Rules, typName); err != nil {
+				errResult = AppendGQLErrs(errResult, err)
+			}
+		}
+		for field, ac := range ta.Fields {
+			if ac == nil {
+				continue
+			}
+			if err := scanUnresolvedInContainer(ac, typName+"."+field); err != nil {
+				errResult = AppendGQLErrs(errResult, err)
+			}
+		}
+	}
+
 	// Expand @cascadeAuth directives: propagate parent @auth rules into child
 	// TypeAuth entries. This runs after interface auth has been merged into
 	// concrete types (so each type has its full rule set) but before interfaces
@@ -488,6 +511,55 @@ func snapshotTypeAuthMap(src map[string]*TypeAuth) map[string]*TypeAuth {
 		out[k] = &copy
 	}
 	return out
+}
+
+// scanUnresolvedInContainer checks all ops in an AuthContainer for rule nodes
+// that still contain unresolved <<KEY>> placeholders after both substitution
+// passes and returns a descriptive error for the first one found.
+func scanUnresolvedInContainer(ac *AuthContainer, location string) error {
+	for _, rn := range []*RuleNode{ac.Query, ac.Add, ac.Update, ac.Delete, ac.Password} {
+		if err := scanUnresolvedInNode(rn, location); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// scanUnresolvedInNode recursively walks a RuleNode tree and returns an error
+// if any leaf's RuleTemplate still contains an unresolved <<KEY>> placeholder.
+// An unresolved placeholder after both resolveTemplateLeaves passes indicates
+// a misspelled key or a missing @authVariables declaration.
+func scanUnresolvedInNode(rn *RuleNode, location string) error {
+	if rn == nil {
+		return nil
+	}
+	if rn.RuleTemplate != "" && rn.Rule == nil && rn.RBACRule == nil {
+		if keys := unresolvedAuthVarKeys(rn.RuleTemplate); len(keys) > 0 {
+			return gqlerror.Errorf(
+				"%s: @auth rule has unresolved placeholder(s) %v after substitution. "+
+					"Check that each key is declared in @authVariables on the type.",
+				location, keys)
+		}
+	}
+	for _, child := range rn.Or {
+		if err := scanUnresolvedInNode(child, location); err != nil {
+			return err
+		}
+	}
+	for _, child := range rn.And {
+		if err := scanUnresolvedInNode(child, location); err != nil {
+			return err
+		}
+	}
+	if err := scanUnresolvedInNode(rn.Not, location); err != nil {
+		return err
+	}
+	if rn.CascadeWrapInner != nil {
+		if err := scanUnresolvedInNode(rn.CascadeWrapInner, location); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // resolveTemplateLeaves walks a RuleNode tree and, for each leaf node whose
@@ -741,14 +813,17 @@ func parseAuthNode(sch *schema, typ *ast.Definition, val *ast.Value) (*RuleNode,
 
 	if rule := val.Children.ForName("rule"); rule != nil {
 		var err error
-		if strings.HasPrefix(rule.Raw, RBACQueryPrefix) {
-			result.RBACRule, err = getRBACQuery(typ, rule.Raw)
-		} else if strings.Contains(rule.Raw, "{{") {
-			// Rule contains @authVariables template placeholders (e.g. {{ADM_PERMISSIONS}}).
-			// Passing these to the GraphQL parser produces "Expected Name, found {" because
-			// the double-brace syntax is not valid GraphQL. Store as RuleTemplate; the cascade
-			// auth expand pipeline will substitute the variables and re-parse before use.
+		if strings.Contains(rule.Raw, "<<") {
+			// Rule contains @authVariables template placeholders (e.g. <<QRY_SCOPES>>).
+			// The << >> syntax is not valid GraphQL or JSON — store as RuleTemplate regardless
+			// of whether the rule also starts with the RBAC prefix "{". Attempting to parse
+			// an unresolved RBAC template (e.g. { $scope: { in: <<QRY_SCOPES>> } }) as RBAC
+			// immediately causes json.Unmarshal to fail on the placeholder, producing a
+			// misleading "not a valid GraphQL variable" error. The cascade auth expand pipeline
+			// will substitute the variables and re-parse the rule before use.
 			result.RuleTemplate = rule.Raw
+		} else if strings.HasPrefix(rule.Raw, RBACQueryPrefix) {
+			result.RBACRule, err = getRBACQuery(typ, rule.Raw)
 		} else {
 			// Standard GQL auth rule — validate and parse immediately.
 			err = gqlValidateRule(sch, typ, rule.Raw, result)

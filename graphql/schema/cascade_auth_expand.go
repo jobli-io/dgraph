@@ -1342,18 +1342,18 @@ func mergeAuthNodeWithOr(a, b *RuleNode) *RuleNode {
 	return &RuleNode{Or: []*RuleNode{a, b}}
 }
 
-// substitutAuthVars performs compile-time {{KEY}} → verbatim substitution.
+// substitutAuthVars performs compile-time <<KEY>> → verbatim substitution.
 // Every declared key is replaced with its raw value string exactly as written
 // in the @authVariables directive — [], [x, y, z], ["a", "b"], "str", 1, etc.
 //
 // The interface stub pattern works through KEY ABSENCE, not value: []:
-// if a key is not in the map no substitution occurs, {{KEY}} stays unresolved,
+// if a key is not in the map no substitution occurs, <<KEY>> stays unresolved,
 // gqlValidateRule rejects the rule, rn.Rule stays nil, and Stage 2 fills in
-// the concrete type's value. Interfaces that use {{KEY}} templates simply omit
+// the concrete type's value. Interfaces that use <<KEY>> templates simply omit
 // those keys from their own @authVariables (or carry no @authVariables at all).
 //
 // A declared value:[] IS meaningful and is substituted verbatim as "[]".
-// When the template contains `in: {{KEY}}` this produces `in: []` which
+// When the template contains `in: <<KEY>>` this produces `in: []` which
 // buildFilter converts to uid(0x0) — the intended deny-all for cascade arms
 // where the child explicitly gates access to nothing.
 func substitutAuthVars(ruleStr string, vars map[string]string) string {
@@ -1361,16 +1361,16 @@ func substitutAuthVars(ruleStr string, vars map[string]string) string {
 		return ruleStr
 	}
 	for key, raw := range vars {
-		placeholder := "{{" + key + "}}"
+		placeholder := "<<" + key + ">>"
 		ruleStr = strings.ReplaceAll(ruleStr, placeholder, raw)
 	}
 	return ruleStr
 }
 
-// resolveAuthVariables is the richer variant that also substitutes {TYPE}
+// resolveAuthVariables is the richer variant that also substitutes <<TYPE>>
 // placeholder — kept for use outside the parse pipeline.
 func resolveAuthVariables(ruleStr string, vars map[string]string, typeName string) string {
-	return strings.ReplaceAll(substitutAuthVars(ruleStr, vars), "{TYPE}", typeName)
+	return strings.ReplaceAll(substitutAuthVars(ruleStr, vars), "<<TYPE>>", typeName)
 }
 
 // findInversePredicate scans the authorityTypeName's AST definition for the
