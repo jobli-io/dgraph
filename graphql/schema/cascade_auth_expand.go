@@ -1055,7 +1055,20 @@ func parseRuleNodeFromTemplate(template string, authorityVars, childVars map[str
 	// clobber placeholders the child already resolved in step 1.
 	substituted, _ = substitutAuthVars(substituted, authorityVars)
 	if strings.HasPrefix(substituted, RBACQueryPrefix) {
-		return nil, nil
+		// Re-substitute produced an RBAC rule (e.g. { $scope: { in: [...] } }).
+		// Parse it with the child's substituted values so that variableContext:
+		// adaptive/self correctly uses the child type's @authVariables operand,
+		// rather than falling back to the authority's pre-compiled RBAC rule.
+		// We validate against the authority type def (same as GQL rules above).
+		authorityDef := sch.schema.Types[authorityTypeName]
+		rbac, err := getRBACQuery(authorityDef, substituted)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"Type %s: @cascadeAuth: expanding from authority type %s: "+
+					"failed to parse re-substituted RBAC rule %q: %w",
+				childTypeName, authorityTypeName, substituted, err)
+		}
+		return &RuleNode{RBACRule: rbac, RuleTemplate: template}, nil
 	}
 	// Unresolved placeholders produce a cryptic "Expected Name, found {" from the
 	// GraphQL parser. Intercept and emit a meaningful error naming the missing keys.

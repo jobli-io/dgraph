@@ -508,3 +508,51 @@ type ConcreteResource implements IResource
 `
 	buildSchemaOK(t, input)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RBAC cascade re-substitution with variableContext: adaptive
+//
+// Regression test for parseRuleNodeFromTemplate returning (nil, nil) for RBAC
+// rules, causing the cascade path to always use the authority's (Workspace's)
+// pre-compiled RBAC operand regardless of the child type's @authVariables.
+//
+// With the fix, a concrete type's QRY_PERMISSIONS are correctly substituted
+// into the cascaded RBAC rule (e.g. { $scope: { in: [...] } }) so that
+// adaptive variableContext uses the child's values, not the authority's.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestCascadeAdaptive_RBACResubstitution(t *testing.T) {
+	// Authority (Workspace) has a parameterised RBAC scope rule.
+	// Child (Resource) has different QRY_PERMISSIONS — with adaptive the
+	// cascade must pick up the child's values, not Workspace's.
+	const input = `
+interface WorkspaceMember {
+  inWorkspace: Workspace! @cascadeAuth(variableContext: adaptive)
+}
+
+type Workspace
+  @authVariables(vars: [{ key: "QRY_PERMISSIONS", value: ["_all", "_workspace", "read", "read_workspace"] }])
+  @auth(query: { and: [
+    { rule: """
+      query($sub: String!) {
+        queryWorkspace(filter: { name: { eq: $sub } }) { __typename }
+      }
+    """ }
+    { rule: "{ $scope: { in: <<QRY_PERMISSIONS>> } }" }
+  ] })
+{
+  name: String
+  hasResource: [Resource] @hasInverse(field: inWorkspace)
+}
+
+type Resource implements WorkspaceMember
+  @authVariables(vars: [{ key: "QRY_PERMISSIONS", value: ["_all", "_resource", "read_resource"] }])
+{
+  id: ID!
+  name: String
+}
+`
+	// Schema must compile: the cascaded Workspace RBAC rule is re-substituted
+	// with Resource's QRY_PERMISSIONS, not Workspace's.
+	buildSchemaOK(t, input)
+}
