@@ -180,14 +180,14 @@ type Group implements WorkspaceMember {
 }
 
 func TestCascadeAuthValidation_Parent_ErrorsWhenAuthorityRuleHasUnresolvedPlaceholders(t *testing.T) {
-	// Workspace's @auth rule contains {{PERMISSIONS}} — it requires substitution.
+	// Workspace's @auth rule contains <<PERMISSIONS>> — it requires substitution.
 	// parent must fail because Workspace has no @authVariables to supply the value.
 	const input = `
 type Workspace
   @auth(query: { rule: """
     query($sub: String!) {
       queryWorkspace(filter: {
-        hasIAMBinding: { forRole: { permission: { in: {{PERMISSIONS}} } } }
+        hasIAMBinding: { forRole: { permission: { in: <<PERMISSIONS>> } } }
       }) { __typename }
     }
   """ })
@@ -213,14 +213,14 @@ type Group implements WorkspaceMember {
 
 func TestCascadeAuthValidation_Adaptive_ErrorsWhenNoAncestorHasAuthVariables(t *testing.T) {
 	// Neither Group (child) nor Workspace (authority) has @authVariables.
-	// Workspace's @auth rule has {{PERMISSIONS}} — substitution is needed.
+	// Workspace's @auth rule has <<PERMISSIONS>> — substitution is needed.
 	// adaptive must fail — no type in the chain supplies @authVariables.
 	const input = `
 type Workspace
   @auth(query: { rule: """
     query($sub: String!) {
       queryWorkspace(filter: {
-        hasIAMBinding: { forRole: { permission: { in: {{PERMISSIONS}} } } }
+        hasIAMBinding: { forRole: { permission: { in: <<PERMISSIONS>> } } }
       }) { __typename }
     }
   """ })

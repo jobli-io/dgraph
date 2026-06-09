@@ -6,8 +6,11 @@
 package schema
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"text/template"
 
 	"github.com/dgraph-io/gqlparser/v2/ast"
 	"github.com/dgraph-io/gqlparser/v2/gqlerror"
@@ -1045,12 +1048,12 @@ func parseRuleNodeFromTemplate(template string, authorityVars, childVars map[str
 	// in: {{KEY}}, this produces in: [] which buildFilter converts to uid(0x0)
 	// (deny-all). This is the intended behaviour for a child that explicitly
 	// declares value:[] to block access through a particular cascade arm.
-	substituted := substitutAuthVars(template, childVars)
+	substituted, _ := substitutAuthVars(template, childVars)
 	// Step 2: resolve any remaining authority compile-time constants that the
-	// child did NOT declare at all (e.g. {{ADM_PERMISSIONS}} if child lacks that
+	// child did NOT declare at all (e.g. <<ADM_PERMISSIONS>> if child lacks that
 	// key entirely). Uses the skip-on-empty variant so that authority stubs don't
 	// clobber placeholders the child already resolved in step 1.
-	substituted = substitutAuthVars(substituted, authorityVars)
+	substituted, _ = substitutAuthVars(substituted, authorityVars)
 	if strings.HasPrefix(substituted, RBACQueryPrefix) {
 		return nil, nil
 	}
@@ -1342,35 +1345,105 @@ func mergeAuthNodeWithOr(a, b *RuleNode) *RuleNode {
 	return &RuleNode{Or: []*RuleNode{a, b}}
 }
 
-// substitutAuthVars performs compile-time <<KEY>> → verbatim substitution.
-// Every declared key is replaced with its raw value string exactly as written
-// in the @authVariables directive — [], [x, y, z], ["a", "b"], "str", 1, etc.
+// authVarFuncMap builds a text/template FuncMap from a vars map plus the
+// built-in transformation functions. Each authVariables key is registered as
+// a zero-argument function returning its string value, so the <<KEY>> template
+// action calls KEY() rather than accessing a data field — preserving the
+// existing placeholder syntax without requiring a dot prefix (<<.KEY>>).
 //
-// The interface stub pattern works through KEY ABSENCE, not value: []:
-// if a key is not in the map no substitution occurs, <<KEY>> stays unresolved,
-// gqlValidateRule rejects the rule, rn.Rule stays nil, and Stage 2 fills in
-// the concrete type's value. Interfaces that use <<KEY>> templates simply omit
-// those keys from their own @authVariables (or carry no @authVariables at all).
+// Built-in transforms (usable as pipeline stages):
 //
-// A declared value:[] IS meaningful and is substituted verbatim as "[]".
-// When the template contains `in: <<KEY>>` this produces `in: []` which
-// buildFilter converts to uid(0x0) — the intended deny-all for cascade arms
-// where the child explicitly gates access to nothing.
-func substitutAuthVars(ruleStr string, vars map[string]string) string {
+//	<<QRY_PERMISSIONS | toStrings>>         — enum list → JSON string array (case preserved)
+//	<<QRY_PERMISSIONS | toStrings | lower>>  — enum list → lowercase JSON string array
+func authVarFuncMap(vars map[string]string, typeName string) template.FuncMap {
+	fm := template.FuncMap{
+		"toStrings": enumListToJSONStrings,
+		"lower":     strings.ToLower,
+	}
+	for key, val := range vars {
+		v := val // capture loop variable
+		fm[key] = func() string { return v }
+	}
+	if typeName != "" {
+		fm["TYPE"] = func() string { return typeName }
+	}
+	return fm
+}
+
+// substitutAuthVars performs compile-time <<KEY>> → verbatim substitution using
+// Go's text/template engine with custom << >> delimiters.
+//
+// Each key in vars is registered as a zero-argument FuncMap function so that
+// the existing <<KEY>> placeholder syntax is preserved (no dot prefix needed).
+// Pipelines are supported: <<QRY_PERMISSIONS | lower>> lowercases enum values
+// to a JSON string array suitable for RBAC `in` rules.
+//
+// Returns (substituted, nil) on success. Returns ("", err) if the template
+// fails to parse or execute — callers should treat this as a deferred
+// substitution (interface stub pattern) and leave the rule node unchanged.
+// Genuine typos are caught by the post-pass scanUnresolvedInNode sweep.
+func substitutAuthVars(ruleStr string, vars map[string]string) (string, error) {
 	if len(vars) == 0 {
-		return ruleStr
+		return ruleStr, nil
 	}
-	for key, raw := range vars {
-		placeholder := "<<" + key + ">>"
-		ruleStr = strings.ReplaceAll(ruleStr, placeholder, raw)
+	tmpl, err := template.New("rule").Delims("<<", ">>").Funcs(authVarFuncMap(vars, "")).Parse(ruleStr)
+	if err != nil {
+		// Template parse error (e.g. undefined function for interface stub key).
+		// Return the original string so callers can detect it is still unresolved.
+		return ruleStr, err
 	}
-	return ruleStr
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, nil); err != nil {
+		return ruleStr, err
+	}
+	return buf.String(), nil
 }
 
 // resolveAuthVariables is the richer variant that also substitutes <<TYPE>>
-// placeholder — kept for use outside the parse pipeline.
+// via the template FuncMap — kept for use outside the parse pipeline.
 func resolveAuthVariables(ruleStr string, vars map[string]string, typeName string) string {
-	return strings.ReplaceAll(substitutAuthVars(ruleStr, vars), "<<TYPE>>", typeName)
+	tmpl, err := template.New("rule").Delims("<<", ">>").Funcs(authVarFuncMap(vars, typeName)).Parse(ruleStr)
+	if err != nil {
+		return ruleStr
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, nil); err != nil {
+		return ruleStr
+	}
+	return buf.String()
+}
+
+// enumListToJSONStrings converts a GraphQL enum list or unquoted identifier list
+// to a JSON string array, preserving the original casing. Scalar values are
+// JSON-quoted. Use in a pipeline with lower to also lowercase:
+//
+//	<<QRY_PERMISSIONS | toStrings>>         → ["_ALL","_EMAIL","READ"]
+//	<<QRY_PERMISSIONS | toStrings | lower>>  → ["_all","_email","read"]
+//
+// Examples:
+//
+//	[_ALL, _EMAIL, READ]   → ["_ALL","_EMAIL","READ"]
+//	["_all", "read"]       → ["_all","read"]   (already quoted, no-op)
+//	_ALL                   → "_ALL"
+func enumListToJSONStrings(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, "[") {
+		// Scalar — strip any existing quotes and re-encode as JSON string.
+		b, _ := json.Marshal(strings.Trim(raw, `"`))
+		return string(b)
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]")
+	parts := strings.Split(inner, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.Trim(strings.TrimSpace(p), `"`)
+		if p == "" {
+			continue
+		}
+		b, _ := json.Marshal(p)
+		out = append(out, string(b))
+	}
+	return "[" + strings.Join(out, ",") + "]"
 }
 
 // findInversePredicate scans the authorityTypeName's AST definition for the

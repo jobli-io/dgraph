@@ -50,15 +50,75 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 ```
 
 Declares named substitution **key-value pairs** injected into the authority's `@auth` rule template
-at **schema compile-time**. Keys are referenced in the rule as `{{KEY}}`.
+at **schema compile-time**. Keys are referenced in the rule as `<<KEY>>`.
 
-> **Substitution happens before GraphQL parsing.** `{{KEY}}` is not valid GraphQL syntax — it must
+> **Substitution happens before GraphQL parsing.** `<<KEY>>` is not valid GraphQL syntax — it must
 > be replaced before the rule string is fed to the validator. Rules without `@authVariables` on
-> their type will fail to parse if they contain unresolved `{{KEY}}` placeholders.
+> their type will fail to parse if they contain unresolved `<<KEY>>` placeholders.
 
 > **Values are substituted verbatim** (no automatic quoting). For enum filter fields this produces
-> the correct unquoted form, e.g. `{{PERMISSIONS}}` → `[_ALL, READ_WORKSPACE]`. For string-typed
+> the correct unquoted form, e.g. `<<PERMISSIONS>>` → `[_ALL, READ_WORKSPACE]`. For string-typed
 > fields, include the quotes inside the value: `value: ["\"mystring\""]`.
+
+> **Misspelled keys are a hard schema error.** If a placeholder key does not match any entry in
+> `@authVariables` after both substitution passes, schema load is rejected with a clear error
+> message listing the unresolved key name. This prevents silent no-op rules.
+
+#### Template Engine
+
+The substitution engine is Go's `text/template` with `<<` / `>>` as delimiters. This unlocks
+**transform pipelines** using the `|` operator:
+
+| Transform   | Input                      | Output                     | Use case                             |
+| ----------- | -------------------------- | -------------------------- | ------------------------------------ |
+| `toStrings` | `[_ALL, _EMAIL, READ]`     | `["_ALL","_EMAIL","READ"]` | Enum list → quoted JSON string array |
+| `lower`     | `["_ALL","_EMAIL","READ"]` | `["_all","_email","read"]` | Lowercase (any string or JSON array) |
+
+**Pipeline example — RBAC `in` rule from an enum list:**
+
+```graphql
+# @authVariables declares an enum-format list (for use in GQL filters):
+@authVariables(vars: [
+  { key: "QRY_PERMISSIONS", value: ["_ALL", "_EMAIL", "READ", "READ_EMAIL"] }
+])
+
+# Auth rule — GQL filter (enum values, no quotes needed):
+@auth(query: { rule: """
+  query($sub: String!) {
+    queryJobAd(filter: {
+      hasIAMBinding: { forRole: { permission: { in: <<QRY_PERMISSIONS>> } } }
+    }) { __typename }
+  }
+""" })
+```
+
+For RBAC scope rules, the same list must be lowercase JSON strings. Use `toStrings | lower`:
+
+```graphql
+# RBAC rule — $scope is a JWT string claim, must match lowercase quoted values:
+@auth(query: { rule: "{ $scope: { in: <<QRY_PERMISSIONS | toStrings | lower>> } }" })
+```
+
+If the values are already lowercase JSON strings (no conversion needed), declare them directly:
+
+```graphql
+@authVariables(vars: [
+  { key: "QRY_SCOPES", value: ["_all", "read"] }
+])
+@auth(query: { rule: "{ $scope: { in: <<QRY_SCOPES>> } }" })
+```
+
+**Built-in `<<TYPE>>` placeholder:**
+
+When used inside `resolveAuthVariables` (cascade expansion), `<<TYPE>>` is replaced by the concrete
+type name. This allows interface auth rules to reference the implementing type's query root without
+hard-coding it.
+
+**Delimiter isolation:** `<<` / `>>` delimiters do not conflict with:
+
+- GraphQL syntax (`{`, `}`, `$var`, `"""`), or
+- RBAC rule JSON (`{ $scope: { in: [...] } }`), or
+- Go template `{{.error}}` strings used in `@validate` reason fields (those use `{{` / `}}`)
 
 ### `@cascadeAuthPolicy` — on the child type
 
@@ -87,7 +147,7 @@ cascade auth at all.
 
 Controls how the child relates to the authority's `@auth` rule across a cascade chain `A → B → C`
 (A's authority is B, B's authority is C). The `@auth` rule on the authority type may be a
-**self-contained literal rule** (no `{{KEY}}` placeholders) or a **template** (uses `{{KEY}}`
+**self-contained literal rule** (no `<<KEY>>` placeholders) or a **template** (uses `<<KEY>>`
 substitution values declared by `@authVariables`).
 
 | Value                    | What the child receives                                                                                 | `@authVariables` required on child                    |
@@ -101,14 +161,14 @@ substitution values declared by `@authVariables`).
 #### `"self"` — child provides all substitution values
 
 The child substitutes **its own `@authVariables` key-value pairs** into the authority's raw `@auth`
-template. All `{{KEY}}` placeholders required by the template must be declared in the child's
+template. All `<<KEY>>` placeholders required by the template must be declared in the child's
 `@authVariables`. Schema error if the child has no `@authVariables`.
 
 In a chain `A → B → C` where both edges use `variableContext: self`, A's vars are used for **both**
 B's rule and C's rule — the outermost queried type's vars propagate through the whole chain.
 
 ```graphql
-# Workspace @auth template uses {{PERMISSIONS}}
+# Workspace @auth template uses <<PERMISSIONS>>
 # Candidate declares its own PERMISSIONS via @authVariables
 type Candidate
   @authVariables(vars: [
@@ -131,9 +191,9 @@ The child takes the authority's **compiled rule** as-is — no re-substitution f
 The compiled rule is the combination of the authority's own `@auth` (compiled) AND its cascade chain
 protection.
 
-- **Authority has a self-contained rule** (`@auth` with no `{{KEY}}` placeholders): passed through
+- **Authority has a self-contained rule** (`@auth` with no `<<KEY>>` placeholders): passed through
   unchanged.
-- **Authority has a template `@auth`** (`{{KEY}}` present): the authority compiles its own rule via
+- **Authority has a template `@auth`** (`<<KEY>>` present): the authority compiles its own rule via
   its own cascade chain (when the authority is itself a cascade child). The child simply inherits
   the result. If the authority has a template but no cascade chain to compile it, schema validation
   rejects the configuration.
@@ -160,7 +220,7 @@ interface GroupMember {
    as-is (same as `parent`).
 
 Schema error only when **both paths are blocked**: child has no `@authVariables` AND the authority
-has a `{{KEY}}` template with no cascade chain to compile it (uncompilable, zero protection).
+has a `<<KEY>>` template with no cascade chain to compile it (uncompilable, zero protection).
 
 ```graphql
 # All three work with adaptive:
@@ -218,7 +278,7 @@ For each operation that IS in the list, the engine reads the authority type's ma
 | `update`        | `@auth(update: ...)` | `@auth(query: ...)` |
 | `delete`        | `@auth(delete: ...)` | `@auth(query: ...)` |
 
-**Graceful fallback:** If the authority's op-specific rule uses `{{KEY}}` placeholders that the
+**Graceful fallback:** If the authority's op-specific rule uses `<<KEY>>` placeholders that the
 child's `@authVariables` doesn't declare, the engine falls back to the `query` rule for that
 operation. The child remains protected and the schema deploys without error.
 
@@ -395,8 +455,8 @@ This is the right fix when:
 | `depth` not ≥ 1 or -1                                                                                                    | `@cascadeAuth: depth must be ≥ 1 or -1`                                  |
 | `variableContext` not one of `"self"`, `"parent"`, `"adaptive"`                                                          | Validation error                                                         |
 | `variableContext: "self"` and child has no `@authVariables`                                                              | Schema load error — child must declare all required key-value pairs      |
-| `variableContext: "parent"` or `"adaptive"` (parent fallback) and authority has `{{KEY}}` template with no cascade chain | Schema load error — template is uncompilable, child gets zero protection |
-| `{{KEY}}` referenced in template has no matching entry in `@authVariables`                                               | Unresolved placeholder error at schema load                              |
+| `variableContext: "parent"` or `"adaptive"` (parent fallback) and authority has `<<KEY>>` template with no cascade chain | Schema load error — template is uncompilable, child gets zero protection |
+| `<<KEY>>` referenced in template has no matching entry in `@authVariables`                                               | Hard schema rejection — unresolved placeholder error at schema load      |
 | Circular cascade chain (A → B → A)                                                                                       | `@cascadeAuth forms a cycle through type B`                              |
 
 ---
