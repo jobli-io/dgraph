@@ -443,3 +443,68 @@ type Group implements WorkspaceMember {
 `
 	buildSchemaErr(t, input, "variableContext")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Second-pass re-substitution: interface stub value=[] must not lock concrete
+// types into deny-all for GQL or RBAC rules.
+//
+// Regression test for the bug where:
+//   - Interface declares @authVariables with value: [] (stub)
+//   - First pass parses the rule with in: [] → sets Rule/RBACRule (deny-all stub)
+//   - Second pass (force=true) must re-substitute with concrete type's real values
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestSecondPassResubstitution_GQLRule verifies that a GQL rule on an interface
+// using a <<KEY>> placeholder is correctly re-substituted with the concrete
+// type's @authVariables in the second pass, even when the interface stub
+// (value: []) causes the first pass to parse an in: [] rule and set rn.Rule.
+func TestSecondPassResubstitution_GQLRule(t *testing.T) {
+	// Interface carries the stub; concrete type overrides with real values.
+	const input = `
+interface IResource
+  @authVariables(vars: [{ key: "QRY_PERMISSIONS", value: [] }])
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryIResource(filter: {
+        permissions: { in: <<QRY_PERMISSIONS>> }
+      }) { __typename }
+    }
+  """ })
+{
+  id: ID!
+  permissions: [String] @search(by: [hash])
+}
+
+type ConcreteResource implements IResource
+  @authVariables(vars: [{ key: "QRY_PERMISSIONS", value: ["READ", "WRITE"] }])
+{
+  id: ID!
+  permissions: [String] @search(by: [hash])
+}
+`
+	// Schema must compile without error — concrete type's values override stub.
+	buildSchemaOK(t, input)
+}
+
+// TestSecondPassResubstitution_RBACRule verifies that an RBAC rule using the
+// toStrings|lower pipeline is correctly re-substituted with the concrete type's
+// values when the interface stub (value: []) parses as in: [] in the first pass.
+func TestSecondPassResubstitution_RBACRule(t *testing.T) {
+	const input = `
+interface IResource
+  @authVariables(vars: [{ key: "QRY_PERMISSIONS", value: [] }])
+  @auth(query: { rule: "{ $scope: { in: <<QRY_PERMISSIONS | toStrings | lower>> } }" })
+{
+  id: ID!
+  name: String
+}
+
+type ConcreteResource implements IResource
+  @authVariables(vars: [{ key: "QRY_PERMISSIONS", value: ["READ", "WRITE"] }])
+{
+  id: ID!
+  name: String
+}
+`
+	buildSchemaOK(t, input)
+}

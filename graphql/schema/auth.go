@@ -298,21 +298,21 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 			continue
 		}
 		if ta.Rules != nil {
-			ta.Rules.Query = resolveTemplateLeaves(sch, ta.Rules.Query, ownVars, name)
-			ta.Rules.Add = resolveTemplateLeaves(sch, ta.Rules.Add, ownVars, name)
-			ta.Rules.Update = resolveTemplateLeaves(sch, ta.Rules.Update, ownVars, name)
-			ta.Rules.Delete = resolveTemplateLeaves(sch, ta.Rules.Delete, ownVars, name)
+			ta.Rules.Query = resolveTemplateLeaves(sch, ta.Rules.Query, ownVars, name, false)
+			ta.Rules.Add = resolveTemplateLeaves(sch, ta.Rules.Add, ownVars, name, false)
+			ta.Rules.Update = resolveTemplateLeaves(sch, ta.Rules.Update, ownVars, name, false)
+			ta.Rules.Delete = resolveTemplateLeaves(sch, ta.Rules.Delete, ownVars, name, false)
 		}
 		for field, ac := range ta.Fields {
 			if ac == nil {
 				continue
 			}
 			ta.Fields[field] = &AuthContainer{
-				Query:    resolveTemplateLeaves(sch, ac.Query, ownVars, name),
-				Add:      resolveTemplateLeaves(sch, ac.Add, ownVars, name),
-				Update:   resolveTemplateLeaves(sch, ac.Update, ownVars, name),
-				Delete:   resolveTemplateLeaves(sch, ac.Delete, ownVars, name),
-				Password: resolveTemplateLeaves(sch, ac.Password, ownVars, name),
+				Query:    resolveTemplateLeaves(sch, ac.Query, ownVars, name, false),
+				Add:      resolveTemplateLeaves(sch, ac.Add, ownVars, name, false),
+				Update:   resolveTemplateLeaves(sch, ac.Update, ownVars, name, false),
+				Delete:   resolveTemplateLeaves(sch, ac.Delete, ownVars, name, false),
+				Password: resolveTemplateLeaves(sch, ac.Password, ownVars, name, false),
 			}
 		}
 	}
@@ -433,21 +433,21 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 			continue
 		}
 		if ta.Rules != nil {
-			ta.Rules.Query = resolveTemplateLeaves(sch, ta.Rules.Query, concreteVars, name)
-			ta.Rules.Add = resolveTemplateLeaves(sch, ta.Rules.Add, concreteVars, name)
-			ta.Rules.Update = resolveTemplateLeaves(sch, ta.Rules.Update, concreteVars, name)
-			ta.Rules.Delete = resolveTemplateLeaves(sch, ta.Rules.Delete, concreteVars, name)
+			ta.Rules.Query = resolveTemplateLeaves(sch, ta.Rules.Query, concreteVars, name, true)
+			ta.Rules.Add = resolveTemplateLeaves(sch, ta.Rules.Add, concreteVars, name, true)
+			ta.Rules.Update = resolveTemplateLeaves(sch, ta.Rules.Update, concreteVars, name, true)
+			ta.Rules.Delete = resolveTemplateLeaves(sch, ta.Rules.Delete, concreteVars, name, true)
 		}
 		for field, ac := range ta.Fields {
 			if ac == nil {
 				continue
 			}
 			ta.Fields[field] = &AuthContainer{
-				Query:    resolveTemplateLeaves(sch, ac.Query, concreteVars, name),
-				Add:      resolveTemplateLeaves(sch, ac.Add, concreteVars, name),
-				Update:   resolveTemplateLeaves(sch, ac.Update, concreteVars, name),
-				Delete:   resolveTemplateLeaves(sch, ac.Delete, concreteVars, name),
-				Password: resolveTemplateLeaves(sch, ac.Password, concreteVars, name),
+				Query:    resolveTemplateLeaves(sch, ac.Query, concreteVars, name, true),
+				Add:      resolveTemplateLeaves(sch, ac.Add, concreteVars, name, true),
+				Update:   resolveTemplateLeaves(sch, ac.Update, concreteVars, name, true),
+				Delete:   resolveTemplateLeaves(sch, ac.Delete, concreteVars, name, true),
+				Password: resolveTemplateLeaves(sch, ac.Password, concreteVars, name, true),
 			}
 		}
 	}
@@ -572,12 +572,12 @@ func scanUnresolvedInNode(rn *RuleNode, location string) error {
 // resolved in that type's own auth rules before cascade expansion reads them.
 //
 // If substitution or re-parsing fails, the original leaf is returned unchanged.
-func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string]string, typeName string) *RuleNode {
+func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string]string, typeName string, force bool) *RuleNode {
 	if rn == nil || len(vars) == 0 {
 		return rn
 	}
 	// Leaf with a template: substitute own vars and re-parse.
-	if rn.RuleTemplate != "" && rn.Rule == nil && rn.DQLRule == nil && rn.RBACRule == nil {
+	if rn.RuleTemplate != "" && (force || (rn.Rule == nil && rn.DQLRule == nil)) {
 		substituted, err := substitutAuthVars(rn.RuleTemplate, vars)
 		if err != nil {
 			return rn // template parse/exec error — defer to next pass (interface stub pattern)
@@ -628,17 +628,17 @@ func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string]string, ty
 	if len(rn.Or) > 0 {
 		clone.Or = make([]*RuleNode, len(rn.Or))
 		for i, child := range rn.Or {
-			clone.Or[i] = resolveTemplateLeaves(sch, child, vars, typeName)
+			clone.Or[i] = resolveTemplateLeaves(sch, child, vars, typeName, force)
 		}
 	}
 	if len(rn.And) > 0 {
 		clone.And = make([]*RuleNode, len(rn.And))
 		for i, child := range rn.And {
-			clone.And[i] = resolveTemplateLeaves(sch, child, vars, typeName)
+			clone.And[i] = resolveTemplateLeaves(sch, child, vars, typeName, force)
 		}
 	}
 	if rn.Not != nil {
-		clone.Not = resolveTemplateLeaves(sch, rn.Not, vars, typeName)
+		clone.Not = resolveTemplateLeaves(sch, rn.Not, vars, typeName, force)
 	}
 	return &clone
 }
