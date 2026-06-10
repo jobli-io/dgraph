@@ -256,6 +256,11 @@ type pendingForwardRef struct {
 	typ     schema.Type
 	exclude string
 	xids    []schema.FieldDefinition
+	// refOnlyErr, when non-nil, means this pending ref was emitted by a user-declared
+	// @default(refOnly:true) field. If no full definition arrives by resolvePendingForwardRefs,
+	// return this error instead of running EnsureNonNulls (which might pass when the target
+	// type has @default annotations covering all required fields).
+	refOnlyErr error
 }
 
 // NewXidMetadata returns a new empty *xidMetadata for storing the metadata.
@@ -337,6 +342,14 @@ func (xm *xidMetadata) resolvePendingForwardRefs() x.GqlErrorList {
 		}
 		// Validate — catches nil required fields ({email:nil}) and absent required
 		// non-@id fields ({code:"CA"} on a type with name:String!).
+		// refOnlyErr is set when a user-declared @default(refOnly:true) field emitted
+		// this pending ref. If no full definition arrived, return that error directly
+		// rather than running EnsureNonNulls (which may pass when the target type has
+		// @default annotations covering all required fields, giving a false OK).
+		if pending.refOnlyErr != nil {
+			errs = append(errs, x.GqlErrorf("%s", pending.refOnlyErr.Error()))
+			continue
+		}
 		if err := pending.typ.EnsureNonNulls(pending.obj, pending.exclude); err != nil {
 			errs = append(errs, schema.AsGQLErrors(err)...)
 			continue
@@ -2290,22 +2303,18 @@ func rewriteObject(
 				// (when it comes) uses the SAME xid variable and thus the SAME blank-node uid,
 				// ensuring both forward refs and the inline creation merge in DGraph.
 				// refOnlyMissHandler is called when refOnlyOverride=true and the node is not
-				// in idExistence. It checks for a forward-ref from another mutation path
-				// (Exception c) before returning an error, so that:
-				//   - Nodes being created elsewhere in the same batch → forward ref emitted ✓
-				//   - Nodes that truly do not exist → clear error ✓
+				// in idExistence. Instead of returning an error immediately (which would fail
+				// when the creating path hasn't run yet), emit a pending forward ref and let
+				// resolvePendingForwardRefs decide after the full batch is scanned:
+				//
+				//   - Creating path ran FIRST (exception b/c already handled above) → those
+				//     branches return early before this handler is reached.
+				//   - refOnly path ran FIRST → emit pending ref; when the creating path runs
+				//     later it registers in variableObjMap → resolvePendingForwardRefs skips
+				//     the entry → blank-node refs merge in Dgraph. ✓
+				//   - No creating path at all (node truly absent) → variableObjMap stays empty
+				//     → resolvePendingForwardRefs fires the refOnlyErr. ✓
 				refOnlyMissHandler := func() (*mutationFragment, string, []error) {
-					// Exception (c): another mutation path (without refOnly) has already
-					// registered a pending forward-ref for this XID variable. Link to it
-					// rather than erroring — the creating path will produce the actual node.
-					if fwdUID, hasFwd := xidMetadata.forwardRefs[xidVariables[0]]; hasFwd {
-						refObj := map[string]interface{}{"uid": fwdUID}
-						if srcField != nil {
-							addInverseLink(refObj, srcField, srcUID)
-						}
-						return newFragment(refObj), upsertVar, nil
-					}
-					// Node is not in the DB and no other path is creating it.
 					xidStr := ""
 					for _, xid := range xids {
 						if v, ok := obj[xid.Name()]; ok {
@@ -2313,9 +2322,40 @@ func rewriteObject(
 							break
 						}
 					}
-					return nil, upsertVar, []error{x.GqlErrorf(
+					refOnlyErr := x.GqlErrorf(
 						"%s with %q does not exist — @default(refOnly:true) requires the referenced node to already exist or be created in the same mutation",
-						typ.Name(), xidStr)}
+						typ.Name(), xidStr)
+
+					canonicalVar := xidVariables[0]
+					refUID := fmt.Sprintf("_:%s", canonicalVar)
+					for _, xidVar := range xidVariables {
+						xidMetadata.forwardRefs[xidVar] = refUID
+					}
+					refObj := map[string]interface{}{"uid": refUID}
+					if srcField != nil {
+						addInverseLink(refObj, srcField, srcUID)
+					}
+					if existing, ok := xidMetadata.pendingForwardRefs[canonicalVar]; ok {
+						existing.refObjs = append(existing.refObjs, refObj)
+						if len(obj) > len(existing.obj) {
+							existing.obj = obj
+						}
+						// Preserve the refOnlyErr even if this is a duplicate occurrence.
+						if existing.refOnlyErr == nil {
+							existing.refOnlyErr = refOnlyErr
+						}
+					} else {
+						xidMetadata.pendingForwardRefs[canonicalVar] = &pendingForwardRef{
+							refUID:     refUID,
+							refObjs:    []map[string]interface{}{refObj},
+							obj:        obj,
+							typ:        typ,
+							exclude:    exclude,
+							xids:       xids,
+							refOnlyErr: refOnlyErr,
+						}
+					}
+					return newFragment(refObj), upsertVar, nil
 				}
 
 				if err := typ.EnsureNonNulls(obj, exclude); err == nil {
