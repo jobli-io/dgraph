@@ -303,6 +303,21 @@ func TestValidateInterfacePolicy_Operations_EmptyListRejected(t *testing.T) {
 	)
 }
 
+func TestValidateInterfacePolicy_UnknownField_Typo_Operationsx(t *testing.T) {
+	// "operationsx" is a typo of "operations" — must be caught, not silently ignored.
+	buildSchemaErr(t,
+		concreteWith(`{ interface: "IProtected", merge: "or", operationsx: [add] }`),
+		"Widget", "operationsx", `"interface"`, `"merge"`, `"operations"`,
+	)
+}
+
+func TestValidateInterfacePolicy_UnknownField_Arbitrary(t *testing.T) {
+	buildSchemaErr(t,
+		concreteWith(`{ interface: "IProtected", merge: "or", typo: "whatever" }`),
+		"Widget", "typo",
+	)
+}
+
 func TestValidateInterfacePolicy_Operations_OmittedMeansAll(t *testing.T) {
 	// Omitting operations entirely should compile fine and means "all operations".
 	buildSchemaOK(t, concreteWith(`{ interface: "IProtected", merge: "or" }`))

@@ -815,6 +815,11 @@ func validateInterfacePolicy(schema *ast.Schema, typ *ast.Definition) gqlerror.L
 						opValues = append(opValues, opChild.Value.Raw)
 					}
 				}
+			default:
+				// Unknown field — likely a typo (e.g. "operationsx").
+				errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+					`Type %s; @auth(interfacePolicy): unknown field %q — valid fields are "interface", "merge", "operations"`,
+					typ.Name, field.Name))
 			}
 		}
 		if iface == "" {
