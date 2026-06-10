@@ -2276,6 +2276,11 @@ func rewriteObject(
 				//
 				// Try EnsureNonNulls on the current obj immediately:
 				//   PASS → all required data is present → create the node inline (Case a3).
+				//          EXCEPTION: when refOnlyOverride is explicitly true (user-declared via
+				//          @default(add:{refOnly:true})), we must NOT create the node even if
+				//          EnsureNonNulls passes — the caller said "reference only, never create".
+				//          In that case, return an error so the mutation fails cleanly instead of
+				//          silently instantiating a node the caller never intended to create.
 				//   FAIL → required data is absent (e.g. required non-@id field missing, or
 				//           required @id field present but nil) → this obj may be a forward
 				//           reference to a fuller definition that appears LATER in the payload.
@@ -2285,6 +2290,23 @@ func rewriteObject(
 				// (when it comes) uses the SAME xid variable and thus the SAME blank-node uid,
 				// ensuring both forward refs and the inline creation merge in DGraph.
 				if err := typ.EnsureNonNulls(obj, exclude); err == nil {
+					// User-declared refOnly: true — the caller explicitly said "only reference,
+					// never create". The node was not found in idExistence, so we cannot link to
+					// it. Return an informative error rather than silently creating a new node
+					// (which would happen if we fell through to the @defaults loop).
+					if refOnlyOverride != nil && *refOnlyOverride {
+						xidStr := ""
+						for _, xid := range xids {
+							if v, ok := obj[xid.Name()]; ok {
+								xidStr, _ = extractVal(v, xid.Name(), xid.Type().Name())
+								break
+							}
+						}
+						retErrors = append(retErrors, x.GqlErrorf(
+							"%s with %q does not exist — @default(refOnly:true) requires the referenced node to already exist",
+							typ.Name(), xidStr))
+						return nil, upsertVar, retErrors
+					}
 					// All required fields satisfied — create the node inline (Case a3 original).
 					// Register in variableObjMap so that:
 					//   a) post-processing skips any pending forward ref for this XID, and
@@ -2293,6 +2315,25 @@ func rewriteObject(
 					xidMetadata.variableObjMap[xidVariables[0]] = obj
 					// Fall through to EnsureNonNulls and node creation below.
 				} else {
+					// Required data absent.
+					//
+					// User-declared refOnly: true — the referenced node was not found and cannot
+					// be created. Deferring to pendingForwardRefs would only delay the failure,
+					// and would still result in an EnsureNonNulls error. Fail immediately with a
+					// clearer message.
+					if refOnlyOverride != nil && *refOnlyOverride {
+						xidStr := ""
+						for _, xid := range xids {
+							if v, ok := obj[xid.Name()]; ok {
+								xidStr, _ = extractVal(v, xid.Name(), xid.Type().Name())
+								break
+							}
+						}
+						retErrors = append(retErrors, x.GqlErrorf(
+							"%s with %q does not exist — @default(refOnly:true) requires the referenced node to already exist",
+							typ.Name(), xidStr))
+						return nil, upsertVar, retErrors
+					}
 					// Required data absent — defer. Emit a blank-node forward reference and
 					// track in pendingForwardRefs. resolvePendingForwardRefs will:
 					//   • Skip the entry if a full definition came later (variableObjMap set).
