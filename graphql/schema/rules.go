@@ -38,7 +38,8 @@ func init() {
 	typeValidations = append(typeValidations, idCountCheck, dgraphDirectiveTypeValidation,
 		passwordDirectiveValidation, conflictingDirectiveValidation, nonIdFieldsCheck,
 		remoteTypeValidation, generateDirectiveValidation, apolloKeyValidation,
-		apolloExtendsValidation, lambdaOnMutateValidation, postValidateDirectiveValidation)
+		apolloExtendsValidation, lambdaOnMutateValidation, postValidateDirectiveValidation,
+		validateInterfacePolicy)
 	fieldValidations = append(fieldValidations, listValidityCheck, fieldArgumentCheck,
 		fieldNameCheck, isValidFieldForList, hasAuthDirective, fieldDirectiveCheck)
 

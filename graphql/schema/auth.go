@@ -703,6 +703,119 @@ func parseInterfacePolicy(typDef *ast.Definition) map[string]string {
 	return result
 }
 
+// validateInterfacePolicy is a typeValidation that enforces well-formedness of
+// the @auth(interfacePolicy: [...]) argument on concrete OBJECT types and the
+// @auth(mergeInto: ...) argument on INTERFACE types.
+//
+// Rules checked:
+//  1. mergeInto on an INTERFACE must be "and" or "or".
+//  2. interfacePolicy on an INTERFACE type is rejected — it is only meaningful
+//     on concrete (OBJECT) types.
+//  3. Each interfacePolicy entry's merge must be "and" or "or".
+//  4. Each interfacePolicy entry's interface must name a real interface type
+//     defined in the schema.
+//  5. The concrete type must actually implement the referenced interface.
+//  6. No interface may be listed more than once in a single interfacePolicy list.
+func validateInterfacePolicy(schema *ast.Schema, typ *ast.Definition) gqlerror.List {
+	var errs []*gqlerror.Error
+
+	auth := typ.Directives.ForName(authDirective)
+	if auth == nil {
+		return nil
+	}
+
+	// ── INTERFACE types: validate mergeInto; reject interfacePolicy ────────────
+	if typ.Kind == ast.Interface {
+		if mi := auth.Arguments.ForName("mergeInto"); mi != nil && mi.Value != nil {
+			val := mi.Value.Raw
+			if val != "and" && val != "or" {
+				errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+					`Type %s; @auth(mergeInto: %q): must be "and" or "or"`,
+					typ.Name, val))
+			}
+		}
+		if ip := auth.Arguments.ForName("interfacePolicy"); ip != nil &&
+			ip.Value != nil && len(ip.Value.Children) > 0 {
+			errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+				`Type %s; @auth(interfacePolicy) is only valid on concrete object types, not on interfaces`,
+				typ.Name))
+		}
+		return errs
+	}
+
+	if typ.Kind != ast.Object {
+		return nil
+	}
+
+	// ── OBJECT types: validate each interfacePolicy entry ──────────────────────
+	ip := auth.Arguments.ForName("interfacePolicy")
+	if ip == nil || ip.Value == nil {
+		return nil
+	}
+
+	// Build a set of interfaces this type actually implements for O(1) lookup.
+	implementedSet := make(map[string]bool, len(typ.Interfaces))
+	for _, iface := range typ.Interfaces {
+		implementedSet[iface] = true
+	}
+
+	seen := make(map[string]bool)
+
+	for _, item := range ip.Value.Children {
+		if item.Value == nil {
+			continue
+		}
+		var iface, mergeOp string
+		for _, field := range item.Value.Children {
+			if field.Value == nil {
+				continue
+			}
+			switch field.Name {
+			case "interface":
+				iface = field.Value.Raw
+			case "merge":
+				mergeOp = field.Value.Raw
+			}
+		}
+		if iface == "" {
+			continue
+		}
+
+		// Rule 6: duplicate interface reference.
+		if seen[iface] {
+			errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+				`Type %s; @auth(interfacePolicy): interface %q is listed more than once`,
+				typ.Name, iface))
+		}
+		seen[iface] = true
+
+		// Rule 3: merge must be "and" or "or".
+		if mergeOp != "and" && mergeOp != "or" {
+			errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+				`Type %s; @auth(interfacePolicy[%s].merge): must be "and" or "or", got %q`,
+				typ.Name, iface, mergeOp))
+		}
+
+		// Rule 4: referenced interface must exist in the schema.
+		ifaceDef, exists := schema.Types[iface]
+		if !exists || ifaceDef.Kind != ast.Interface {
+			errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+				`Type %s; @auth(interfacePolicy): %q is not a defined interface type in the schema`,
+				typ.Name, iface))
+			continue
+		}
+
+		// Rule 5: concrete type must implement the referenced interface.
+		if !implementedSet[iface] {
+			errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+				`Type %s; @auth(interfacePolicy): type does not implement interface %q`,
+				typ.Name, iface))
+		}
+	}
+
+	return errs
+}
+
 func mergeAuthRules(
 	objectAuthRules,
 	interfaceAuthRules *AuthContainer,
