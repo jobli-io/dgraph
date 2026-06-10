@@ -2289,23 +2289,39 @@ func rewriteObject(
 				// IMPORTANT: we do NOT set idExistence here so that the fuller definition
 				// (when it comes) uses the SAME xid variable and thus the SAME blank-node uid,
 				// ensuring both forward refs and the inline creation merge in DGraph.
-				if err := typ.EnsureNonNulls(obj, exclude); err == nil {
-					// User-declared refOnly: true — the caller explicitly said "only reference,
-					// never create". The node was not found in idExistence, so we cannot link to
-					// it. Return an informative error rather than silently creating a new node
-					// (which would happen if we fell through to the @defaults loop).
-					if refOnlyOverride != nil && *refOnlyOverride {
-						xidStr := ""
-						for _, xid := range xids {
-							if v, ok := obj[xid.Name()]; ok {
-								xidStr, _ = extractVal(v, xid.Name(), xid.Type().Name())
-								break
-							}
+				// refOnlyMissHandler is called when refOnlyOverride=true and the node is not
+				// in idExistence. It checks for a forward-ref from another mutation path
+				// (Exception c) before returning an error, so that:
+				//   - Nodes being created elsewhere in the same batch → forward ref emitted ✓
+				//   - Nodes that truly do not exist → clear error ✓
+				refOnlyMissHandler := func() (*mutationFragment, string, []error) {
+					// Exception (c): another mutation path (without refOnly) has already
+					// registered a pending forward-ref for this XID variable. Link to it
+					// rather than erroring — the creating path will produce the actual node.
+					if fwdUID, hasFwd := xidMetadata.forwardRefs[xidVariables[0]]; hasFwd {
+						refObj := map[string]interface{}{"uid": fwdUID}
+						if srcField != nil {
+							addInverseLink(refObj, srcField, srcUID)
 						}
-						retErrors = append(retErrors, x.GqlErrorf(
-							"%s with %q does not exist — @default(refOnly:true) requires the referenced node to already exist",
-							typ.Name(), xidStr))
-						return nil, upsertVar, retErrors
+						return newFragment(refObj), upsertVar, nil
+					}
+					// Node is not in the DB and no other path is creating it.
+					xidStr := ""
+					for _, xid := range xids {
+						if v, ok := obj[xid.Name()]; ok {
+							xidStr, _ = extractVal(v, xid.Name(), xid.Type().Name())
+							break
+						}
+					}
+					return nil, upsertVar, []error{x.GqlErrorf(
+						"%s with %q does not exist — @default(refOnly:true) requires the referenced node to already exist or be created in the same mutation",
+						typ.Name(), xidStr)}
+				}
+
+				if err := typ.EnsureNonNulls(obj, exclude); err == nil {
+					// User-declared refOnly: true — never create even when EnsureNonNulls passes.
+					if refOnlyOverride != nil && *refOnlyOverride {
+						return refOnlyMissHandler()
 					}
 					// All required fields satisfied — create the node inline (Case a3 original).
 					// Register in variableObjMap so that:
@@ -2317,22 +2333,11 @@ func rewriteObject(
 				} else {
 					// Required data absent.
 					//
-					// User-declared refOnly: true — the referenced node was not found and cannot
-					// be created. Deferring to pendingForwardRefs would only delay the failure,
-					// and would still result in an EnsureNonNulls error. Fail immediately with a
-					// clearer message.
+					// User-declared refOnly: true — deferring would only delay the failure (or
+					// silently create the node when a fuller definition arrives from a @default
+					// that should NOT be creating this node). Resolve immediately.
 					if refOnlyOverride != nil && *refOnlyOverride {
-						xidStr := ""
-						for _, xid := range xids {
-							if v, ok := obj[xid.Name()]; ok {
-								xidStr, _ = extractVal(v, xid.Name(), xid.Type().Name())
-								break
-							}
-						}
-						retErrors = append(retErrors, x.GqlErrorf(
-							"%s with %q does not exist — @default(refOnly:true) requires the referenced node to already exist",
-							typ.Name(), xidStr))
-						return nil, upsertVar, retErrors
+						return refOnlyMissHandler()
 					}
 					// Required data absent — defer. Emit a blank-node forward reference and
 					// track in pendingForwardRefs. resolvePendingForwardRefs will:
