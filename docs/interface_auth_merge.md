@@ -9,8 +9,8 @@ own `@auth` rules at schema compile-time.
 
 ## Background
 
-When a concrete type implements an interface that has `@auth` rules, those rules are currently
-**AND-merged** into the concrete type unconditionally:
+When a concrete type implements an interface that has `@auth` rules, those rules are **AND-merged**
+into the concrete type unconditionally:
 
 ```
 ConcreteType.query = ConcreteType.own AND Interface.query
@@ -77,13 +77,28 @@ directive @auth(
   delete: AuthRule
 ) on OBJECT | INTERFACE
 
+enum CascadeAuthOperation {
+  query
+  add
+  update
+  delete
+}
+
 input InterfaceMergePolicy {
   interface: String! # name of the interface to override
   merge: String! # "and" | "or"
-  operations: [String!] # optional: query | add | update | delete | password
-  # if absent, applies to all operations
+  operations: [CascadeAuthOperation!] # optional subset of operations this policy applies to
+  # if absent, applies to all four operations
 }
 ```
+
+> **Syntax note:** `operations` values are unquoted enum identifiers, matching the same syntax as
+> `@cascadeAuth(operations: [...])`:
+>
+> ```graphql
+> operations: [add, delete]        ✔  enum values — unquoted
+> operations: ["add", "delete"]    ✘  string literals — will fail validation
+> ```
 
 ### `mergeInto` on an interface
 
@@ -94,36 +109,45 @@ requiring each concrete type to declare `interfacePolicy`.
 interface IAMResourceProtected @auth(mergeInto: "or", add: { rule: "...IAM admin check..." })
 ```
 
-Every type implementing `IAMResourceProtected` will now OR-merge its add rule by default.
+Every type implementing `IAMResourceProtected` will OR-merge its `add` rule by default.
 
 ### `interfacePolicy` on a concrete type
 
 Overrides the merge policy for **specific interfaces** on this type. Can optionally restrict the
-override to specific operations — other operations fall through to `mergeInto` or the global AND
-default.
+override to a subset of operations via `operations: [...]` — operations not listed fall through to
+`mergeInto` (or the global AND default).
+
+**Each interface may appear at most once** in the list. To apply different merge operators per
+operation, use `operations` to declare which operations get the override; the rest fall back to the
+interface's `mergeInto` or `"and"`:
 
 ```graphql
+interface IAMResourceProtected @auth(mergeInto: "and", add: { rule: "...IAM admin check..." })
+
 type Job implements IAMResourceProtected & WorkspaceMember
   @auth(
     interfacePolicy: [
-      # OR only for mutations — IAM admin bypasses ownership check on writes
-      { interface: "IAMResourceProtected", merge: "or", operations: ["add", "update", "delete"] }
-      # AND for queries — both checks always required for reads
-      { interface: "IAMResourceProtected", merge: "and", operations: ["query"] }
+      # OR for mutations — IAM admin role bypasses ownership check on writes.
+      # query is not listed, so it falls back to mergeInto: "and".
+      { interface: "IAMResourceProtected", merge: "or", operations: [add, update, delete] }
     ]
     add: { rule: "...own Job rule..." }
   )
+# Job.add    = Job.own OR IAMResourceProtected.add    (or merge — in operations list)
+# Job.update = Job.own OR IAMResourceProtected.update (or merge — in operations list)
+# Job.query  = Job.own AND IAMResourceProtected.query (falls back to mergeInto: "and")
 ```
 
 ### Resolution order (per operation)
 
-For each `(concrete type, interface, operation)` triplet:
+For each `(concrete type, interface, operation)` triplet the merge operator is chosen by this
+priority chain:
 
 ```
-1. Concrete type's interfacePolicy[interface][operation]   ← exact match, highest priority
-2. Concrete type's interfacePolicy[interface]["*"]         ← wildcard (no operations specified)
-3. Interface's mergeInto                                   ← declared default
-4. "and"                                                   ← global default
+1. interfacePolicy entry for this interface WITH this operation in its operations list  ← highest
+2. interfacePolicy entry for this interface WITH no operations list (applies to all ops)
+3. interface's mergeInto value
+4. "and"                                                                                ← lowest
 ```
 
 ---
@@ -212,12 +236,40 @@ type SensitiveDocument implements IAMResourceProtected
 # SensitiveDocument.add = SensitiveDocument.own AND IAMResourceProtected.add
 ```
 
+### Per-operation override (OR for mutations, AND for queries)
+
+When the interface defaults to AND but mutations need OR, restrict the override with `operations`:
+
+```graphql
+interface IAMResourceProtected @auth(mergeInto: "and", add: { rule: "...IAM check..." })
+
+type Report implements IAMResourceProtected
+  @auth(
+    interfacePolicy: [
+      { interface: "IAMResourceProtected", merge: "or", operations: [add, update, delete] }
+      # query is not listed → falls back to mergeInto "and"
+    ]
+    add: { rule: "...own Report rule..." }
+  )
+# Report.add    = Report.own OR  IAMResourceProtected.add    (OR — in list)
+# Report.update = Report.own OR  IAMResourceProtected.update (OR — in list)
+# Report.query  = Report.own AND IAMResourceProtected.query  (AND — falls back to mergeInto)
+```
+
 ---
 
 ## Validation
 
-| Violation                                                            | Error             |
-| -------------------------------------------------------------------- | ----------------- |
-| `mergeInto` value is not `"and"` or `"or"`                           | Schema load error |
-| `interfacePolicy.merge` value is not `"and"` or `"or"`               | Schema load error |
-| `interfacePolicy` references an interface the type doesn't implement | Schema load error |
+All violations are caught at schema load time.
+
+| Violation                                                                                     | Error             |
+| --------------------------------------------------------------------------------------------- | ----------------- |
+| `mergeInto` value is not `"and"` or `"or"`                                                    | Schema load error |
+| `interfacePolicy` on an `INTERFACE` type (only valid on `OBJECT`)                             | Schema load error |
+| `interfacePolicy.merge` value is not `"and"` or `"or"`                                        | Schema load error |
+| `interfacePolicy.interface` names a type that is not an interface in the schema               | Schema load error |
+| `interfacePolicy` references an interface the type doesn't implement                          | Schema load error |
+| Same interface listed more than once in a single `interfacePolicy` list                       | Schema load error |
+| `interfacePolicy.operations` is an empty list `[]` (omit the field to mean "all")             | Schema load error |
+| `interfacePolicy.operations` contains an invalid value (not one of `add update delete query`) | Schema load error |
+| Unknown field in an `InterfaceMergePolicy` entry (e.g. `operationsx`)                         | Schema load error |
