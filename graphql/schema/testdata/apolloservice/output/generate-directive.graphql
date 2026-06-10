@@ -507,7 +507,7 @@ input HumanRef {
 input InterfaceMergePolicy {
 	interface: String!
 	merge: String!
-	operations: [String!]
+	operations: [CascadeAuthOperation!]
 }
 
 input PersonFilter {

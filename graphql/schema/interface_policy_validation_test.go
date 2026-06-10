@@ -262,3 +262,105 @@ type Widget implements IProtected
 }
 `)
 }
+
+// ─── Rule 7: operations field validation ─────────────────────────────────────
+
+func TestValidateInterfacePolicy_Operations_ValidSubset(t *testing.T) {
+	buildSchemaOK(t, concreteWith(`{ interface: "IProtected", merge: "or", operations: [add, delete] }`))
+}
+
+func TestValidateInterfacePolicy_Operations_SingleOp(t *testing.T) {
+	buildSchemaOK(t, concreteWith(`{ interface: "IProtected", merge: "or", operations: [query] }`))
+}
+
+func TestValidateInterfacePolicy_Operations_AllOps(t *testing.T) {
+	buildSchemaOK(t, concreteWith(
+		`{ interface: "IProtected", merge: "or", operations: [add, update, delete, query] }`,
+	))
+}
+
+func TestValidateInterfacePolicy_Operations_InvalidName_RejectedBySDLParser(t *testing.T) {
+	// "create" is not a CascadeAuthOperation value — rejected by our custom Rule 7b validator.
+	// (gqlparser does not enforce nested input-object enum values at compile time.)
+	buildSchemaErr(t,
+		concreteWith(`{ interface: "IProtected", merge: "or", operations: [create] }`),
+		"Widget", "IProtected", "create", "CascadeAuthOperation",
+	)
+}
+
+func TestValidateInterfacePolicy_Operations_InvalidCaseSensitive_RejectedBySDLParser(t *testing.T) {
+	// Enum values are case-sensitive; "ADD" is not valid (should be "add").
+	buildSchemaErr(t,
+		concreteWith(`{ interface: "IProtected", merge: "or", operations: [ADD] }`),
+		"Widget", "ADD", "CascadeAuthOperation",
+	)
+}
+
+func TestValidateInterfacePolicy_Operations_EmptyListRejected(t *testing.T) {
+	buildSchemaErr(t,
+		concreteWith(`{ interface: "IProtected", merge: "or", operations: [] }`),
+		"Widget", "IProtected", "empty list",
+	)
+}
+
+func TestValidateInterfacePolicy_Operations_OmittedMeansAll(t *testing.T) {
+	// Omitting operations entirely should compile fine and means "all operations".
+	buildSchemaOK(t, concreteWith(`{ interface: "IProtected", merge: "or" }`))
+}
+
+// ─── Runtime: operations-restricted policy only overrides named ops ───────────
+//
+// When interfacePolicy has operations: ["add", "delete"], the "or" merge must
+// apply to Add and Delete but NOT to Query/Update (those fall back to mergeInto).
+
+func TestValidateInterfacePolicy_Operations_MergeOnlyForNamedOps(t *testing.T) {
+	const sch = `
+interface IProtected
+  @auth(
+    mergeInto: "and"
+    add:    { rule: "{ $x: { eq: \"iface\" } }" }
+    update: { rule: "{ $x: { eq: \"iface\" } }" }
+    delete: { rule: "{ $x: { eq: \"iface\" } }" }
+    query:  { rule: "{ $x: { eq: \"iface\" } }" }
+  )
+{
+  name: String
+}
+
+type Widget implements IProtected
+  @auth(
+    interfacePolicy: [{ interface: "IProtected", merge: "or", operations: [add, delete] }]
+    add:    { rule: "{ $w: { eq: \"widget\" } }" }
+    update: { rule: "{ $w: { eq: \"widget\" } }" }
+    delete: { rule: "{ $w: { eq: \"widget\" } }" }
+    query:  { rule: "{ $w: { eq: \"widget\" } }" }
+  )
+{
+  id: ID!
+  name: String
+}
+`
+	s := buildSchema(t, sch)
+	rules := s.authRules["Widget"]
+	if rules == nil || rules.Rules == nil {
+		t.Fatal("Widget has no auth rules after schema build")
+	}
+	r := rules.Rules
+
+	// add → "or" merge (interfacePolicy operations: ["add"])
+	if r.Add == nil || len(r.Add.Or) == 0 {
+		t.Fatalf("Widget.Add should be OR-merged; got: %s", formatRuleNode(r.Add, 0))
+	}
+	// delete → "or" merge (interfacePolicy operations: ["delete"])
+	if r.Delete == nil || len(r.Delete.Or) == 0 {
+		t.Fatalf("Widget.Delete should be OR-merged; got: %s", formatRuleNode(r.Delete, 0))
+	}
+	// update → "and" merge (not in operations — falls back to mergeInto: "and")
+	if r.Update == nil || len(r.Update.And) == 0 {
+		t.Fatalf("Widget.Update should be AND-merged; got: %s", formatRuleNode(r.Update, 0))
+	}
+	// query → "and" merge (not in operations — falls back to mergeInto: "and")
+	if r.Query == nil || len(r.Query.And) == 0 {
+		t.Fatalf("Widget.Query should be AND-merged; got: %s", formatRuleNode(r.Query, 0))
+	}
+}

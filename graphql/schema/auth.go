@@ -355,13 +355,17 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 	// The merge operator is determined by a two-level priority system:
 	//  1. interfacePolicy on the concrete type (highest priority):
 	//       @auth(interfacePolicy: [{ interface: "X", merge: "or" }])
+	//       @auth(interfacePolicy: [{ interface: "X", merge: "or", operations: ["add"] }])
 	//  2. mergeInto on the interface (default for all implementors):
 	//       interface X @auth(mergeInto: "or")
 	//  3. AND (hard-coded default — lowest priority).
+	//
+	// When an interfacePolicy entry specifies operations, the override only
+	// applies to those operations; the remaining ones fall back to mergeInto / AND.
 	for _, typ := range s.Types {
 		name := typeName(typ)
 		if typ.Kind == ast.Object {
-			// Build the per-interface merge-op override map from interfacePolicy.
+			// Build the per-interface merge-policy override map from interfacePolicy.
 			concreteInterfacePolicy := parseInterfacePolicy(typ)
 
 			for _, intrface := range typ.Interfaces {
@@ -374,27 +378,22 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 					continue
 				}
 
-				// Determine the merge function for this (concrete type, interface) pair.
-				mergeOp := "and" // default
+				// Determine the interface-level default merge op (mergeInto or "and").
+				defaultMergeOp := "and"
 				if iface := interfaceDef.Directives.ForName(authDirective); iface != nil {
 					if mi := iface.Arguments.ForName("mergeInto"); mi != nil {
-						mergeOp = mi.Value.Raw // "or" or "and"
+						defaultMergeOp = mi.Value.Raw
 					}
 				}
-				// interfacePolicy on the concrete type overrides mergeInto.
-				if policy, ok := concreteInterfacePolicy[interfaceName]; ok {
-					mergeOp = policy
-				}
 
-				mergeFn := mergeAuthNodeWithAnd
-				if mergeOp == "or" {
-					mergeFn = mergeAuthNodeWithOr
-				}
+				// Per-(interface, operation) override from interfacePolicy.
+				entry, hasEntry := concreteInterfacePolicy[interfaceName]
 
-				authRules[name].Rules = mergeAuthRules(
+				authRules[name].Rules = mergeAuthRulesWithPolicy(
 					authRules[name].Rules,
 					authRules[interfaceName].Rules,
-					mergeFn,
+					defaultMergeOp,
+					entry, hasEntry,
 				)
 			}
 		}
@@ -657,18 +656,35 @@ func mergeAuthNodeWithAnd(objectAuth, interfaceAuth *RuleNode) *RuleNode {
 	return ruleNode
 }
 
+// interfacePolicyEntry stores the per-interface merge policy parsed from
+// @auth(interfacePolicy: [...]) on a concrete type.  It captures the merge
+// operator to use and an optional restricted set of operations the override
+// applies to.  A nil operations set means "apply to all operations".
+type interfacePolicyEntry struct {
+	mergeOp    string          // "and" or "or"
+	operations map[string]bool // nil = all ops; non-nil = restricted set
+}
+
 // parseInterfacePolicy reads the @auth(interfacePolicy: [...]) argument on a
-// concrete type definition and returns a map from interface name to merge op
-// ("or" or "and").  Used by authRules() to override the interface's default
-// mergeInto value on a per-(concrete type, interface) basis.
+// concrete type definition and returns a map from interface name to
+// interfacePolicyEntry.  Used by authRules() to override the interface's
+// default mergeInto value on a per-(concrete type, interface, operation) basis.
 //
 // Example schema:
 //
-//	type Group implements WorkspaceMember
-//	  @auth(interfacePolicy: [{ interface: "WorkspaceMember", merge: "or" }]) { … }
+//	type Group implements WorkspaceMember & IProtected
+//	  @auth(interfacePolicy: [
+//	    { interface: "WorkspaceMember", merge: "or" }
+//	    { interface: "IProtected", merge: "or", operations: ["add", "delete"] }
+//	  ]) { … }
 //
-// Returns: {"WorkspaceMember": "or"}
-func parseInterfacePolicy(typDef *ast.Definition) map[string]string {
+// Returns:
+//
+//	{
+//	  "WorkspaceMember": {mergeOp: "or", operations: nil},
+//	  "IProtected":      {mergeOp: "or", operations: {"add":true, "delete":true}},
+//	}
+func parseInterfacePolicy(typDef *ast.Definition) map[string]interfacePolicyEntry {
 	auth := typDef.Directives.ForName(authDirective)
 	if auth == nil {
 		return nil
@@ -677,14 +693,15 @@ func parseInterfacePolicy(typDef *ast.Definition) map[string]string {
 	if ip == nil || ip.Value == nil {
 		return nil
 	}
-	result := make(map[string]string)
+	result := make(map[string]interfacePolicyEntry)
 	// ip.Value is a list literal; each child is an InterfaceMergePolicy object literal.
 	for _, item := range ip.Value.Children {
 		if item.Value == nil {
 			continue
 		}
 		var iface, mergeOp string
-		// item.Value is an object literal with fields "interface" and "merge".
+		var ops []string
+		// item.Value is an object literal with fields "interface", "merge", "operations".
 		for _, field := range item.Value.Children {
 			if field.Value == nil {
 				continue
@@ -694,11 +711,25 @@ func parseInterfacePolicy(typDef *ast.Definition) map[string]string {
 				iface = field.Value.Raw
 			case "merge":
 				mergeOp = field.Value.Raw
+			case "operations":
+				for _, opChild := range field.Value.Children {
+					if opChild.Value != nil {
+						ops = append(ops, opChild.Value.Raw)
+					}
+				}
 			}
 		}
-		if iface != "" && mergeOp != "" {
-			result[iface] = mergeOp
+		if iface == "" || mergeOp == "" {
+			continue
 		}
+		entry := interfacePolicyEntry{mergeOp: mergeOp}
+		if len(ops) > 0 {
+			entry.operations = make(map[string]bool, len(ops))
+			for _, op := range ops {
+				entry.operations[op] = true
+			}
+		}
+		result[iface] = entry
 	}
 	return result
 }
@@ -766,6 +797,8 @@ func validateInterfacePolicy(schema *ast.Schema, typ *ast.Definition) gqlerror.L
 			continue
 		}
 		var iface, mergeOp string
+		var opValues []string
+		hasOpsField := false
 		for _, field := range item.Value.Children {
 			if field.Value == nil {
 				continue
@@ -775,10 +808,36 @@ func validateInterfacePolicy(schema *ast.Schema, typ *ast.Definition) gqlerror.L
 				iface = field.Value.Raw
 			case "merge":
 				mergeOp = field.Value.Raw
+			case "operations":
+				hasOpsField = true
+				for _, opChild := range field.Value.Children {
+					if opChild.Value != nil {
+						opValues = append(opValues, opChild.Value.Raw)
+					}
+				}
 			}
 		}
 		if iface == "" {
 			continue
+		}
+
+		// Rule 7a: if the operations field is present it must be non-empty.
+		if hasOpsField && len(opValues) == 0 {
+			errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+				`Type %s; @auth(interfacePolicy[%s].operations): empty list is not allowed — omit the field to apply to all operations`,
+				typ.Name, iface))
+		}
+		// Rule 7b: validate each operation name against the CascadeAuthOperation enum values.
+		// NOTE: although operations is typed as [CascadeAuthOperation!] in the SDL, gqlparser
+		// does not validate enum values nested inside input-object fields in directive arguments
+		// at schema compile time, so we enforce this explicitly.
+		validOps := map[string]bool{"add": true, "update": true, "delete": true, "query": true}
+		for _, opVal := range opValues {
+			if !validOps[opVal] {
+				errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+					`Type %s; @auth(interfacePolicy[%s].operations): %q is not a valid CascadeAuthOperation — must be one of add, update, delete, query`,
+					typ.Name, iface, opVal))
+			}
 		}
 
 		// Rule 6: duplicate interface reference.
@@ -838,6 +897,61 @@ func mergeAuthRules(
 	objectAuthRules.Add = mergeAuthNode(objectAuthRules.Add, interfaceAuthRules.Add)
 	objectAuthRules.Delete = mergeAuthNode(objectAuthRules.Delete, interfaceAuthRules.Delete)
 	objectAuthRules.Update = mergeAuthNode(objectAuthRules.Update, interfaceAuthRules.Update)
+	return objectAuthRules
+}
+
+// mergeAuthRulesWithPolicy merges interfaceAuthRules into objectAuthRules,
+// applying per-operation merge operators determined by the concrete type's
+// interfacePolicy entry for this interface and the interface's default
+// mergeInto value.
+//
+// For each of add/update/delete/query:
+//   - If hasEntry AND (entry.operations is nil OR entry.operations[op]) → use entry.mergeOp.
+//   - Otherwise → use defaultMergeOp.
+//
+// Password always uses defaultMergeOp; it is not a user-facing operation and
+// cannot be referenced by interfacePolicy.operations.
+func mergeAuthRulesWithPolicy(
+	objectAuthRules,
+	interfaceAuthRules *AuthContainer,
+	defaultMergeOp string,
+	entry interfacePolicyEntry,
+	hasEntry bool,
+) *AuthContainer {
+	if objectAuthRules == nil {
+		return &AuthContainer{
+			Password: interfaceAuthRules.Password,
+			Query:    interfaceAuthRules.Query,
+			Add:      interfaceAuthRules.Add,
+			Delete:   interfaceAuthRules.Delete,
+			Update:   interfaceAuthRules.Update,
+		}
+	}
+
+	// mergeFnFor returns the appropriate merge function for one operation name.
+	mergeFnFor := func(opName string) func(*RuleNode, *RuleNode) *RuleNode {
+		op := defaultMergeOp
+		if hasEntry && (entry.operations == nil || entry.operations[opName]) {
+			op = entry.mergeOp
+		}
+		if op == "or" {
+			return mergeAuthNodeWithOr
+		}
+		return mergeAuthNodeWithAnd
+	}
+
+	objectAuthRules.Add = mergeFnFor("add")(objectAuthRules.Add, interfaceAuthRules.Add)
+	objectAuthRules.Update = mergeFnFor("update")(objectAuthRules.Update, interfaceAuthRules.Update)
+	objectAuthRules.Delete = mergeFnFor("delete")(objectAuthRules.Delete, interfaceAuthRules.Delete)
+	objectAuthRules.Query = mergeFnFor("query")(objectAuthRules.Query, interfaceAuthRules.Query)
+
+	// Password is not a user-facing operation; always use the interface default.
+	passwordFn := mergeAuthNodeWithAnd
+	if defaultMergeOp == "or" {
+		passwordFn = mergeAuthNodeWithOr
+	}
+	objectAuthRules.Password = passwordFn(objectAuthRules.Password, interfaceAuthRules.Password)
+
 	return objectAuthRules
 }
 

@@ -387,7 +387,7 @@ input AuthVariable {
 input InterfaceMergePolicy {
 	interface: String!
 	merge: String!
-	operations: [String!]
+	operations: [CascadeAuthOperation!]
 }
 
 input ProductFilter {
