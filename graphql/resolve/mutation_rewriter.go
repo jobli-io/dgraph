@@ -2323,7 +2323,7 @@ func rewriteObject(
 						}
 					}
 					refOnlyErr := x.GqlErrorf(
-						"%s with %q does not exist — @default(refOnly:true) requires the referenced node to already exist or be created in the same mutation",
+						"%s with %q does not exist — the referenced node must already exist or be created in the same mutation",
 						typ.Name(), xidStr)
 
 					canonicalVar := xidVariables[0]
