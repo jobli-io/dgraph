@@ -2877,13 +2877,26 @@ func buildFilter(typ schema.Type,
 						rbac := wr.evaluateStaticRules(fd.Type())
 						if rbac == schema.Uncertain {
 							// addAuthQueries returns:
-							//   [nestedQry (consumes qnRoot), rootQry (defines qnRoot), varQry, authVars...]
-							// DQL requires definitions before uses, so move the consumer
-							// (nestedQry) to the END of the slice.
+							//   [0] nestedQry  – consumer: var(func:uid(qnRoot)){qn as inv}
+							//   [1] rootQry    – defines qnRoot, USES varName
+							//   [2] varQry     – defines varName (e.g. Group_N, Workspace_N)
+							//   [3+] authVars  – auth var blocks (use varName / qnRoot)
+							//
+							// DQL var blocks must be emitted in definition-before-use order.
+							// The required sequence is:
+							//   varQry → rootQry → authVars → nestedQry (consumer last)
 							authQrys := wr.addAuthQueries(fd.Type(), nestedQrys, rbac)
-							// authQrys[0] is nestedQry (consumer); authQrys[1:] are the
-							// defining var blocks.  Re-order: definitions first, consumer last.
-							nestedQrys = append(authQrys[1:], authQrys[0])
+							if len(authQrys) >= 3 {
+								// Full auth scaffolding present: reorder so definitions
+								// always precede uses and the consumer block comes last.
+								nestedQrys = make([]*dql.GraphQuery, 0, len(authQrys))
+								nestedQrys = append(nestedQrys, authQrys[2])     // varQry first
+								nestedQrys = append(nestedQrys, authQrys[1])     // rootQry second
+								nestedQrys = append(nestedQrys, authQrys[3:]...) // authVars
+								nestedQrys = append(nestedQrys, authQrys[0])     // consumer last
+							} else {
+								nestedQrys = authQrys
+							}
 						} else if rbac == schema.Negative {
 							nestedQry.Attr = "var()"
 							nestedQry.Var = qn

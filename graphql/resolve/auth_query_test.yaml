@@ -2229,8 +2229,8 @@
         }
         dgraph.uid : uid
       }
-      queryNested_X_yRoot as var(func: uid(Nested_Y_1)) @filter(uid(Nested_Y_Auth2))
       Nested_Y_1 as var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "-"))
+      queryNested_X_yRoot as var(func: uid(Nested_Y_1)) @filter(uid(Nested_Y_Auth2))
       Nested_Y_Auth2 as var(func: uid(Nested_Y_1)) @filter((uid(Nested_Y_Auth2_x))) @cascade
       var(func: type(Nested_X)) @filter(eq(Nested_X.b, true)) {
         Nested_Y_Auth2_x as Nested_X.y
