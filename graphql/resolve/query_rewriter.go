@@ -2876,7 +2876,14 @@ func buildFilter(typ schema.Type,
 
 						rbac := wr.evaluateStaticRules(fd.Type())
 						if rbac == schema.Uncertain {
-							nestedQrys = wr.addAuthQueries(fd.Type(), nestedQrys, rbac)
+							// addAuthQueries returns:
+							//   [nestedQry (consumes qnRoot), rootQry (defines qnRoot), varQry, authVars...]
+							// DQL requires definitions before uses, so move the consumer
+							// (nestedQry) to the END of the slice.
+							authQrys := wr.addAuthQueries(fd.Type(), nestedQrys, rbac)
+							// authQrys[0] is nestedQry (consumer); authQrys[1:] are the
+							// defining var blocks.  Re-order: definitions first, consumer last.
+							nestedQrys = append(authQrys[1:], authQrys[0])
 						} else if rbac == schema.Negative {
 							nestedQry.Attr = "var()"
 							nestedQry.Var = qn
