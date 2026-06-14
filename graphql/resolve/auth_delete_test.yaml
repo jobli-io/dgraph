@@ -247,9 +247,21 @@
       var(func: uid(Ticket_5)) {
         Column_7 as Ticket.onColumn
       }
+      Column_Auth15 as var(func: uid(Column_7)) @cascade {
+        Column.inProject : Column.inProject {
+          Project.roles : Project.roles @filter(eq(Role.permission, "VIEW")) {
+            Role.assignedTo : Role.assignedTo @filter(eq(User.username, "user1"))
+          }
+        }
+      }
       Column_6 as var(func: uid(Column_7)) @filter(uid(Column_Auth15))
       var(func: uid(Column_6)) {
         Project_9 as Column.inProject
+      }
+      Project_Auth14 as var(func: uid(Project_9)) @cascade {
+        Project.roles : Project.roles @filter(eq(Role.permission, "VIEW")) {
+          Role.assignedTo : Role.assignedTo @filter(eq(User.username, "user1"))
+        }
       }
       Project_8 as var(func: uid(Project_9)) @filter(uid(Project_Auth14))
       var(func: uid(Project_8)) {
@@ -260,18 +272,6 @@
         User_13 as Role.assignedTo
       }
       User_12 as var(func: uid(User_13))
-      Project_Auth14 as var(func: uid(Project_9)) @cascade {
-        Project.roles : Project.roles @filter(eq(Role.permission, "VIEW")) {
-          Role.assignedTo : Role.assignedTo @filter(eq(User.username, "user1"))
-        }
-      }
-      Column_Auth15 as var(func: uid(Column_7)) @cascade {
-        Column.inProject : Column.inProject {
-          Project.roles : Project.roles @filter(eq(Role.permission, "VIEW")) {
-            Role.assignedTo : Role.assignedTo @filter(eq(User.username, "user1"))
-          }
-        }
-      }
     }
 
 - name: Delete with top level RBAC true

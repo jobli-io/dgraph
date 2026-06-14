@@ -499,7 +499,6 @@ func mutationQueryRewriting(t *testing.T, sch string, authMeta *testutil.AuthMet
   var(func: uid(TicketRoot)) {
     Column_2 as Ticket.onColumn
   }
-  Column_1 as var(func: uid(Column_2)) @filter(uid(Column_Auth3))
   Column_Auth3 as var(func: uid(Column_2)) @cascade {
     Column.inProject : Column.inProject {
       Project.roles : Project.roles @filter(eq(Role.permission, "VIEW")) {
@@ -507,6 +506,7 @@ func mutationQueryRewriting(t *testing.T, sch string, authMeta *testutil.AuthMet
       }
     }
   }
+  Column_1 as var(func: uid(Column_2)) @filter(uid(Column_Auth3))
 }`,
 		},
 		"Update Ticket": {
@@ -549,7 +549,6 @@ func mutationQueryRewriting(t *testing.T, sch string, authMeta *testutil.AuthMet
   var(func: uid(TicketRoot)) {
     Column_2 as Ticket.onColumn
   }
-  Column_1 as var(func: uid(Column_2)) @filter(uid(Column_Auth3))
   Column_Auth3 as var(func: uid(Column_2)) @cascade {
     Column.inProject : Column.inProject {
       Project.roles : Project.roles @filter(eq(Role.permission, "VIEW")) {
@@ -557,6 +556,7 @@ func mutationQueryRewriting(t *testing.T, sch string, authMeta *testutil.AuthMet
       }
     }
   }
+  Column_1 as var(func: uid(Column_2)) @filter(uid(Column_Auth3))
 }`,
 		},
 	}

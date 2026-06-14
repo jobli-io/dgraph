@@ -1372,7 +1372,7 @@ func RewriteUpsertQueryFromMutation(
 		addUIDFunc(dgQuery[0], []uint64{uid})
 		addTypeFilter(dgQuery[0], m.MutatedType())
 	}
-	dgQuery = authRw.addAuthQueries(m.MutatedType(), dgQuery, rbac)
+	dgQuery, _ = authRw.addAuthQueries(m.MutatedType(), dgQuery, rbac)
 
 	return dgQuery
 }

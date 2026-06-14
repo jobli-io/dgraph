@@ -259,7 +259,10 @@ func entitiesQuery(field schema.Query, authRw *authRewriter) ([]*dql.GraphQuery,
 	selectionAuth := addSelectionSetFrom(dgQuery, field, authRw)
 	addUID(dgQuery)
 
-	dgQueries := authRw.addAuthQueries(typeDefn, []*dql.GraphQuery{dgQuery}, rbac)
+	dgQueries, authVarSubst := authRw.addAuthQueries(typeDefn, []*dql.GraphQuery{dgQuery}, rbac)
+	// Apply deduplication substitutions to selectionAuth filter trees so that any
+	// deduplicated auth var names are also updated outside fldAuthQueries.
+	applyAuthVarSubstToQueries(selectionAuth, authVarSubst)
 	return append(dgQueries, selectionAuth...), nil
 
 }
@@ -279,10 +282,20 @@ func aggregateQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery 
 	_, varQry := addFilter(dgQuery[0], mainType, filter, authRw, query.Alias())
 	dgQuery = append(dgQuery, varQry...)
 
-	dgQuery = authRw.addAuthQueries(mainType, dgQuery, rbac)
+	dgQuery, _ = authRw.addAuthQueries(mainType, dgQuery, rbac)
 
-	// mainQuery is the query with Attr: query.Name()
-	// It is the first query in dgQuery list.
+	// dgQuery[0] is the main var block (func: uid(XRoot) once auth is injected).
+	// dgQuery[1:] contains filter path var blocks, rootQry (defines XRoot),
+	// varQry (defines X_N), and fldAuthQueries.
+	//
+	// DQL requires variable definitions before uses. Since mainQuery uses XRoot
+	// (via uid(XRoot)), and rootQry defines XRoot, the mainQuery MUST come
+	// after the rest of dgQuery[1:] in the output.
+	//
+	// Correct output order:
+	//   finalMainQuery    ← non-var aggregation result collector
+	//   dgQuery[1:]...    ← filterVarQrys + rootQry + varQry + fldAuthQueries (defines XRoot)
+	//   dgQuery[0]        ← mainQuery var block (uses XRoot)
 	mainQuery := dgQuery[0]
 
 	// Changing mainQuery Attr name to var. This is used in the final aggregate<Type> query.
@@ -357,7 +370,14 @@ func aggregateQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery 
 		}
 	}
 
-	return append([]*dql.GraphQuery{finalMainQuery}, dgQuery...)
+	// Emit: [finalMainQuery, dgQuery[1:]...(defines XRoot), dgQuery[0]/mainQuery(uses XRoot)]
+	// This ensures XRoot is defined before it is used in the main var block.
+	authAndFilterQrys := dgQuery[1:] // rootQry, varQry, fldAuthQueries, filterVarQrys
+	result := make([]*dql.GraphQuery, 0, 1+len(authAndFilterQrys)+1)
+	result = append(result, finalMainQuery)
+	result = append(result, authAndFilterQrys...)
+	result = append(result, mainQuery)
+	return result
 }
 
 func passwordQuery(m schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, error) {
@@ -512,9 +532,12 @@ func rewriteAsQueryByIds(
 	addUID(dgQuery[0])
 	addCascadeDirective(dgQuery[0], field)
 
-	dgQuery = authRw.addAuthQueries(field.Type(), dgQuery, rbac)
+	dgQuery, authVarSubst := authRw.addAuthQueries(field.Type(), dgQuery, rbac)
 
 	if len(selectionAuth) > 0 {
+		// Apply deduplication substitutions to selectionAuth filter trees so that any
+		// deduplicated auth var names are also updated outside fldAuthQueries.
+		applyAuthVarSubstToQueries(selectionAuth, authVarSubst)
 		dgQuery = append(dgQuery, selectionAuth...)
 	}
 
@@ -637,9 +660,12 @@ func rewriteAsGet(
 	addTypeFilter(dgQuery[0], query.Type())
 	addCascadeDirective(dgQuery[0], query)
 
-	dgQuery = auth.addAuthQueries(query.Type(), dgQuery, rbac)
+	dgQuery, authVarSubst := auth.addAuthQueries(query.Type(), dgQuery, rbac)
 
 	if len(selectionAuth) > 0 {
+		// Apply deduplication substitutions to selectionAuth filter trees so that any
+		// deduplicated auth var names are also updated outside fldAuthQueries.
+		applyAuthVarSubstToQueries(selectionAuth, authVarSubst)
 		dgQuery = append(dgQuery, selectionAuth...)
 	}
 
@@ -1024,9 +1050,14 @@ func rewriteAsQuery(field schema.Field, authRw *authRewriter, queryName string) 
 	}
 	addCascadeDirective(dgQuery[0], field)
 
-	dgQuery = authRw.addAuthQueries(field.Type(), dgQuery, rbac)
+	dgQuery, authVarSubst := authRw.addAuthQueries(field.Type(), dgQuery, rbac)
 
 	if len(selectionAuth) > 0 {
+		// Apply deduplication substitutions to selectionAuth filter trees so that any
+		// deduplicated auth var names are also updated outside fldAuthQueries.
+		// This fixes "used but not defined" errors when dedup merges vars that are
+		// still referenced by selectionAuth filter trees (e.g. Workspace_Auth16).
+		applyAuthVarSubstToQueries(selectionAuth, authVarSubst)
 		return append(dgQuery, selectionAuth...)
 	}
 
@@ -1056,12 +1087,12 @@ func (authRw *authRewriter) writingAuth() bool {
 func (authRw *authRewriter) addAuthQueries(
 	typ schema.Type,
 	dgQuery []*dql.GraphQuery,
-	rbacEval schema.RuleResult) []*dql.GraphQuery {
+	rbacEval schema.RuleResult) ([]*dql.GraphQuery, map[string]string) {
 
 	// There's no need to recursively inject auth queries into other auth queries, so if
 	// we are already generating an auth query, there's nothing to add.
 	if authRw == nil || authRw.isWritingAuth {
-		return dgQuery
+		return dgQuery, nil
 	}
 
 	authRw.varName = authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
@@ -1172,7 +1203,7 @@ func (authRw *authRewriter) addAuthQueries(
 		if implementingTypesHasAuthRules && len(qrys) == 0 {
 			return []*dql.GraphQuery{{
 				Attr: dgQuery[0].Attr + "()",
-			}}
+			}}, nil
 		}
 
 		// Join all the queries in qrys using OR filter and
@@ -1195,13 +1226,13 @@ func (authRw *authRewriter) addAuthQueries(
 		// Adding the case of Query on interface in which None of the implementing type have
 		// Auth Query Rules, in that case, we also return simple query.
 		if typ.IsInterface() && !implementingTypesHasAuthRules {
-			return dgQuery
+			return dgQuery, nil
 		}
 
 	}
 
 	if len(fldAuthQueries) == 0 && !authRw.hasAuthRules {
-		return dgQuery
+		return dgQuery, nil
 	}
 
 	// If static evaluation already determined the result is Positive,
@@ -1212,7 +1243,7 @@ func (authRw *authRewriter) addAuthQueries(
 	// the top-level RBAC has no restriction.
 	// In that case we fall through and build the scaffolding with filter=nil.
 	if rbacEval == schema.Positive && !authRw.hasAuthRules {
-		return dgQuery
+		return dgQuery, nil
 	}
 
 	// The original code handled this partially, but continued execution.
@@ -1222,7 +1253,7 @@ func (authRw *authRewriter) addAuthQueries(
 		dgQuery[0].Attr = dgQuery[0].Attr + "()"
 		// We can return an empty query, but the original dgQuery already has a `()`
 		// suffix, so we can return that.
-		return dgQuery
+		return dgQuery, nil
 	}
 
 	// If we've made it this far, it means rbacEval was Uncertain and we have dynamic auth
@@ -1289,6 +1320,26 @@ func (authRw *authRewriter) addAuthQueries(
 	fldAuthQueries, authVarSubst := deduplicateAuthVarBlocks(fldAuthQueries)
 	if len(authVarSubst) > 0 {
 		applyAuthVarSubst(filter, authVarSubst)
+		// Also apply the substitution to all filter-path var blocks that were
+		// added to dgQuery by addArgumentsToField / addFilter BEFORE this
+		// function was called (dgQuery[0] is the main selection query — its
+		// filter has already been cleared above, so only [1:] need updating).
+		// Without this step, a @filter on blocks like
+		//   data_and_0_and_2_inGroup_inWorkspaceRoot as var(…) @filter(uid(Workspace_Auth14)…)
+		// still references the deduplicated-away var name (e.g. Workspace_Auth14)
+		// even after the definition block has been substituted out, causing Dgraph
+		// to report "Some variables are used but not defined".
+		applyAuthVarSubstToQueries(dgQuery[1:], authVarSubst)
+		// Also update cascadeVarCache so future cache hits return the surviving
+		// canonical var name, not the deduplicated-away one. Without this, a
+		// selectionAuth call that hits a cached entry referencing the removed var
+		// (e.g. Workspace_Auth15) emits uid(Workspace_Auth15) in its filter with
+		// no corresponding definition block, causing "used but not defined".
+		for rn, varName := range authRw.cascadeVarCache {
+			if canonical, ok := authVarSubst[varName]; ok {
+				authRw.cascadeVarCache[rn] = canonical
+			}
+		}
 	}
 
 	// The final query that includes the user's filter and auth processing is thus like
@@ -1297,9 +1348,12 @@ func (authRw *authRewriter) addAuthQueries(
 	// Todo1 as var(func: ... ) @filter(...)
 	// Todo2 as var(func: uid(Todo1)) @cascade { ...auth query 1... }
 	// Todo3 as var(func: uid(Todo1)) @cascade { ...auth query 2... }
+	// Ordering: [dgQuery(main+filterVars), rootQry(defines parentVarName), varQry(defines varName), fldAuthQueries...]
+	// DQL requires that rootQry comes BEFORE any block that uses uid(parentVarName).
+	// fldAuthQueries are already correct (they reference varName, not parentVarName directly).
 	ret := append(dgQuery, rootQry, varQry)
 	ret = append(ret, fldAuthQueries...)
-	return ret
+	return ret, authVarSubst
 }
 
 func (authRw *authRewriter) addVariableUIDFunc(q *dql.GraphQuery) {
@@ -2267,7 +2321,14 @@ func buildAggregateFields(
 		for _, aggregateChild := range aggregateChildren {
 			if !authQueriesAppended {
 				commonAuthQueryVars.parentQry.Children[0].Filter = aggregateChild.Filter
-				retAuthQueries = append(retAuthQueries, commonAuthQueryVars.parentQry, commonAuthQueryVars.selectionQry)
+				// DQL requires definitions before uses. The dependency chain is:
+				//   parentQry  → defines auth.varName (aggregate result var)
+				//   fieldAuth  → uses auth.varName (auth var blocks for the field type)
+				//   selectionQry → uses auth.varName AND authFilter vars from fieldAuth
+				// Emit in this order so every var is defined before it is used.
+				retAuthQueries = append(retAuthQueries, commonAuthQueryVars.parentQry)
+				retAuthQueries = append(retAuthQueries, fieldAuth...)
+				retAuthQueries = append(retAuthQueries, commonAuthQueryVars.selectionQry)
 				authQueriesAppended = true
 			}
 			aggregateChild.Filter = &dql.FilterTree{
@@ -2280,12 +2341,13 @@ func buildAggregateFields(
 		// Restore the auth state after processing is done.
 		auth.parentVarName = parentVarName
 		auth.varName = parentQryName
+	} else {
+		retAuthQueries = append(retAuthQueries, fieldAuth...)
 	}
 	// otherAggregation Children are appended to aggregationChildren to return them.
 	// This step is performed at the end to ensure that auth and other filters are
 	// not added to them.
 	aggregateChildren = append(aggregateChildren, otherAggregateChildren...)
-	retAuthQueries = append(retAuthQueries, fieldAuth...)
 	retAuthQueries = append(retAuthQueries, varQry...)
 	return aggregateChildren, retAuthQueries
 }
@@ -2463,10 +2525,18 @@ func addSelectionSetFrom(
 					Args: []dql.Arg{{Value: commonAuthQueryVars.selectionQry.Var}},
 				},
 			}
-			authQueries = append(authQueries, commonAuthQueryVars.parentQry, commonAuthQueryVars.selectionQry)
+			// DQL requires definitions before uses. The dependency chain is:
+			//   parentQry  → defines auth.varName (e.g. TaskOccurrence_4)
+			//   fieldAuth  → uses auth.varName (e.g. TaskOccurrence_Auth5)
+			//   selectionQry → uses auth.varName AND authFilter vars from fieldAuth
+			// Emit in this order so every var is defined before it is used.
+			authQueries = append(authQueries, commonAuthQueryVars.parentQry)
+			authQueries = append(authQueries, fieldAuth...)
+			authQueries = append(authQueries, commonAuthQueryVars.selectionQry)
+		} else {
+			authQueries = append(authQueries, fieldAuth...)
 		}
 		authQueries = append(authQueries, selectionAuth...)
-		authQueries = append(authQueries, fieldAuth...)
 		restoreAuthState()
 	}
 
@@ -2885,7 +2955,15 @@ func buildFilter(typ schema.Type,
 							// DQL var blocks must be emitted in definition-before-use order.
 							// The required sequence is:
 							//   varQry → rootQry → authVars → nestedQry (consumer last)
-							authQrys := wr.addAuthQueries(fd.Type(), nestedQrys, rbac)
+							authQrys, nestedAuthVarSubst := wr.addAuthQueries(fd.Type(), nestedQrys, rbac)
+							// The deduplication that happens inside addAuthQueries may remove
+							// auth var blocks and produce a substitution map.  Apply it to the
+							// filter trees that already reference those var names so we don't
+							// leave dangling uid(Workspace_AuthN) references after the
+							// definition block has been dropped.
+							if len(nestedAuthVarSubst) > 0 {
+								applyAuthVarSubst(fil, nestedAuthVarSubst)
+							}
 							if len(authQrys) >= 3 {
 								// Full auth scaffolding present: reorder so definitions
 								// always precede uses and the consumer block comes last.
