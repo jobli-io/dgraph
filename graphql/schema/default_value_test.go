@@ -136,3 +136,33 @@ func TestGetTransformValue_DateTimeNormalisation(t *testing.T) {
 		assert.NoError(t, parseErr, "@transform expr:now() result %q must be valid RFC3339", str)
 	})
 }
+
+// TestValidateDirective_DateTimeExprNoSchemaLoadPanic verifies that a @validate
+// expr expression using date() on a DateTime field does not panic at schema
+// load time.  The bug was that validateDirectiveValidation used time.Now()
+// (time.Time) as the dry-run test value for DateTime fields; date() in
+// expr-lang expects a string and panics with "interface {} is time.Time, not
+// string" when it receives time.Time.
+func TestValidateDirective_DateTimeExprNoSchemaLoadPanic(t *testing.T) {
+	const gqlSchema = `
+		type JobAd {
+			id: ID!
+			status: String
+			postDate: DateTime
+			expiryDate: DateTime @validate(
+				update: {
+					expr: """
+						!(before.status == "ACTIVE" && rawInput.expiryDate != nil)
+						&& (after.expiryDate == nil || date(after.expiryDate) > now())
+						&& (after.expiryDate == nil || after.postDate == nil || date(after.expiryDate) > date(after.postDate))
+					"""
+					reason: "expiryDate must be in the future and after postDate"
+				}
+			)
+		}
+	`
+	// This must not panic or return a schema-load error for the @validate expr.
+	handler, err := NewHandler(gqlSchema, false)
+	require.NoError(t, err, "NewHandler must succeed — @validate with date() on DateTime must not fail at schema load")
+	require.NotNil(t, handler)
+}

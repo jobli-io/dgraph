@@ -1818,7 +1818,12 @@ func validateDirectiveValidation(sch *ast.Schema,
 	var testValue interface{}
 	switch field.Type.Name() {
 	case "DateTime":
-		testValue = time.Now()
+		// Use an RFC3339 string, not time.Time.  DateTime fields arrive as strings
+		// in every real context (JSON-decoded mutation input and Dgraph query
+		// results), so the test value must match.  Using time.Now() (time.Time)
+		// would cause date(after.expiryDate) in @validate exprs to panic with
+		// "interface {} is time.Time, not string" at schema load time.
+		testValue = time.Now().Format(time.RFC3339)
 	case "Int":
 		testValue = 0
 	case "Float":
