@@ -3144,6 +3144,14 @@ func getTransformValue(
 	if err != nil {
 		return nil, errors.Wrapf(err, "field %s expression evaluation failed for transform", fd.Name)
 	}
+	// Normalise time.Time → RFC3339 string for DateTime fields, matching the
+	// value:"$now" path and keeping obj[fieldName] consistently typed so that
+	// subsequent @validate expressions always see strings for DateTime fields.
+	if fd.Type.Name() == "DateTime" {
+		if t, ok := result.(time.Time); ok {
+			return t.Format(time.RFC3339), nil
+		}
+	}
 	return result, nil
 }
 

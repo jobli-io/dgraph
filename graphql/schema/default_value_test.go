@@ -90,3 +90,49 @@ func TestGetDefaultValue_DateTimeNormalisation(t *testing.T) {
 		assert.IsType(t, vVal, eVal, "value:$now and expr:now() must produce the same Go type")
 	})
 }
+
+// TestGetTransformValue_DateTimeNormalisation verifies the same invariant for
+// @transform: expr:"now()" must return an RFC3339 string, not time.Time, so
+// that the value stored into obj[fieldName] during mutation rewriting is
+// consistent with the value:"$now" path.  Without this, @validate expressions
+// that run after @transform would receive time.Time for DateTime fields and
+// panic when calling date() on them.
+func TestGetTransformValue_DateTimeNormalisation(t *testing.T) {
+	const gqlSchema = `
+		type Booking {
+			id: ID!
+			name: String!
+			updated: DateTime! @transform(expr: "now()")
+		}
+	`
+
+	handler, err := NewHandler(gqlSchema, false)
+	require.NoError(t, err, "NewHandler failed")
+
+	sch, err := FromString(handler.GQLSchema(), x.RootNamespace)
+	require.NoError(t, err, "FromString failed")
+
+	s, ok := sch.(*schema)
+	require.True(t, ok)
+
+	astSch := s.schema
+	bookingDef := astSch.Types["Booking"]
+	require.NotNil(t, bookingDef)
+
+	updatedFd := bookingDef.Fields.ForName("updated")
+	require.NotNil(t, updatedFd, "updated field must exist")
+
+	auth := AuthCtx{}
+	parent := map[string]interface{}{"id": "0x1", "name": "Test"}
+
+	t.Run("@transform expr:now() returns RFC3339 string (not time.Time)", func(t *testing.T) {
+		val, err := getTransformValue(astSch, updatedFd, "update", "Booking", parent, auth, nil, nil, "now()")
+		require.NoError(t, err)
+		require.NotNil(t, val)
+
+		str, ok := val.(string)
+		require.True(t, ok, "@transform expr:now() must be normalised to string, got %T: %v", val, val)
+		_, parseErr := time.Parse(time.RFC3339, str)
+		assert.NoError(t, parseErr, "@transform expr:now() result %q must be valid RFC3339", str)
+	})
+}
