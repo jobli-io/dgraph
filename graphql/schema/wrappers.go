@@ -2806,6 +2806,10 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 	}
 
 	// resolveDefaultExpr evaluates an expr string in the standard mutation context.
+	// For DateTime fields, any time.Time result is immediately normalised to an
+	// RFC3339 string so that the returned value is always the same Go type as
+	// the value:"$now" path — preventing a type mismatch in obj[fieldName] when
+	// subsequent @validate or @transform expressions read the same field.
 	resolveExpr := func(exprRaw string) (interface{}, error) {
 		env := NewExprEvaluationContext(parentTypeName, parent, oldValue, removeValue, auth, action)
 		program, err := expr.Compile(exprRaw, expr.Env(env.As()))
@@ -2815,6 +2819,15 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 		expResult, err := expr.Run(program, env.As())
 		if err != nil {
 			return nil, errors.Wrapf(err, "field %s expression evaluation failed for default value", fd.Name)
+		}
+		// Normalise time.Time → RFC3339 string for DateTime fields.
+		// expr-lang's built-in now() returns time.Time; value:"$now" returns a
+		// string. Normalise here so both paths leave obj[fieldName] as a string,
+		// matching Dgraph's wire format and keeping @validate/@transform consistent.
+		if fd.Type.Name() == "DateTime" {
+			if t, ok := expResult.(time.Time); ok {
+				return t.Format(time.RFC3339), nil
+			}
 		}
 		return expResult, nil
 	}
