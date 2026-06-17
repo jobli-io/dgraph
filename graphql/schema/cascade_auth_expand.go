@@ -518,6 +518,13 @@ func buildCascadeRule(
 	// TypeAuth (e.g. from bidirectional cascade writes) but the op-specific slot
 	// (Add/Update/Delete) is nil for the interface itself. Concrete type rules must
 	// be used in that case so the child inherits the correct per-op permission set.
+	//
+	// Exception: when interfaceScope == "interface" the schema author has opted in
+	// to using the interface's own auth rule directly (Case 2) without expanding to
+	// all implementing types.  The DQL generation emits func:type(InterfaceName),
+	// which Dgraph resolves to all implementing nodes via dgraph.type.  This avoids
+	// O(implementors) CascadeWrap branches for interfaces whose own @auth already
+	// captures the needed access policy.
 	var interfaceOpRule *RuleNode
 	if ta != nil && ta.Rules != nil {
 		switch op {
@@ -531,7 +538,8 @@ func buildCascadeRule(
 			interfaceOpRule = ta.Rules.Query
 		}
 	}
-	if authorityDef.Kind == ast.Interface && (ta == nil || ta.Rules == nil || interfaceOpRule == nil) {
+	useInterfaceOnly := authorityDef.Kind == ast.Interface && edge.cfg.InterfaceScope == "interface"
+	if authorityDef.Kind == ast.Interface && !useInterfaceOnly && (ta == nil || ta.Rules == nil || interfaceOpRule == nil) {
 		implRule, err := interfaceImplementorAuthRules(
 			sch, edge, outerChildTypeName, immediateChildTypeName,
 			op, incomingEdges, authRulesSnapshot, visited, depth,

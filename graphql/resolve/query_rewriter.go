@@ -260,8 +260,9 @@ func entitiesQuery(field schema.Query, authRw *authRewriter) ([]*dql.GraphQuery,
 	addUID(dgQuery)
 
 	dgQueries, authVarSubst := authRw.addAuthQueries(typeDefn, []*dql.GraphQuery{dgQuery}, rbac)
-	// Apply deduplication substitutions to selectionAuth filter trees so that any
-	// deduplicated auth var names are also updated outside fldAuthQueries.
+	// Dedup field-level auth var blocks (selectionAuth) and merge any new substitutions
+	// into authVarSubst so the combined map covers both root-auth and field-auth dedup.
+	selectionAuth, authVarSubst = deduplicateSelectionAuth(selectionAuth, dgQueries, authVarSubst)
 	applyAuthVarSubstToQueries(selectionAuth, authVarSubst)
 	return append(dgQueries, selectionAuth...), nil
 
@@ -535,8 +536,9 @@ func rewriteAsQueryByIds(
 	dgQuery, authVarSubst := authRw.addAuthQueries(field.Type(), dgQuery, rbac)
 
 	if len(selectionAuth) > 0 {
-		// Apply deduplication substitutions to selectionAuth filter trees so that any
-		// deduplicated auth var names are also updated outside fldAuthQueries.
+		// Dedup field-level auth var blocks and propagate new substitutions
+		// into authVarSubst before applying it to selectionAuth.
+		selectionAuth, authVarSubst = deduplicateSelectionAuth(selectionAuth, dgQuery, authVarSubst)
 		applyAuthVarSubstToQueries(selectionAuth, authVarSubst)
 		dgQuery = append(dgQuery, selectionAuth...)
 	}
@@ -663,8 +665,9 @@ func rewriteAsGet(
 	dgQuery, authVarSubst := auth.addAuthQueries(query.Type(), dgQuery, rbac)
 
 	if len(selectionAuth) > 0 {
-		// Apply deduplication substitutions to selectionAuth filter trees so that any
-		// deduplicated auth var names are also updated outside fldAuthQueries.
+		// Dedup field-level auth var blocks and propagate new substitutions
+		// into authVarSubst before applying it to selectionAuth.
+		selectionAuth, authVarSubst = deduplicateSelectionAuth(selectionAuth, dgQuery, authVarSubst)
 		applyAuthVarSubstToQueries(selectionAuth, authVarSubst)
 		dgQuery = append(dgQuery, selectionAuth...)
 	}
@@ -1053,10 +1056,13 @@ func rewriteAsQuery(field schema.Field, authRw *authRewriter, queryName string) 
 	dgQuery, authVarSubst := authRw.addAuthQueries(field.Type(), dgQuery, rbac)
 
 	if len(selectionAuth) > 0 {
-		// Apply deduplication substitutions to selectionAuth filter trees so that any
-		// deduplicated auth var names are also updated outside fldAuthQueries.
-		// This fixes "used but not defined" errors when dedup merges vars that are
-		// still referenced by selectionAuth filter trees (e.g. Workspace_Auth16).
+		// Dedup field-level auth var blocks (selectionAuth was never included in the
+		// addAuthQueries dedup pass). Merge any new substitutions into authVarSubst
+		// so the combined map covers both root-auth and field-auth deduplication.
+		// This also propagates new substitutions to dgQuery filter-path var blocks
+		// so that uid() refs to deduplicated-away vars (e.g. Workspace_Auth16) are
+		// resolved before the query is submitted to Dgraph.
+		selectionAuth, authVarSubst = deduplicateSelectionAuth(selectionAuth, dgQuery, authVarSubst)
 		applyAuthVarSubstToQueries(selectionAuth, authVarSubst)
 		return append(dgQuery, selectionAuth...)
 	}
@@ -1398,6 +1404,52 @@ func authQueriesReferenceVar(queries []*dql.GraphQuery, varName string) bool {
 		}
 	}
 	return false
+}
+
+// deduplicateSelectionAuth deduplicates auth var blocks within selectionAuth and
+// propagates any new substitutions to dgQuery filter-path var blocks (those added by
+// addArgumentsToField / addFilter before the auth pass).
+//
+// Background: addAuthQueries only deduplicates the root type's own auth var blocks
+// (fldAuthQueries). Field-level auth blocks (Group, Contact, UpdateRecord …) are
+// appended as selectionAuth AFTER that dedup runs, so identical leaf vars such as
+//
+//	Group_Auth3_hasIAMBinding_forRole  (type(IAMRole) @filter(eq(IAMRole.permission,…)))
+//	Group_Auth4_hasIAMBinding_forRole  (identical filter, different var name)
+//	Group_Auth8_hasIAMBinding_forRole  (identical, inside workspace cascade)
+//
+// are never merged. This helper fixes that by running deduplicateAuthVarBlocks over
+// selectionAuth, then merging the resulting substitution map (selSubst) into the
+// existing rootSubst returned by addAuthQueries so that the combined map can be
+// applied to selectionAuth in one final applyAuthVarSubstToQueries call.
+//
+// Returns the pruned selectionAuth and the merged substitution map.
+func deduplicateSelectionAuth(
+	selectionAuth []*dql.GraphQuery,
+	dgQuery []*dql.GraphQuery,
+	rootSubst map[string]string,
+) ([]*dql.GraphQuery, map[string]string) {
+	if len(selectionAuth) == 0 {
+		return selectionAuth, rootSubst
+	}
+	selectionAuth, selSubst := deduplicateAuthVarBlocks(selectionAuth)
+	if len(selSubst) == 0 {
+		return selectionAuth, rootSubst
+	}
+	// Propagate new substitutions to filter-path var blocks in dgQuery[1:]
+	// (e.g. data_and_0_and_2_inGroup_inWorkspaceRoot blocks added by addFilter)
+	// so that any uid() references to deduplicated-away vars are updated there too.
+	if len(dgQuery) > 1 {
+		applyAuthVarSubstToQueries(dgQuery[1:], selSubst)
+	}
+	// Merge selSubst into rootSubst so callers have one unified map.
+	if rootSubst == nil {
+		return selectionAuth, selSubst
+	}
+	for k, v := range selSubst {
+		rootSubst[k] = v
+	}
+	return selectionAuth, rootSubst
 }
 
 func queryAuthSelector(t schema.Type) *schema.RuleNode {
