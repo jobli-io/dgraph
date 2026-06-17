@@ -30,18 +30,13 @@ type CascadeAuthFieldConfig struct {
 	VariableContext string
 	// Depth limits cascade hops (-1 = unlimited).
 	Depth int
-	// InterfaceScope controls how an interface authority type is handled during
-	// cascade auth expansion.
-	//   "" / "expand" (default) — expand to all implementing concrete types,
-	//   collecting per-implementor CascadeWrap rules (current behaviour).
-	//   "interface" — treat the interface itself as the authority without
-	//   expanding to implementors. The engine emits a single
-	//   var(func: type(InterfaceName)) block using the interface's own @auth
-	//   rule (or no restriction if the interface has no auth for the op).
-	//   In Dgraph, func: type(InterfaceName) matches all implementing nodes
-	//   because interface names are stored in dgraph.type alongside the
-	//   concrete type name.
-	InterfaceScope string
+	// InterfaceOnly, when true, causes buildCascadeRule to treat an interface
+	// authority as a single entity (func: type(InterfaceName)) rather than
+	// expanding to all implementing concrete types. Defaults to false (expand).
+	// In Dgraph, func: type(InterfaceName) matches all implementing nodes
+	// because interface names are stored in dgraph.type alongside the concrete
+	// type name.
+	InterfaceOnly bool
 }
 
 // CascadeAuthPolicyConfig holds the parsed @cascadeAuthPolicy directive for a type.
@@ -86,9 +81,8 @@ func (fd *fieldDefinition) CascadeAuthConfig() *CascadeAuthFieldConfig {
 			cfg.Depth = d
 		}
 	}
-	if v := dir.Arguments.ForName("interfaceScope"); v != nil {
-		// Strip surrounding quotes if present (SDL string args are quoted).
-		cfg.InterfaceScope = strings.Trim(v.Value.Raw, `"`)
+	if v := dir.Arguments.ForName("interfaceOnly"); v != nil {
+		cfg.InterfaceOnly = v.Value.Raw == "true"
 	}
 	return cfg
 }

@@ -538,7 +538,7 @@ func buildCascadeRule(
 			interfaceOpRule = ta.Rules.Query
 		}
 	}
-	useInterfaceOnly := authorityDef.Kind == ast.Interface && edge.cfg.InterfaceScope == "interface"
+	useInterfaceOnly := authorityDef.Kind == ast.Interface && edge.cfg.InterfaceOnly
 	if authorityDef.Kind == ast.Interface && !useInterfaceOnly && (ta == nil || ta.Rules == nil || interfaceOpRule == nil) {
 		implRule, err := interfaceImplementorAuthRules(
 			sch, edge, outerChildTypeName, immediateChildTypeName,
