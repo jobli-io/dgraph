@@ -33,6 +33,7 @@ directive @cascadeAuth(
   depth: Int # default: 1; -1 = unlimited
   bidirectional: Boolean # default: false
   variableContext: CascadeAuthVariableContext # default: adaptive
+  interfaceOnly: Boolean # default: false; skips per-implementor expansion for interface authorities
 ) on FIELD_DEFINITION
 
 enum CascadeAuthOperation {

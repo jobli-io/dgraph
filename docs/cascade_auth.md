@@ -16,6 +16,7 @@ directive @cascadeAuth(
   depth: Int # default: 1; -1 = unlimited chain
   bidirectional: Boolean # default: false
   variableContext: CascadeAuthVariableContext # default: adaptive
+  interfaceOnly: Boolean # default: false; see §interfaceOnly below
 ) on FIELD_DEFINITION
 
 enum CascadeAuthOperation {
@@ -34,9 +35,11 @@ enum CascadeAuthVariableContext {
 Place on **edge fields** that point to an authority type. The authority type must declare `@auth`
 rules (or be an interface whose concrete implementors do).
 
-The authority may be a **concrete type** or an **interface**. When pointing to an interface, the
-engine collects `@auth` rules from all concrete implementors and OR-merges them, adding a
-`@filter(type(X))` discriminator per implementor so the DQL filter is type-safe.
+The authority may be a **concrete type** or an **interface**. When pointing to an interface the
+default behaviour (`interfaceOnly: false`) collects `@auth` rules from every concrete implementor
+and OR-merges them, adding a `@filter(type(X))` discriminator per implementor so each DQL branch is
+type-safe. When the interface has its own self-contained `@auth` rule you can skip that expansion
+with `interfaceOnly: true` — see the [`interfaceOnly`](#interfaceonly) section below.
 
 ### `@authVariables` — on the child type or interface
 
@@ -284,6 +287,70 @@ operation. The child remains protected and the schema deploys without error.
 
 ---
 
+### `interfaceOnly`
+
+Applies only when the edge's authority type is an **interface**.
+
+| Value               | Behaviour                                                                                                                                                                              |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `false` _(default)_ | Expand to every concrete implementor. Each implementor gets its own CascadeWrap branch with a `type(ConcreteType)` discriminator. Correct when implementors have different auth rules. |
+| `true`              | Use the interface's own `@auth` rule directly. Emits a single `var(func: type(InterfaceName))` block. No per-implementor expansion.                                                    |
+
+In Dgraph, `func: type(InterfaceName)` matches every implementing node because interface names are
+stored in `dgraph.type` alongside the concrete type name — so the filter is still correct.
+
+**When to use `interfaceOnly: true`:**
+
+- The interface has a self-contained `@auth` rule that already covers all its implementors.
+- You want to avoid the O(implementors) CascadeWrap branches that inflate query size.
+- The interface's rule uses `<<KEY>>` templates that the child type provides via `@authVariables`
+  (works with any `variableContext` mode).
+
+**DQL comparison —
+`forResource: NoteOwner @cascadeAuth(operations: [query], variableContext: adaptive)`:**
+
+```dql
+# interfaceOnly: false (default) — one branch per implementor
+Attachment_Auth as var(func: uid(AttachmentRoot)) @filter(
+  uid_in(Attachment.forResource, uid(Candidate_Auth)) OR
+  uid_in(Attachment.forResource, uid(Contact_Auth)) OR
+  uid_in(Attachment.forResource, uid(JobAd_Auth))
+) @cascade
+Candidate_Auth as var(func: type(Candidate)) @filter(...)
+Contact_Auth   as var(func: type(Contact))   @filter(...)
+JobAd_Auth     as var(func: type(JobAd))     @filter(...)
+```
+
+```dql
+# interfaceOnly: true — one block regardless of implementor count
+Attachment_Auth  as var(func: uid(AttachmentRoot))
+  @filter(uid_in(Attachment.forResource, uid(NoteOwner_Auth))) @cascade
+NoteOwner_Auth   as var(func: type(NoteOwner)) @filter(... interface's own @auth rule ...)
+```
+
+**Example:**
+
+```graphql
+type Attachment
+  @authVariables(
+    vars: [{ key: "QRY_PERMISSIONS", value: ["_ALL", "READ", "_ATTACHMENT", "READ_ATTACHMENT"] }]
+  ) {
+  # Default: expands to type(Candidate), type(Contact), type(JobAd) …
+  forResource: NoteOwner @cascadeAuth(operations: [query], variableContext: adaptive)
+
+  # Opt-in: single type(NoteOwner) block — requires NoteOwner to have its own @auth
+  forResource: NoteOwner
+    @cascadeAuth(operations: [query], variableContext: adaptive, interfaceOnly: true)
+}
+```
+
+> **Requirement:** the interface must have a `@auth` rule for the targeted operation. If it has
+> none, Case 2 produces no restriction — every node of `type(InterfaceName)` passes — which may be
+> intentional (world-readable authority) or a misconfiguration. The engine will not error; review
+> your intent carefully before enabling this on write operations.
+
+---
+
 ### `depth`
 
 | Value           | Effect                                        |
@@ -458,6 +525,7 @@ This is the right fix when:
 | `variableContext: "parent"` or `"adaptive"` (parent fallback) and authority has `<<KEY>>` template with no cascade chain | Schema load error — template is uncompilable, child gets zero protection |
 | `<<KEY>>` referenced in template has no matching entry in `@authVariables`                                               | Hard schema rejection — unresolved placeholder error at schema load      |
 | Circular cascade chain (A → B → A)                                                                                       | `@cascadeAuth forms a cycle through type B`                              |
+| `interfaceOnly: true` on a non-interface authority type                                                                  | Silently ignored — flag has no effect on concrete types                  |
 
 ---
 
