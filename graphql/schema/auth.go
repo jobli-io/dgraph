@@ -378,6 +378,17 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 					continue
 				}
 
+				// Skip interfaces marked mergeAfterCascade: true — those are handled
+				// exclusively by Stage 4 (mergePostCascadeInterfaceAuth). Processing
+				// them here as well would double-apply the interface auth: once as part
+				// of the OR/AND with cascade, and again as the post-cascade AND, producing
+				// redundant DQL auth blocks (e.g. duplicate Auth2≡Auth9 var blocks).
+				if ifaceAuth := interfaceDef.Directives.ForName(authDirective); ifaceAuth != nil {
+					if mac := ifaceAuth.Arguments.ForName("mergeAfterCascade"); mac != nil && mac.Value.Raw == "true" {
+						continue
+					}
+				}
+
 				// Determine the interface-level default merge op (mergeInto or "and").
 				defaultMergeOp := "and"
 				if iface := interfaceDef.Directives.ForName(authDirective); iface != nil {
