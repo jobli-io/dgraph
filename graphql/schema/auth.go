@@ -483,6 +483,28 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 		errResult = AppendGQLErrs(errResult, err)
 	}
 
+	// Stage 4 — Post-cascade interface auth merge.
+	//
+	// For interfaces whose @auth carries mergeAfterCascade: true, AND their auth
+	// rules into each implementing concrete type AFTER Stage 3 cascade expansion.
+	//
+	// Motivation: Stage 2 runs before cascade, so for OR-policy types
+	// (@cascadeAuthPolicy aggregation:"or") a Stage-2 AND-merge produces:
+	//   OR(AND(base, ifaceAuth), cascadeBlock)  ← cascade escapes the interface check
+	//
+	// By deferring to Stage 4 we get:
+	//   AND(OR(base, cascadeBlock), ifaceAuth)
+	//   = OR(AND(base, ifaceAuth), AND(cascadeBlock, ifaceAuth))  ← both restricted
+	//
+	// For AND-policy types the result is equivalent:
+	//   AND(AND(base, cascadeBlock), ifaceAuth) = AND(base, cascadeBlock, ifaceAuth)
+	//
+	// The merge operator is always AND — the interface acts as a universal restriction
+	// applied to every access path regardless of the type's cascadeAuthPolicy.
+	if err = mergePostCascadeInterfaceAuth(sch, authRules); err != nil {
+		errResult = AppendGQLErrs(errResult, err)
+	}
+
 	// Reinitialize the Interface's auth to be empty as Any operation on interface
 	// will be broken into an operation on subsequent implementing types and auth rules
 	// will be verified against the types only.
@@ -494,6 +516,65 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 	}
 
 	return authRules, errResult
+}
+
+// mergePostCascadeInterfaceAuth implements Stage 4 of the auth rule assembly
+// pipeline. For each interface with @auth(mergeAfterCascade: true), it AND-merges
+// the interface's compiled auth rules into every concrete type that implements it.
+//
+// This runs after expandCascadeAuth so the interface check applies to the fully
+// composed auth tree — including both own auth and cascade-contributed rules.
+// For OR-policy types the AND distributes correctly over OR branches:
+//
+//	AND(interfaceAuth, OR(base, cascadeBlock))
+//	= OR(AND(base, interfaceAuth), AND(cascadeBlock, interfaceAuth))
+func mergePostCascadeInterfaceAuth(sch *schema, authRules map[string]*TypeAuth) error {
+	s := sch.schema
+	for _, ifaceDef := range s.Types {
+		if ifaceDef.Kind != ast.Interface {
+			continue
+		}
+		auth := ifaceDef.Directives.ForName(authDirective)
+		if auth == nil {
+			continue
+		}
+		mac := auth.Arguments.ForName("mergeAfterCascade")
+		if mac == nil || mac.Value.Raw != "true" {
+			continue
+		}
+		ifaceName := typeName(ifaceDef)
+		ifaceAuth := authRules[ifaceName]
+		if ifaceAuth == nil || ifaceAuth.Rules == nil {
+			continue
+		}
+		// AND this interface's auth into every concrete type that implements it.
+		for _, typ := range s.Types {
+			if typ.Kind != ast.Object {
+				continue
+			}
+			name := typeName(typ)
+			for _, iface := range typ.Interfaces {
+				if iface != ifaceName {
+					continue
+				}
+				ta := authRules[name]
+				if ta == nil {
+					ta = &TypeAuth{Fields: make(map[string]*AuthContainer)}
+					authRules[name] = ta
+				}
+				// Always AND — the interface check is a universal restriction
+				// applied regardless of the type's own cascadeAuthPolicy.
+				ta.Rules = mergeAuthRulesWithPolicy(
+					ta.Rules,
+					ifaceAuth.Rules,
+					"and",
+					interfacePolicyEntry{}, false,
+				)
+				break
+			}
+		}
+	}
+	return nil
 }
 
 // snapshotTypeAuthMap creates a shallow copy of the authRules map where each

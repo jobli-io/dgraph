@@ -253,6 +253,12 @@ directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
 directive @auth(
 	mergeInto: String
+	# When true on an interface, the interface's auth rules are AND-merged into all
+	# implementing concrete types AFTER Stage 3 cascade expansion (see auth.go Stage 4).
+	# This ensures the check applies to every access path — both own auth and cascade
+	# branches — so for OR-policy types: AND(manageable, OR(base, cascade))
+	# = OR(AND(base, manageable), AND(cascade, manageable)).
+	mergeAfterCascade: Boolean
 	password: AuthRule
 	query: AuthRule,
 	add: AuthRule,
