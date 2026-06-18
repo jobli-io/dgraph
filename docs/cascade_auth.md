@@ -8,6 +8,26 @@ per-request overhead.
 
 ## Directives
 
+### `@auth` — interface-level extension
+
+The `@auth` directive gains one new argument for interface-to-concrete-type rule propagation:
+
+```graphql
+directive @auth(
+  query: AuthRule
+  add: AuthRule
+  update: AuthRule
+  delete: AuthRule
+  mergeAfterCascade: Boolean # default: false; only meaningful on interfaces
+) on OBJECT | INTERFACE
+```
+
+See
+[mergeAfterCascade — Post-Cascade Interface Auth](#mergeaftercascade--post-cascade-interface-auth)
+for full documentation.
+
+---
+
 ### `@cascadeAuth` — on the edge field
 
 ```graphql
@@ -405,6 +425,14 @@ type Company
 > default `"and"`, a node that has only `inWorkspace` set (no `inGroup`) will always fail auth
 > because the engine requires both paths to be satisfied.
 
+> **Interaction with `mergeAfterCascade`:** When an interface carries `mergeAfterCascade: true`, its
+> auth rules are AND-merged into the concrete type's final rule **after** cascade expansion (Stage
+> 4). For `aggregation: "or"` types this means the interface check wraps the entire OR expression —
+> every access path (direct `@auth` _and_ each cascade branch) must satisfy the interface
+> restriction. For `aggregation: "and"` types the result is semantically equivalent to Stage 2
+> merging but is applied later for consistency. See
+> [mergeAfterCascade — Post-Cascade Interface Auth](#mergeaftercascade--post-cascade-interface-auth).
+
 ### `skip`
 
 ```graphql
@@ -482,6 +510,165 @@ type AdPostRecord
 
 The caller can see the record if they can access either the job ad OR the job board. With default
 `"and"`, they would need access to both simultaneously.
+
+---
+
+## `mergeAfterCascade` — Post-Cascade Interface Auth
+
+### The Ordering Problem
+
+Cascade auth expansion runs in four stages:
+
+| Stage | What happens                                                                     |
+| ----- | -------------------------------------------------------------------------------- |
+| 1     | Each type compiles its own `@auth` rules                                         |
+| 2     | Interface `mergeInto` rules are AND-merged into concrete types                   |
+| 3     | Cascade auth blocks are generated and appended (OR or AND per `aggregation`)     |
+| 4     | **`mergeAfterCascade` interface rules are AND-merged into the final expression** |
+
+The `mergeInto` mechanism (Stage 2) works correctly for `aggregation: "and"` types, but produces a
+logically incorrect result for `aggregation: "or"` types.
+
+For an OR-policy type with a Stage-2 interface merge the algebra is:
+
+```
+# Stage 2 merge then Stage 3 OR-cascade:
+OR(
+  AND(base_auth, ifaceAuth),   ← direct auth path: correctly restricted
+  cascadeBlock                 ← cascade path: interface check ESCAPES
+)
+```
+
+The cascade branch is outside the `AND`, so a caller granted access via the cascade path bypasses
+the interface restriction entirely.
+
+### How `mergeAfterCascade: true` Fixes It (Stage 4)
+
+By deferring the interface merge to Stage 4 — after cascade expansion — the interface rule wraps the
+**complete** OR expression:
+
+```
+# Stage 3 OR-cascade then Stage 4 AND-merge:
+AND(
+  OR(base_auth, cascadeBlock),
+  ifaceAuth
+)
+
+# Which distributes to:
+OR(
+  AND(base_auth,   ifaceAuth),   ← direct auth path: restricted ✓
+  AND(cascadeBlock, ifaceAuth)   ← cascade path: restricted ✓
+)
+```
+
+For `aggregation: "and"` types the result is equally correct — the interface constraint is just
+appended to the AND chain: `AND(base_auth, cascadeBlock, ifaceAuth)`.
+
+> **The merge operator is always AND.** There is no `interfacePolicy` or per-operation override for
+> `mergeAfterCascade`. The interface acts as a universal access restriction regardless of the
+> concrete type's `@cascadeAuthPolicy`. All four operations (query, add, update, delete) are
+> affected equally; the appropriate `@auth` field per operation is merged in.
+
+### Schema Example — The `Manageable` Interface
+
+A common real-world pattern is a plugin-ownership check that must restrict _every_ access path, not
+only the direct `@auth` path:
+
+```graphql
+# Interface: every Manageable resource must be owned by the requesting plugin.
+interface Manageable
+  @auth(
+    mergeAfterCascade: true
+    query: {
+      rule: """
+      query($pluginId: String!) {
+        queryManageable(filter: { managedBy: { eq: $pluginId } }) { __typename }
+      }
+      """
+    }
+  ) {
+  managedBy: String!
+}
+
+# CompanyStatus is also a WorkspaceMember → accessible via workspace cascade.
+# aggregation: "or" — direct auth OR workspace cascade is sufficient.
+type CompanyStatus implements Manageable & WorkspaceMember
+  @cascadeAuthPolicy(aggregation: "or")
+  @auth(
+    query: {
+      rule: """
+      query($pluginId: String!) {
+        queryCompanyStatus(filter: { managedBy: { eq: $pluginId } }) { __typename }
+      }
+      """
+    }
+  ) {
+  id: ID!
+  managedBy: String!
+  inWorkspace: Workspace!
+}
+```
+
+**Without `mergeAfterCascade`** (Stage 2 merge + `aggregation: "or"`):
+
+```
+OR(
+  AND(companyStatusAuth, manageableAuth),  ← correct
+  workspaceCascade                          ← bypasses manageableAuth ✗
+)
+```
+
+A system plugin that only has workspace cascade access could read any `CompanyStatus` node
+regardless of `managedBy`.
+
+**With `mergeAfterCascade: true`** (Stage 4 AND-merge):
+
+```
+AND(
+  OR(companyStatusAuth, workspaceCascade),
+  manageableAuth
+)
+= OR(
+    AND(companyStatusAuth, manageableAuth),  ← correct ✓
+    AND(workspaceCascade,  manageableAuth)   ← correct ✓
+  )
+```
+
+Every access path now requires the `managedBy` check.
+
+### Key Differences vs. `mergeInto`
+
+> [!IMPORTANT] > `mergeAfterCascade: true` and `mergeInto` (Stage 2) are mutually exclusive in
+> intent. Using both on the same interface will apply the interface auth rules **twice** — once in
+> Stage 2 (as part of the base auth) and once in Stage 4 (wrapping the whole expression). For
+> OR-policy types this produces a more restrictive result than intended. Use **only
+> `mergeAfterCascade: true`** when the interface must restrict cascade-accessed nodes.
+
+| Property                    | `mergeInto` (Stage 2)            | `mergeAfterCascade` (Stage 4)            |
+| --------------------------- | -------------------------------- | ---------------------------------------- |
+| Runs before cascade         | ✓ Yes                            | ✗ No — runs after                        |
+| Wraps cascade branches      | ✗ No — cascade branch can escape | ✓ Yes — AND wraps the full OR expression |
+| Safe for `aggregation: or`  | ✗ No                             | ✓ Yes                                    |
+| Safe for `aggregation: and` | ✓ Yes                            | ✓ Yes                                    |
+| Merge operator              | AND                              | AND (always; no override)                |
+| Operations affected         | Per `@auth` field                | All four (query/add/update/delete)       |
+
+### Notes and Constraints
+
+- **Self-contained rules only.** No `@authVariables` template substitution is performed in Stage 4.
+  The interface's `@auth` rules must be fully compiled literals — `<<KEY>>` placeholders are not
+  resolved against concrete type variables at this stage. If the interface rule contains unresolved
+  placeholders, schema load will be rejected with an unresolved-key error.
+
+- **All four operations are affected equally.** For each operation the engine picks the interface's
+  matching `@auth` field (query/add/update/delete) and AND-merges it into the concrete type's
+  compiled rule for that operation. There is no per-operation opt-out.
+
+- **Only on interfaces.** `mergeAfterCascade: true` on a concrete type (`OBJECT`) is a validation
+  error — the argument is meaningless on types that have no implementors to merge into.
+
+- **No `interfacePolicy` override.** The merge operator is always AND. The interface acts as an
+  unconditional access gate — it cannot be loosened to OR at any granularity.
 
 ---
 
