@@ -2919,6 +2919,12 @@ func rewriteObject(
 		}
 
 		if fieldDef.HasEmbeddingDirective() {
+			if val == nil {
+				// nil embedding value means "not set" — omit from the mutation payload.
+				// Without this guard, json.Marshal(nil) produces the string "null"
+				// which Dgraph rejects with "cannot convert null to vfloat".
+				continue
+			}
 			// embedding is a JSON array of numbers. Rewrite it as a string, for now
 			var valBytes []byte
 			valBytes, _ = json.Marshal(val)
