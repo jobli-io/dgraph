@@ -1324,8 +1324,13 @@ func addReferenceType(schema *ast.Schema, defn *ast.Definition, providesTypeMap 
 		}
 		flds = append(getIDField(defn, providesTypeMap), getXIDField(defn, providesTypeMap)...)
 	} else {
+		// Concrete types: uid field + all non-uid fields.
+		// forRef=true tells getFieldsWithoutIDType to include @id (XID) fields
+		// unconditionally, bypassing the isFieldGenerateAdd gate. XID fields are
+		// identity keys — the Ref type is used to reference existing nodes, so
+		// all identity fields must appear regardless of @generate(mutation:{add:false}).
 		flds = append(getIDField(defn, providesTypeMap),
-			getFieldsWithoutIDType(schema, defn, providesTypeMap, true)...)
+			getFieldsWithoutIDType(schema, defn, providesTypeMap, true, true)...)
 	}
 
 	if len(flds) == 1 && (hasID(defn) || hasXID(defn)) {
@@ -2725,8 +2730,19 @@ func getPatchFields(schema *ast.Schema, defn *ast.Definition, providesTypeMap ma
 	return append(fldList, pd)
 }
 
+// getFieldsWithoutIDType returns the fields of defn that are not of ID (uid) type,
+// after applying the standard exclusion filters (external, custom/lambda, reverse, etc.).
+//
+// isAddingInput: when true, multi-language fields are excluded (they use the lang-tagged
+// variant in AddXxxInput).
+//
+// forRef: when true, @id (XID) fields bypass the isFieldGenerateAdd gate so they always
+// appear in TypeRef. XID fields are identity keys — the Ref type is used to reference
+// existing nodes, not to create them, so @generate(mutation:{add:false}) must not exclude
+// them. All other callers pass forRef=false.
 func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
-	providesTypeMap map[string]bool, isAddingInput bool) ast.FieldList {
+	providesTypeMap map[string]bool, isAddingInput bool, forRef ...bool) ast.FieldList {
+	isRefType := len(forRef) > 0 && forRef[0]
 	fldList := make([]*ast.FieldDefinition, 0)
 	for _, fld := range defn.Fields {
 		if isIDField(defn, fld) {
@@ -2765,7 +2781,11 @@ func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
 		// in AddXxxInput so clients cannot supply them on creation.
 		// Internal mechanisms (@default, @transform) still write to these fields at runtime —
 		// @default fires when obj[field] == nil, which is always true here.
-		if !isFieldGenerateAdd(fld) {
+		//
+		// Exception: when building TypeRef (isRefType=true), @id (XID) fields are always
+		// included — they are identity keys used to reference existing nodes, so
+		// @generate(mutation:{add:false}) must not gate them out of the Ref type.
+		if !isFieldGenerateAdd(fld) && !(isRefType && hasIDDirective(fld)) {
 			continue
 		}
 
