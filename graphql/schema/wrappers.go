@@ -2517,10 +2517,11 @@ func (fd *fieldDefinition) CascadeDeleteConfig() *CascadeDeleteFieldConfig {
 // CascadeDeleteFields returns all fields on this type that carry @cascadeDelete,
 // including fields inherited from implemented interfaces.
 //
-// IMPORTANT: t.Fields() (and typeDef.Fields) returns only fields EXPLICITLY
-// declared on the type. Inherited interface fields like Recordable.hasCreateRecord
-// are NOT included — they live only on the interface definition. This function
-// therefore also walks each interface's field list directly.
+// Note: t.Fields() returns ALL fields including interface-inherited ones — expandSchema()
+// in gqlschema.go copies interface fields into each implementing type's defn.Fields at
+// schema-load time. The explicit interface walk below is therefore a safety net for any
+// field whose @cascadeDelete directive lives only on the interface definition and was not
+// overridden on the concrete type (preserving correct DgraphAlias resolution).
 //
 // Interface-sourced fields use the INTERFACE's fieldDefinition as parentType so
 // DgraphAlias() produces "InterfaceName.fieldName", matching the Dgraph predicate.
@@ -2532,7 +2533,8 @@ func (t *astType) CascadeDeleteFields() []FieldDefinition {
 		return result
 	}
 
-	// 1. Explicitly declared fields on the concrete type.
+	// 1. Explicitly declared fields on the concrete type (includes interface-inherited
+	// fields copied in by expandSchema).
 	for _, fd := range typeDef.Fields {
 		if fd.Directives.ForName(cascadeDeleteDirective) != nil {
 			seen[fd.Name] = true
@@ -2545,9 +2547,8 @@ func (t *astType) CascadeDeleteFields() []FieldDefinition {
 		}
 	}
 
-	// 2. Walk each implemented interface's own field list.
-	// These fields are NOT surfaced through typeDef.Fields, so we must
-	// traverse the interface definitions directly.
+	// 2. Safety net: walk each interface's own field list in case the directive is
+	// only on the interface definition and the copy in step 1 didn't carry it.
 	for _, ifaceName := range typeDef.Interfaces {
 		ifaceDef := t.inSchema.schema.Types[ifaceName]
 		if ifaceDef == nil {
