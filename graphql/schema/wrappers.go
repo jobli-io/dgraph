@@ -2869,6 +2869,23 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 			if err != nil {
 				return nil, nil, err
 			}
+			// Normalise typed-nil interface values to untyped nil.
+			// If the expr returns a typed nil (e.g. []float32(nil) from
+			// generateEmbedding when the API fails), defaultValue holds a
+			// non-nil interface wrapping a nil pointer/slice. The caller
+			// checks `value != nil` before writing to obj, so a typed nil
+			// would be incorrectly treated as a real value and written as
+			// JSON null, causing Dgraph to reject the mutation.
+			if defaultValue != nil {
+				rv := reflect.ValueOf(defaultValue)
+				if rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Slice ||
+					rv.Kind() == reflect.Map || rv.Kind() == reflect.Chan ||
+					rv.Kind() == reflect.Func || rv.Kind() == reflect.Interface {
+					if rv.IsNil() {
+						defaultValue = nil
+					}
+				}
+			}
 			found = true
 		}
 		if found {
@@ -2889,6 +2906,17 @@ func getDefaultValue(sch *ast.Schema, fd *ast.FieldDefinition,
 			defaultValue, err = resolveExpr(exprArg.Value.Raw)
 			if err != nil {
 				return nil, nil, err
+			}
+			// Normalise typed-nil — same reasoning as the action-scoped branch above.
+			if defaultValue != nil {
+				rv := reflect.ValueOf(defaultValue)
+				if rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Slice ||
+					rv.Kind() == reflect.Map || rv.Kind() == reflect.Chan ||
+					rv.Kind() == reflect.Func || rv.Kind() == reflect.Interface {
+					if rv.IsNil() {
+						defaultValue = nil
+					}
+				}
 			}
 			found = true
 		}

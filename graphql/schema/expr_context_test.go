@@ -23,6 +23,7 @@ package schema
 import (
 	"testing"
 
+	"github.com/hypermodeinc/dgraph/v25/x"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -273,4 +274,49 @@ func TestDiffMap_MultipleKeys_MixedChanges(t *testing.T) {
 	assert.NotContains(t, diff, "b", "unchanged scalar")
 	assert.Equal(t, "added", diff["d"], "newly added key")
 	assert.NotContains(t, diff, "c", "removed key must not appear")
+}
+
+// ── getDefaultValue typed-nil normalisation ───────────────────────────────────
+//
+// When an @default expr returns a typed nil (e.g. []float32(nil) from
+// generateEmbedding when the API fails), the interface{} wrapper is non-nil
+// even though the underlying value is nil. Without normalisation, the caller's
+// `if value != nil` guard passes and the nil slice is written to obj, then
+// marshalled as JSON "null" which Dgraph rejects with "cannot convert null to
+// vfloat". getDefaultValue must normalise typed nils to untyped nil.
+
+func TestGetDefaultValue_TypedNilExprResult_ReturnedAsNil(t *testing.T) {
+	// Build a minimal schema with a Float list field that has an @default expr
+	// that evaluates to a typed nil (simulating generateEmbedding failure).
+	const gqlSchema = `
+		type Widget {
+			id: ID!
+			name: String!
+			vec: [Float] @default(expr: "nil")
+		}
+	`
+	handler, err := NewHandler(gqlSchema, false)
+	require.NoError(t, err)
+
+	sch, err := FromString(handler.GQLSchema(), x.RootNamespace)
+	require.NoError(t, err)
+
+	s, ok := sch.(*schema)
+	require.True(t, ok)
+
+	astSch := s.schema
+	widgetDef := astSch.Types["Widget"]
+	require.NotNil(t, widgetDef)
+
+	vecFd := widgetDef.Fields.ForName("vec")
+	require.NotNil(t, vecFd, "vec field must exist")
+
+	auth := AuthCtx{}
+	parent := map[string]interface{}{}
+
+	val, _, err := getDefaultValue(astSch, vecFd, "add", "Widget", parent, auth, nil, nil)
+	require.NoError(t, err)
+	// A nil expr result must be returned as untyped nil, not a typed-nil interface.
+	assert.Nil(t, val,
+		"typed nil from @default expr must be normalised to untyped nil so the caller's `value != nil` guard works")
 }
