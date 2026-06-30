@@ -690,7 +690,7 @@ func mutatedTypeMapping(s *schema,
 
 	m := make(map[string]*astType, len(s.schema.Mutation.Fields))
 	for _, field := range s.schema.Mutation.Fields {
-		mutatedTypeName := ""
+		var mutatedTypeName string
 		switch {
 		case strings.HasPrefix(field.Name, "add"):
 			mutatedTypeName = strings.TrimPrefix(field.Name, "add")
@@ -699,33 +699,25 @@ func mutatedTypeMapping(s *schema,
 		case strings.HasPrefix(field.Name, "delete"):
 			mutatedTypeName = strings.TrimPrefix(field.Name, "delete")
 		default:
-		}
-		// Resolve the payload type to recover the mutated object type.
-		// Try all three payload variants in order:
-		//   1. AddTPayload   — present when @generate(mutation:{add:true})
-		//   2. DeleteTPayload — present when @generate(mutation:{delete:true})
-		//   3. UpdateTPayload — present when @generate(mutation:{update:true})
-		// A type with only update enabled (add:false, delete:false) — e.g.
-		// Address — has no Add/DeletePayload, so we must fall through to
-		// UpdateTPayload or MutatedType() returns nil and panics in DgraphName().
-		var def *ast.Definition
-		if def = s.schema.Types["Add"+mutatedTypeName+"Payload"]; def == nil {
-			def = s.schema.Types["Delete"+mutatedTypeName+"Payload"]
-		}
-		if def == nil {
-			def = s.schema.Types["Update"+mutatedTypeName+"Payload"]
+			continue // custom mutation — no mutated type
 		}
 
-		if def == nil {
+		// Verify the type is a real schema type before registering it.
+		// Custom mutations (e.g. HTTP/lambda fields) won't have a matching
+		// type after prefix-stripping and must be skipped.
+		if s.schema.Types[mutatedTypeName] == nil {
 			continue
 		}
 
-		// Accessing 0th element should be safe to do as according to the spec an object must define
-		// one or more fields.
-		typ := def.Fields[0].Type
-		// This would contain mapping of mutation field name to the Type()
-		// for e.g. addPost => astType for Post
-		m[field.Name] = &astType{typ, s, dgraphPredicate}
+		// Build astType directly from the name — no payload indirection needed.
+		// The original code reached for AddTPayload/DeleteTPayload to obtain an
+		// *ast.Type, but &ast.Type{NamedType: mutatedTypeName} is identical and
+		// works regardless of which mutation operations are @generate-enabled.
+		m[field.Name] = &astType{
+			typ:             &ast.Type{NamedType: mutatedTypeName},
+			inSchema:        s,
+			dgraphPredicate: dgraphPredicate,
+		}
 	}
 	return m
 }
