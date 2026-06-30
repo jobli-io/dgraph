@@ -700,13 +700,20 @@ func mutatedTypeMapping(s *schema,
 			mutatedTypeName = strings.TrimPrefix(field.Name, "delete")
 		default:
 		}
-		// This is a convoluted way of getting the type for mutatedTypeName. We get the definition
-		// for AddTPayload and get the type from the first field. There is no direct way to get
-		// the type from the definition of an object. Interfaces can't have Add and if there is no non Id
-		// field then Update also will not be there, so we use Delete if there is no AddTPayload.
+		// Resolve the payload type to recover the mutated object type.
+		// Try all three payload variants in order:
+		//   1. AddTPayload   — present when @generate(mutation:{add:true})
+		//   2. DeleteTPayload — present when @generate(mutation:{delete:true})
+		//   3. UpdateTPayload — present when @generate(mutation:{update:true})
+		// A type with only update enabled (add:false, delete:false) — e.g.
+		// Address — has no Add/DeletePayload, so we must fall through to
+		// UpdateTPayload or MutatedType() returns nil and panics in DgraphName().
 		var def *ast.Definition
 		if def = s.schema.Types["Add"+mutatedTypeName+"Payload"]; def == nil {
 			def = s.schema.Types["Delete"+mutatedTypeName+"Payload"]
+		}
+		if def == nil {
+			def = s.schema.Types["Update"+mutatedTypeName+"Payload"]
 		}
 
 		if def == nil {
