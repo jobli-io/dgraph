@@ -16,6 +16,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/golang/glog"
 	"github.com/pkg/errors"
 	geom "github.com/twpayne/go-geom"
 	"github.com/twpayne/go-geom/encoding/geojson"
@@ -37,6 +38,7 @@ import (
 //	float32Val := < a string rep of a float32 value >
 func ParseVFloat(s string) ([]float32, error) {
 	// TODO Check if this can be done using lexer
+	glog.Infof("xxxxxxxxxyyyyy: %s", s)
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.ReplaceAll(s, "\t", " ")
 	s = strings.TrimSpace(s)

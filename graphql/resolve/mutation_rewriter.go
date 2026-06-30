@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/golang/glog"
 	"github.com/pkg/errors"
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
@@ -2925,6 +2926,7 @@ func rewriteObject(
 				// which Dgraph rejects with "cannot convert null to vfloat".
 				continue
 			}
+			glog.Infof("zzzzzzzzzzzz: Field: %s, Value: %v", fieldName, val)
 			// embedding is a JSON array of numbers. Rewrite it as a string, for now
 			var valBytes []byte
 			valBytes, _ = json.Marshal(val)
