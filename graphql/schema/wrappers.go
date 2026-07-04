@@ -3984,20 +3984,41 @@ func (fd *fieldDefinition) ParentType() Type {
 	return fd.parentType
 }
 
-// IsImmutableInverse returns true when this field's @hasInverse directive has
-// immutable: true. The edge is write-once: can be set on creation but cannot
-// be reassigned or removed after that via a GraphQL mutation.
+// IsImmutableInverse returns true when this field (or its inverse peer) has
+// @hasInverse(immutable: true). The edge is write-once: can be set on creation
+// but cannot be reassigned or removed via a GraphQL mutation after that.
 // Node-deletion cascade still clears the edge (existing Dgraph behaviour).
+//
+// We check both directions because immutable:true is often declared only on
+// the scalar (child) side — e.g. PortalForm.forJobAd has immutable:true but
+// JobAd.hasPortalForm has no @hasInverse at all. Without the peer check,
+// srcField.IsImmutableInverse() would return false for JobAd.hasPortalForm
+// and the rewriteObject enforcement block would be silently skipped.
 func (fd *fieldDefinition) IsImmutableInverse() bool {
 	if fd.fieldDef == nil {
 		return false
 	}
+	// Direct check: this field itself carries @hasInverse(immutable: true).
 	dir := fd.fieldDef.Directives.ForName(inverseDirective)
-	if dir == nil {
-		return false
+	if dir != nil {
+		if immArg := dir.Arguments.ForName(inverseImmutableArg); immArg != nil && immArg.Value.Raw == "true" {
+			return true
+		}
 	}
-	immArg := dir.Arguments.ForName(inverseImmutableArg)
-	return immArg != nil && immArg.Value.Raw == "true"
+	// Peer check: the inverse field on the other side declares immutable: true.
+	// This handles the canonical one-to-many pattern where only the scalar child
+	// side (e.g. PortalForm.forJobAd) carries immutable:true.
+	if inv := fd.Inverse(); inv != nil {
+		if invFd, ok := inv.(*fieldDefinition); ok {
+			invDir := invFd.fieldDef.Directives.ForName(inverseDirective)
+			if invDir != nil {
+				if immArg := invDir.Arguments.ForName(inverseImmutableArg); immArg != nil && immArg.Value.Raw == "true" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // IsGenerateAdd returns false when this field has @generate(mutation: { add: false }),

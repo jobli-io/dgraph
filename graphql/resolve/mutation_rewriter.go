@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/golang/glog"
 	"github.com/pkg/errors"
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
@@ -1670,6 +1669,9 @@ func getFieldsForExistsQuery(typ schema.Type) []*dql.GraphQuery {
 			continue
 		}
 		children = append(children, &dql.GraphQuery{
+			// Use "alias : predicate" form so the Dgraph response keys the result
+			// by the GraphQL field name (fld.Name()). The immutability check in
+			// rewriteObject looks up nodeData[invField.Name()], which must match.
 			Attr: fmt.Sprintf("%s : %s", fld.Name(), fld.DgraphPredicate()),
 			Children: []*dql.GraphQuery{
 				{Attr: "uid"},
@@ -2926,7 +2928,6 @@ func rewriteObject(
 				// which Dgraph rejects with "cannot convert null to vfloat".
 				continue
 			}
-			glog.Infof("zzzzzzzzzzzz: Field: %s, Value: %v", fieldName, val)
 			// embedding is a JSON array of numbers. Rewrite it as a string, for now
 			var valBytes []byte
 			valBytes, _ = json.Marshal(val)
