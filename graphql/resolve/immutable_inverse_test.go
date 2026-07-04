@@ -720,3 +720,142 @@ type Child {
 	require.NoError(t, err,
 		"Parent list-side (empty children) must NOT reject — only Child.parent scalar side rejects a reassignment")
 }
+
+// --- updateParent set/remove patch on the list field ---
+//
+// The list field (Parent.children) stays in UpdateParentPatch deliberately
+// (see gqlschema.go:2681) so that updateParent can trigger @default/@transform
+// re-evaluation. We verify the runtime immutability semantics for both set
+// and remove patches.
+
+const updateParentOneToManySchema = `
+type Parent {
+  id:       ID!
+  name:     String!
+  children: [Child] @hasInverse(field: "parent", immutable: true)
+}
+type Child {
+  id:     ID!
+  name:   String!
+  parent: Parent @hasInverse(field: "children", immutable: true)
+}
+`
+
+// TestImmutableInverse_UpdateParent_SetPatch_FreeChild_Allowed verifies that
+// updateParent(set:{children:[{id:0xC1}]}) is allowed when Child 0xC1 has no
+// parent yet (its scalar inverse is unset).
+func TestImmutableInverse_UpdateParent_SetPatch_FreeChild_Allowed(t *testing.T) {
+	gqlSchema := test.LoadSchemaFromString(t, updateParentOneToManySchema)
+
+	const gqlMut = `mutation {
+		updateParent(input: {
+			filter: { id: ["0xP1"] }
+			set: { children: [{ id: "0xC1" }] }
+		}) {
+			parent { id }
+		}
+	}`
+
+	op, err := gqlSchema.Operation(&schema.Request{Query: gqlMut})
+	require.NoError(t, err, "updateParent set patch must be parseable (children in UpdateParentPatch)")
+
+	mut := test.GetMutation(t, op)
+	rewriter := NewUpdateRewriter()
+
+	queries, _, err := rewriter.RewriteQueries(context.Background(), mut)
+	require.NoError(t, err)
+
+	// Seed the existence maps — Parent 0xP1 exists, Child 0xC1 exists with no parent.
+	qNameToUID := make(map[string]string)
+	for _, q := range queries {
+		switch {
+		case strings.Contains(q.Attr, "Parent"):
+			qNameToUID[q.Attr] = "0xP1"
+			rewriter.SetOldValue(q.Attr, map[string]interface{}{
+				"uid": "0xP1",
+			})
+		case strings.Contains(q.Attr, "Child"):
+			qNameToUID[q.Attr] = "0xC1"
+			// no "parent" key → Child is free
+			rewriter.SetOldValue(q.Attr, map[string]interface{}{
+				"uid": "0xC1",
+			})
+		}
+	}
+
+	_, err = rewriter.Rewrite(context.Background(), mut, qNameToUID)
+	require.NoError(t, err,
+		"updateParent set patch linking a free Child must be ALLOWED")
+}
+
+// TestImmutableInverse_UpdateParent_SetPatch_OccupiedChild_Rejected verifies that
+// updateParent(set:{children:[{id:0xC1}]}) is rejected when Child 0xC1 already
+// belongs to a different Parent (its immutable inverse would be reassigned).
+func TestImmutableInverse_UpdateParent_SetPatch_OccupiedChild_Rejected(t *testing.T) {
+	gqlSchema := test.LoadSchemaFromString(t, updateParentOneToManySchema)
+
+	const gqlMut = `mutation {
+		updateParent(input: {
+			filter: { id: ["0xP2"] }
+			set: { children: [{ id: "0xC1" }] }
+		}) {
+			parent { id }
+		}
+	}`
+
+	op, err := gqlSchema.Operation(&schema.Request{Query: gqlMut})
+	require.NoError(t, err)
+
+	mut := test.GetMutation(t, op)
+	rewriter := NewUpdateRewriter()
+
+	queries, _, err := rewriter.RewriteQueries(context.Background(), mut)
+	require.NoError(t, err)
+
+	// Seed: Child 0xC1 already has parent = 0xP1 (not 0xP2).
+	qNameToUID := make(map[string]string)
+	for _, q := range queries {
+		switch {
+		case strings.Contains(q.Attr, "Parent"):
+			qNameToUID[q.Attr] = "0xP2"
+			rewriter.SetOldValue(q.Attr, map[string]interface{}{
+				"uid": "0xP2",
+			})
+		case strings.Contains(q.Attr, "Child"):
+			qNameToUID[q.Attr] = "0xC1"
+			rewriter.SetOldValue(q.Attr, map[string]interface{}{
+				"uid":    "0xC1",
+				"parent": map[string]interface{}{"uid": "0xP1"}, // already owned
+			})
+		}
+	}
+
+	_, err = rewriter.Rewrite(context.Background(), mut, qNameToUID)
+	require.Error(t, err,
+		"updateParent set patch trying to steal an already-owned Child must be REJECTED")
+	require.True(t,
+		strings.Contains(err.Error(), "immutable") || strings.Contains(err.Error(), "already points"),
+		"error must mention immutability: %v", err)
+}
+
+// TestImmutableInverse_UpdateParent_RemovePatch_SchemaAllows verifies that the
+// remove clause on the list field is accepted at the schema layer (field is in
+// UpdateParentPatch). Runtime behaviour is intentionally permissive — removing
+// an edge from the list side does not violate immutability of the child's scalar
+// field (it's the parent dropping the reference, not the child being reassigned).
+func TestImmutableInverse_UpdateParent_RemovePatch_SchemaAllows(t *testing.T) {
+	gqlSchema := test.LoadSchemaFromString(t, updateParentOneToManySchema)
+
+	_, err := gqlSchema.Operation(&schema.Request{
+		Query: `mutation {
+			updateParent(input: {
+				filter: { id: ["0xP1"] }
+				remove: { children: [{ id: "0xC1" }] }
+			}) {
+				parent { id }
+			}
+		}`,
+	})
+	require.NoError(t, err,
+		"remove patch on list field must be accepted at schema layer (children stays in UpdateParentPatch)")
+}

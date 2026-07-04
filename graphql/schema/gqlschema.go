@@ -2665,9 +2665,17 @@ func getPatchFields(schema *ast.Schema, defn *ast.Definition, providesTypeMap ma
 		// They are write-once: settable on creation, permanently fixed thereafter.
 		// Excluding from XxxPatch covers both `set` and `remove` clauses since both use
 		// the same patch type.
+		//
+		// Exception: list-type fields (e.g. Parent.children: [Child]) are NOT excluded
+		// even when they carry immutable: true. The immutability semantics apply to the
+		// scalar (child) side only — the parent list can still grow. Excluding the list
+		// field from the patch type would block updateParent from triggering
+		// @default/@transform re-evaluation on the parent node.
 		if dir := fld.Directives.ForName(inverseDirective); dir != nil {
 			if immArg := dir.Arguments.ForName(inverseImmutableArg); immArg != nil && immArg.Value.Raw == "true" {
-				continue
+				if fld.Type.NamedType != "" { // scalar only — skip list fields
+					continue
+				}
 			}
 		}
 
