@@ -246,8 +246,8 @@ types that also pass their auth rules are returned.
 
 ## Implementation notes
 
-| Layer          | File                                 | Change                                                                                            |
-| -------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| Schema gen     | `graphql/schema/gqlschema.go`        | `addInterfaceMemberTypesEnum` generates the enum; `addFilterType` injects the `memberTypes` field |
-| Query rewriter | `graphql/resolve/query_rewriter.go`  | `addFilter` intercepts `memberTypes`, replaces `q.Func.Args`; `buildFilter` skips it if nested    |
-| Validation     | `graphql/schema/validation_rules.go` | `memberTypesCheck` rejects nested usage at query-parse time                                       |
+| Layer          | File                                 | Change                                                                                                                                                                               |
+| -------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Schema gen     | `graphql/schema/gqlschema.go`        | `addInterfaceMemberTypesEnum` generates the enum; `addFilterType` injects the `memberTypes` field                                                                                    |
+| Query rewriter | `graphql/resolve/query_rewriter.go`  | `addFilter` intercepts `memberTypes` at root, scopes `q.Func.Args`; `buildFilter`'s nested field branch extracts it before building the nested var query and scopes `nestedQry.Func` |
+| Validation     | `graphql/schema/validation_rules.go` | `memberTypesCheck` rejects nested usage at query-parse time                                                                                                                          |
