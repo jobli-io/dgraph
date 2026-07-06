@@ -133,6 +133,34 @@ query {
 }
 ```
 
+### Filter via a nested interface-typed field
+
+`memberTypes` also works when applied to a nested field whose type is an interface. For example, if
+`Note.forResource` is a field that references a `Resource` interface:
+
+```graphql
+query {
+  aggregateNote(filter: { forResource: { memberTypes: [Company] } }) {
+    count
+  }
+}
+```
+
+DQL produced for the nested var query:
+
+```dql
+var(func: type(Company)) { Note.forResource as Resource.hasNote }
+```
+
+Without `memberTypes`:
+
+```dql
+var(func: type(Resource)) { Note.forResource as Resource.hasNote }  # all implementors
+```
+
+This lets you efficiently count or query objects by what _kind_ of resource they are linked to,
+without fetching and post-filtering in the application layer.
+
 ### No filter (unchanged behaviour)
 
 Omitting `memberTypes` leaves the query unchanged — all implementors are returned:
@@ -150,20 +178,24 @@ query {
 
 ## Constraints
 
-### Top-level only
+### Not composable with `and`/`or`/`not`
 
-`memberTypes` **must appear at the top level** of the filter. It cannot be nested inside `and`,
-`or`, or `not`.
+`memberTypes` **cannot be nested inside** `and`, `or`, or `not`. It must be the direct top-level key
+of whichever filter object it appears in — whether that is a root query filter or a nested field
+filter.
 
 ```graphql
-# ✅ correct — top-level
+# ✅ correct — top-level of the root query filter
 queryManageable(filter: { memberTypes: [Workspace], not: { has: managedBy } })
 
-# ❌ error — nested inside or
+# ✅ correct — top-level of a nested field filter
+aggregateNote(filter: { forResource: { memberTypes: [Company] } })
+
+# ❌ error — memberTypes nested inside or
 queryManageable(filter: { or: [{ memberTypes: [Workspace] }, { has: managedBy }] })
 ```
 
-Attempting to nest it produces a query-validation error:
+Attempting to compose it inside a logical combinator produces a query-validation error:
 
 ```
 memberTypes is only supported at the top level of an interface filter,
@@ -171,9 +203,9 @@ not inside and, or, or not clauses.
 Use a top-level memberTypes to scope the query to specific implementing types.
 ```
 
-The reason is structural: `memberTypes` scopes the DQL `func: type(...)` root predicate, which
-exists in a different position than the `@filter(...)` clause that `and`/`or`/`not` build. There is
-no DQL equivalent for `OR`-combining two different root type functions.
+The reason is structural: `memberTypes` replaces the DQL `func: type(...)` predicate, which exists
+in a different position than the `@filter(...)` clause that `and`/`or`/`not` build. There is no DQL
+equivalent for OR-combining two different root type functions.
 
 ### Empty list → empty result
 

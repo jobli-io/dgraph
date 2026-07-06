@@ -2994,7 +2994,36 @@ func buildFilter(typ schema.Type,
 
 				if inv := fd.Inverse(); inv != nil {
 
-					fil, qs := buildFilter(fd.Type(), filter[field].(map[string]interface{}), auth, qn)
+					nestedFilter := filter[field].(map[string]interface{})
+
+					// For interface-typed nested fields: extract memberTypes before calling
+					// buildFilter so it scopes the nested var query's func: type(...) rather
+					// than being silently dropped.  Mirrors the same logic in addFilter for
+					// the root query case.
+					nestedFuncArgs := []dql.Arg{{Value: fd.Type().DgraphName()}} // default: full interface
+					nestedDenyAll := false
+					if fd.Type().IsInterface() {
+						if mt, ok := nestedFilter["memberTypes"]; ok {
+							delete(nestedFilter, "memberTypes")
+							if names, ok := mt.([]interface{}); ok {
+								if len(names) == 0 {
+									nestedDenyAll = true
+								} else {
+									args := make([]dql.Arg, 0, len(names))
+									for _, n := range names {
+										if s, ok := n.(string); ok && s != "" {
+											args = append(args, dql.Arg{Value: s})
+										}
+									}
+									if len(args) > 0 {
+										nestedFuncArgs = args
+									}
+								}
+							}
+						}
+					}
+
+					fil, qs := buildFilter(fd.Type(), nestedFilter, auth, qn)
 					varQry = append(varQry, qs...)
 
 					// add the uids of the nested object
@@ -3009,12 +3038,15 @@ func buildFilter(typ schema.Type,
 					})
 
 					// generate filter var query for nested object
+					var nestedFunc *dql.Function
+					if nestedDenyAll {
+						nestedFunc = &dql.Function{Name: "uid", UID: []uint64{0}}
+					} else {
+						nestedFunc = &dql.Function{Name: "type", Args: nestedFuncArgs}
+					}
 					nestedQry := &dql.GraphQuery{
-						Attr: "var",
-						Func: &dql.Function{
-							Name: "type",
-							Args: []dql.Arg{{Value: fd.Type().Name()}},
-						},
+						Attr:   "var",
+						Func:   nestedFunc,
 						Filter: fil,
 						Children: []*dql.GraphQuery{{
 							Attr: inv.DgraphPredicate(),

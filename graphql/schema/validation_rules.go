@@ -72,11 +72,17 @@ func filterCheck(observers *validator.Events, addError validator.AddErrFunc) {
 	})
 }
 
-// memberTypesCheck rejects memberTypes when it appears nested inside and, or, or not
-// clauses of an interface filter. memberTypes is a root-level-only filter that scopes
-// the DQL func: type(...) predicate; it has no meaning at any other nesting depth and
-// is silently dropped by the query rewriter if it reaches buildFilter, which would
-// produce confusing empty results without this error.
+// memberTypesCheck rejects memberTypes when it appears inside and, or, or not
+// clauses of any filter (at any nesting depth). memberTypes scopes the DQL
+// func: type(...) predicate and has no meaning inside logical combinators.
+// It is valid at:
+//   - the top level of a root interface query filter
+//   - the top level of a nested interface-typed field filter
+//
+// e.g. both of these are valid:
+//
+//	queryManageable(filter: { memberTypes: [Workspace] }) { ... }
+//	aggregateNote(filter: { forResource: { memberTypes: [Company] } }) { ... }
 func memberTypesCheck(observers *validator.Events, addError validator.AddErrFunc) {
 	observers.OnField(func(walker *validator.Walker, field *ast.Field) {
 		checkMemberTypesInFilter(walker, field.Arguments.ForName("filter"), false, addError)
