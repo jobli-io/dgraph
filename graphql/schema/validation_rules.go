@@ -72,6 +72,68 @@ func filterCheck(observers *validator.Events, addError validator.AddErrFunc) {
 	})
 }
 
+// memberTypesCheck rejects memberTypes when it appears nested inside and, or, or not
+// clauses of an interface filter. memberTypes is a root-level-only filter that scopes
+// the DQL func: type(...) predicate; it has no meaning at any other nesting depth and
+// is silently dropped by the query rewriter if it reaches buildFilter, which would
+// produce confusing empty results without this error.
+func memberTypesCheck(observers *validator.Events, addError validator.AddErrFunc) {
+	observers.OnField(func(walker *validator.Walker, field *ast.Field) {
+		checkMemberTypesInFilter(walker, field.Arguments.ForName("filter"), false, addError)
+	})
+}
+
+// checkMemberTypesInFilter recursively walks a filter value tree. insideLogical is true
+// when we are inside an and/or/not clause. It reports an error if memberTypes appears
+// at any depth other than the immediate top-level of a filter.
+func checkMemberTypesInFilter(
+	walker *validator.Walker,
+	arg *ast.Argument,
+	insideLogical bool,
+	addError validator.AddErrFunc,
+) {
+	if arg == nil || arg.Value == nil {
+		return
+	}
+	walkFilterValue(arg.Value, insideLogical, addError)
+}
+
+func walkFilterValue(val *ast.Value, insideLogical bool, addError validator.AddErrFunc) {
+	if val == nil || val.Kind != ast.ObjectValue {
+		return
+	}
+	for _, child := range val.Children {
+		switch child.Name {
+		case "and", "or":
+			// list or single object — recurse with insideLogical = true
+			if child.Value != nil {
+				if child.Value.Kind == ast.ListValue {
+					for _, item := range child.Value.Children {
+						walkFilterValue(item.Value, true, addError)
+					}
+				} else {
+					walkFilterValue(child.Value, true, addError)
+				}
+			}
+		case "not":
+			if child.Value != nil {
+				walkFilterValue(child.Value, true, addError)
+			}
+		case "memberTypes":
+			if insideLogical {
+				addError(
+					validator.Message(
+						"memberTypes is only supported at the top level of an interface filter, "+
+							"not inside and, or, or not clauses. "+
+							"Use a top-level memberTypes to scope the query to specific implementing types.",
+					),
+					validator.At(val.Position),
+				)
+			}
+		}
+	}
+}
+
 func variableTypeCheck(observers *validator.Events, addError validator.AddErrFunc) {
 	observers.OnValue(func(walker *validator.Walker, value *ast.Value) {
 		if value.Definition == nil || value.ExpectedType == nil ||

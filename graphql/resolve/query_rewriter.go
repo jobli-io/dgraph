@@ -2750,19 +2750,27 @@ func addFilter(q *dql.GraphQuery,
 		// memberTypes scopes the root func: type(...) to only the requested implementors.
 		// It is only honoured at the top-level filter (not inside and/or/not) and is
 		// consumed here so that buildFilter never sees it as a regular predicate.
+		//
+		// Empty list (memberTypes: []) → deny-all: replace func: type(...) with
+		// uid(0x0) so the query returns no results, consistent with union filter
+		// behaviour on an empty memberTypes list.
 		if typ.IsInterface() {
 			if mt, ok := filter["memberTypes"]; ok {
 				delete(filter, "memberTypes")
-				if names, ok := mt.([]interface{}); ok && len(names) > 0 &&
-					q.Func != nil && q.Func.Name == "type" {
-					args := make([]dql.Arg, 0, len(names))
-					for _, n := range names {
-						if s, ok := n.(string); ok && s != "" {
-							args = append(args, dql.Arg{Value: s})
+				if names, ok := mt.([]interface{}); ok && q.Func != nil && q.Func.Name == "type" {
+					if len(names) == 0 {
+						// empty list → match nothing
+						q.Func = &dql.Function{Name: "uid", UID: []uint64{0}}
+					} else {
+						args := make([]dql.Arg, 0, len(names))
+						for _, n := range names {
+							if s, ok := n.(string); ok && s != "" {
+								args = append(args, dql.Arg{Value: s})
+							}
 						}
-					}
-					if len(args) > 0 {
-						q.Func.Args = args
+						if len(args) > 0 {
+							q.Func.Args = args
+						}
 					}
 				}
 			}
@@ -2916,6 +2924,12 @@ func buildFilter(typ schema.Type,
 			varQry = append(varQry, qs...)
 		default:
 			fd := typ.Field(field)
+			// memberTypes is consumed at the top-level addFilter for interface types.
+			// If it somehow reaches buildFilter (e.g. nested inside and/or/not which is
+			// not supported), skip it to avoid a nil-pointer panic on fd.IsExternal().
+			if field == "memberTypes" {
+				continue
+			}
 			if fd != nil && fd.HasEmbeddingDirective() {
 				embeddingFilter, ok := filter[field].(map[string]interface{})
 				if !ok {
