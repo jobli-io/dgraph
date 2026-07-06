@@ -414,6 +414,10 @@ enum CharacterOrderable {
 	name
 }
 
+enum CharacterTypename {
+	Human
+}
+
 enum HumanHasFilter {
 	name
 	friends
@@ -450,6 +454,7 @@ input AuthVariable {
 }
 
 input CharacterFilter {
+	memberTypes: [CharacterTypename]
 	id: [ID!]
 	name: StringExactFilter
 	has: [CharacterHasFilter]

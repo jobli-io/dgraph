@@ -2746,6 +2746,27 @@ func addFilter(q *dql.GraphQuery,
 			return false, varQry
 		}
 	} else {
+		// For interface types: intercept memberTypes before calling buildFilter.
+		// memberTypes scopes the root func: type(...) to only the requested implementors.
+		// It is only honoured at the top-level filter (not inside and/or/not) and is
+		// consumed here so that buildFilter never sees it as a regular predicate.
+		if typ.IsInterface() {
+			if mt, ok := filter["memberTypes"]; ok {
+				delete(filter, "memberTypes")
+				if names, ok := mt.([]interface{}); ok && len(names) > 0 &&
+					q.Func != nil && q.Func.Name == "type" {
+					args := make([]dql.Arg, 0, len(names))
+					for _, n := range names {
+						if s, ok := n.(string); ok && s != "" {
+							args = append(args, dql.Arg{Value: s})
+						}
+					}
+					if len(args) > 0 {
+						q.Func.Args = args
+					}
+				}
+			}
+		}
 		q.Filter, varQry = buildFilter(typ, filter, auth, queryName)
 	}
 	if filterAtRoot {

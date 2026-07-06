@@ -451,6 +451,10 @@ enum MovieOrderable {
 	name
 }
 
+enum MovieTypename {
+	OscarMovie
+}
+
 enum OscarMovieHasFilter {
 	name
 	director
@@ -502,6 +506,7 @@ input DirectorRef {
 }
 
 input MovieFilter {
+	memberTypes: [MovieTypename]
 	id: [ID!]
 	has: [MovieHasFilter]
 	and: [MovieFilter]

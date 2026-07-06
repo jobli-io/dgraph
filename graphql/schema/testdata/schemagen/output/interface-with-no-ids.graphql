@@ -430,6 +430,10 @@ enum MessageOrderable {
 	text
 }
 
+enum MessageTypename {
+	Question
+}
+
 enum QuestionHasFilter {
 	text
 	askedBy
@@ -462,6 +466,7 @@ input AddUserInput {
 }
 
 input MessageFilter {
+	memberTypes: [MessageTypename]
 	has: [MessageHasFilter]
 	and: [MessageFilter]
 	or: [MessageFilter]

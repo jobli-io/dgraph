@@ -437,6 +437,10 @@ enum NodeOrderable {
 	f1
 }
 
+enum NodeTypename {
+	Person
+}
+
 enum PersonHasFilter {
 	f1
 	f1Hi
@@ -483,6 +487,7 @@ input AddPersonInput {
 }
 
 input NodeFilter {
+	memberTypes: [NodeTypename]
 	has: [NodeHasFilter]
 	and: [NodeFilter]
 	or: [NodeFilter]

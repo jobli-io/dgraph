@@ -432,6 +432,10 @@ enum IOrderable {
 	s
 }
 
+enum ITypename {
+	T
+}
+
 enum THasFilter {
 	s
 	i
@@ -462,6 +466,7 @@ input AddTInput {
 }
 
 input IFilter {
+	memberTypes: [ITypename]
 	has: [IHasFilter]
 	and: [IFilter]
 	or: [IFilter]

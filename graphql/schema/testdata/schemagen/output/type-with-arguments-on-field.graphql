@@ -412,6 +412,10 @@ enum AbstractOrderable {
 	name
 }
 
+enum AbstractTypename {
+	Message
+}
+
 enum MessageHasFilter {
 	name
 	content
@@ -431,6 +435,7 @@ enum MessageOrderable {
 #######################
 
 input AbstractFilter {
+	memberTypes: [AbstractTypename]
 	id: [ID!]
 	has: [AbstractHasFilter]
 	and: [AbstractFilter]

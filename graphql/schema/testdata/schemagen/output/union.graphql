@@ -526,6 +526,11 @@ enum CharacterOrderable {
 	name
 }
 
+enum CharacterTypename {
+	Droid
+	Human
+}
+
 enum DroidHasFilter {
 	name
 	friends
@@ -610,6 +615,7 @@ input AddStarshipInput {
 }
 
 input CharacterFilter {
+	memberTypes: [CharacterTypename]
 	id: [ID!]
 	name: StringExactFilter
 	appearsIn: Episode_hash

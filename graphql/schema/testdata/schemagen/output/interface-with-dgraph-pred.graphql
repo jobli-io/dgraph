@@ -459,6 +459,10 @@ enum PersonOrderable {
 	name
 }
 
+enum PersonTypename {
+	BusinessMan
+}
+
 #######################
 # Generated Inputs
 #######################
@@ -524,6 +528,7 @@ input ObjectRef {
 }
 
 input PersonFilter {
+	memberTypes: [PersonTypename]
 	id: [ID!]
 	has: [PersonHasFilter]
 	and: [PersonFilter]

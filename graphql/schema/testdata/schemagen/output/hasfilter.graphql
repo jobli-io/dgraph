@@ -421,6 +421,10 @@ enum BOrderable {
 	name
 }
 
+enum ITypename {
+	T
+}
+
 enum THasFilter {
 	text
 }
@@ -463,7 +467,10 @@ input BRef {
 }
 
 input IFilter {
+	memberTypes: [ITypename]
 	id: [ID!]
+	and: [IFilter]
+	or: [IFilter]
 	not: IFilter
 }
 

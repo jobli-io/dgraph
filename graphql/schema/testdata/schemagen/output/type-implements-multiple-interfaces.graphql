@@ -443,6 +443,10 @@ enum CharacterOrderable {
 	name
 }
 
+enum CharacterTypename {
+	Human
+}
+
 enum EmployeeHasFilter {
 	employeeId
 	title
@@ -451,6 +455,10 @@ enum EmployeeHasFilter {
 enum EmployeeOrderable {
 	employeeId
 	title
+}
+
+enum EmployeeTypename {
+	Human
 }
 
 enum HumanHasFilter {
@@ -481,6 +489,7 @@ input AddHumanInput {
 }
 
 input CharacterFilter {
+	memberTypes: [CharacterTypename]
 	id: [ID!]
 	name: StringExactFilter
 	has: [CharacterHasFilter]
@@ -505,6 +514,7 @@ input CharacterRef {
 }
 
 input EmployeeFilter {
+	memberTypes: [EmployeeTypename]
 	has: [EmployeeHasFilter]
 	and: [EmployeeFilter]
 	or: [EmployeeFilter]

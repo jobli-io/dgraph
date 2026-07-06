@@ -500,6 +500,11 @@ enum PostOrderable {
 	datePublished
 }
 
+enum PostTypename {
+	Answer
+	Question
+}
+
 enum QuestionHasFilter {
 	text
 	datePublished
@@ -596,6 +601,7 @@ input AuthorRef {
 }
 
 input PostFilter {
+	memberTypes: [PostTypename]
 	id: [ID!]
 	text: StringFullTextFilter
 	datePublished: DateTimeFilter
