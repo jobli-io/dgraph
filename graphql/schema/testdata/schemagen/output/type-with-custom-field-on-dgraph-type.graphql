@@ -235,6 +235,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -370,6 +371,13 @@ type CarAggregateResult {
 	nameMax: String
 }
 
+type CarGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type DeleteCarPayload {
 	car(filter: CarFilter, order: CarOrder, first: Int, offset: Int): [Car]
 	msg: String
@@ -400,9 +408,22 @@ type UserAggregateResult {
 	ageAvg: Float
 }
 
+type UserGroupByResult {
+	age: Int
+	count: Int
+	ageMin: Int
+	ageMax: Int
+	ageSum: Int
+	ageAvg: Float
+}
+
 #######################
 # Generated Enums
 #######################
+
+enum CarGroupableField {
+	name
+}
 
 enum CarHasFilter {
 	name
@@ -410,6 +431,10 @@ enum CarHasFilter {
 
 enum CarOrderable {
 	name
+}
+
+enum UserGroupableField {
+	age
 }
 
 enum UserHasFilter {
@@ -438,6 +463,12 @@ input CarFilter {
 	and: [CarFilter]
 	or: [CarFilter]
 	not: CarFilter
+}
+
+input CarGroupBySpec {
+	field: CarGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input CarOrder {
@@ -474,6 +505,12 @@ input UserFilter {
 	and: [UserFilter]
 	or: [UserFilter]
 	not: UserFilter
+}
+
+input UserGroupBySpec {
+	field: UserGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input UserOrder {

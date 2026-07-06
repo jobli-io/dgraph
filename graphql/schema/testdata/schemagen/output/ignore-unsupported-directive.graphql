@@ -235,6 +235,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -377,6 +378,21 @@ type ProductAggregateResult {
 	name2Max: String
 }
 
+type ProductGroupByResult {
+	price: Float
+	name: String
+	name2: String
+	count: Int
+	priceMin: Float
+	priceMax: Float
+	priceSum: Float
+	priceAvg: Float
+	nameMin: String
+	nameMax: String
+	name2Min: String
+	name2Max: String
+}
+
 type UpdateProductPayload {
 	product(filter: ProductFilter, order: ProductOrder, first: Int, offset: Int): [Product]
 	numUids: Int
@@ -385,6 +401,12 @@ type UpdateProductPayload {
 #######################
 # Generated Enums
 #######################
+
+enum ProductGroupableField {
+	price
+	name
+	name2
+}
 
 enum ProductHasFilter {
 	price
@@ -417,6 +439,12 @@ input ProductFilter {
 	and: [ProductFilter]
 	or: [ProductFilter]
 	not: ProductFilter
+}
+
+input ProductGroupBySpec {
+	field: ProductGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input ProductOrder {

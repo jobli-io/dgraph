@@ -95,6 +95,7 @@ const (
 	SimilarByEmbeddingQuery       QueryType    = "querySimilarByEmbedding"
 	FilterQuery                   QueryType    = "query"
 	AggregateQuery                QueryType    = "aggregate"
+	GroupByQuery                  QueryType    = "groupBy"
 	SchemaQuery                   QueryType    = "schema"
 	EntitiesQuery                 QueryType    = "entities"
 	PasswordQuery                 QueryType    = "checkPassword"
@@ -1966,18 +1967,27 @@ func (f *field) ConstructedFor() Type {
 }
 
 func (q *query) ConstructedFor() Type {
-	if q.QueryType() != AggregateQuery {
+	switch q.QueryType() {
+	case AggregateQuery:
+		// Return the concrete type by stripping the 15-character "AggregateResult" suffix.
+		fieldName := q.Type().Name()
+		typeName := fieldName[:len(fieldName)-15]
+		return &astType{
+			typ:             &ast.Type{NamedType: typeName},
+			inSchema:        q.op.inSchema,
+			dgraphPredicate: q.op.inSchema.dgraphPredicate,
+		}
+	case GroupByQuery:
+		// Return the concrete type by stripping the 13-character "GroupByResult" suffix.
+		fieldName := q.Type().Name()
+		typeName := fieldName[:len(fieldName)-13]
+		return &astType{
+			typ:             &ast.Type{NamedType: typeName},
+			inSchema:        q.op.inSchema,
+			dgraphPredicate: q.op.inSchema.dgraphPredicate,
+		}
+	default:
 		return q.Type()
-	}
-	// Its of type AggregateQuery
-	fieldName := q.Type().Name()
-	typeName := fieldName[:len(fieldName)-15]
-	return &astType{
-		typ: &ast.Type{
-			NamedType: typeName,
-		},
-		inSchema:        q.op.inSchema,
-		dgraphPredicate: q.op.inSchema.dgraphPredicate,
 	}
 }
 
@@ -2025,20 +2035,25 @@ func (f *field) DgraphPredicateForAggregateField() string {
 	if !isAggregateFunction {
 		return f.DgraphPredicate()
 	}
-	// aggregateResultTypeName contains name of the type in which the aggregate field is defined,
-	// it will be of the form <Type>AggregateResult
-	// we need to obtain the type name from <Type> from <Type>AggregateResult
+	// aggregateResultTypeName contains name of the type in which the aggregate field is defined.
+	// It will be of the form <Type>AggregateResult or <Type>GroupByResult.
+	// We need to obtain the base type name from either suffix.
 	aggregateResultTypeName := f.field.ObjectDefinition.Name
 
-	// If aggregateResultTypeName is found to not end with AggregateResult, just return DgraphPredicate()
-	if !strings.HasSuffix(aggregateResultTypeName, "AggregateResult") {
-		// This is an extra precaution and ideally, the code should not reach over here.
+	var mainTypeName string
+	switch {
+	case strings.HasSuffix(aggregateResultTypeName, "AggregateResult"):
+		// Strip 15-character "AggregateResult" suffix.
+		mainTypeName = aggregateResultTypeName[:len(aggregateResultTypeName)-15]
+	case strings.HasSuffix(aggregateResultTypeName, "GroupByResult"):
+		// Strip 13-character "GroupByResult" suffix.
+		mainTypeName = aggregateResultTypeName[:len(aggregateResultTypeName)-13]
+	default:
+		// This is an extra precaution; the code should not normally reach here.
 		return f.DgraphPredicate()
 	}
-	mainTypeName := aggregateResultTypeName[:len(aggregateResultTypeName)-15]
-	// Remove last 3 characters of the field name.
-	// Eg. to get "FieldName" from "FieldNameMax"
-	// As all Aggregate functions are of length 3, removing last 3 characters from fldName
+	// Remove last 3 characters of the field name (all aggregate function suffixes have length 3).
+	// Eg. to get "fieldName" from "fieldNameMax".
 	return f.op.inSchema.dgraphPredicate[mainTypeName][fldName[:len(fldName)-3]]
 }
 
@@ -2078,6 +2093,8 @@ func queryType(name string, custom *ast.Directive) QueryType {
 		return PasswordQuery
 	case strings.HasPrefix(name, "aggregate"):
 		return AggregateQuery
+	case strings.HasPrefix(name, "groupBy"):
+		return GroupByQuery
 	default:
 		return NotSupportedQuery
 	}

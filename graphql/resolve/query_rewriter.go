@@ -181,6 +181,8 @@ func (qr *queryRewriter) Rewrite(
 		return passwordQuery(gqlQuery, authRw)
 	case schema.AggregateQuery:
 		return aggregateQuery(gqlQuery, authRw), nil
+	case schema.GroupByQuery:
+		return groupByQuery(gqlQuery, authRw), nil
 	case schema.EntitiesQuery:
 		return entitiesQuery(gqlQuery, authRw)
 	default:
@@ -376,6 +378,113 @@ func aggregateQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery 
 	authAndFilterQrys := dgQuery[1:] // rootQry, varQry, fldAuthQueries, filterVarQrys
 	result := make([]*dql.GraphQuery, 0, 1+len(authAndFilterQrys)+1)
 	result = append(result, finalMainQuery)
+	result = append(result, authAndFilterQrys...)
+	result = append(result, mainQuery)
+	return result
+}
+
+// groupByQuery rewrites a groupByXxx GraphQL query into a DQL @groupby query.
+// The generated DQL looks like:
+//
+//	# auth/filter var blocks (if any) …
+//	groupByNote(func: uid(<root>) OR func: type(Note)) @filter(...) @groupby(Note.status, Note.priority) {
+//	    count(uid)
+//	    titleMin: min(Note.title)
+//	    prioritySum: sum(Note.priority)
+//	}
+//
+// Key fields (the fields listed in the groupBy argument) are NOT added as DQL children;
+// they appear automatically as predicate-keyed entries inside the DQL @groupby JSON array.
+// Only aggregate functions (count, Min, Max, Sum, Avg) are added as children.
+func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
+	// mainType is the concrete type being grouped (e.g. Note for groupByNote).
+	mainType := query.ConstructedFor()
+
+	dgQuery, rbac := addCommonRules(query, mainType, authRw)
+	if rbac == schema.Negative {
+		return dgQuery
+	}
+
+	// Add user filter.
+	filter, _ := query.ArgValue("filter").(map[string]interface{})
+	_, varQry := addFilter(dgQuery[0], mainType, filter, authRw, query.Alias())
+	dgQuery = append(dgQuery, varQry...)
+
+	// Apply auth — after this, dgQuery[0] may have its Func replaced with uid(XRoot)
+	// where XRoot is a variable defined by the auth var blocks in dgQuery[1:].
+	dgQuery, _ = authRw.addAuthQueries(mainType, dgQuery, rbac)
+
+	mainQuery := dgQuery[0]
+	mainQuery.IsGroupby = true
+
+	// Parse the groupBy argument → GroupbyAttrs on the DQL query.
+	// groupedFields tracks which GraphQL field names are group-key fields so we can
+	// skip adding them as DQL children (they appear automatically in @groupby output).
+	groupByArg, _ := query.ArgValue("groupBy").([]interface{})
+	groupedFields := make(map[string]bool)
+	for _, spec := range groupByArg {
+		specMap, _ := spec.(map[string]interface{})
+		fieldName, _ := specMap["field"].(string)
+		by, _ := specMap["by"].(string)
+		tz, _ := specMap["tz"].(string)
+
+		dgPred := mainType.DgraphPredicate(fieldName)
+		mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
+			Attr:          dgPred,
+			TokenizerName: by,
+			Timezone:      tz,
+		})
+		groupedFields[fieldName] = true
+	}
+
+	// Build DQL aggregate-function children from the GraphQL selection set.
+	isCountAdded := false
+	isAggAdded := make(map[string]bool)
+	for _, f := range query.SelectionSet() {
+		fldName := f.Name()
+		if f.Skip() || !f.Include() || fldName == schema.Typename {
+			continue
+		}
+		// Key fields appear in the DQL @groupby response as predicate-keyed objects;
+		// they must not be added as children of the DQL groupby block.
+		if groupedFields[fldName] {
+			continue
+		}
+		if fldName == "count" {
+			if !isCountAdded {
+				mainQuery.Children = append(mainQuery.Children, &dql.GraphQuery{
+					// Use bare count(uid) — NOT "count as count(uid)".
+					// Dgraph only allows the variable-assignment form when
+					// @groupby is on a UID/edge attribute; for scalar predicates
+					// (strings, ints, etc.) bare count(uid) is required and still
+					// produces {"count": N} entries inside the @groupby envelope.
+					Attr: "count(uid)",
+				})
+				isCountAdded = true
+			}
+			continue
+		}
+		for _, fn := range []string{"Max", "Min", "Sum", "Avg"} {
+			if strings.HasSuffix(fldName, fn) {
+				if !isAggAdded[fldName] {
+					baseName := fldName[:len(fldName)-3]
+					dgPred := mainType.DgraphPredicate(baseName)
+					mainQuery.Children = append(mainQuery.Children, &dql.GraphQuery{
+						// Use alias syntax for other aggregates — also do not use Var.
+						Alias: fldName,
+						Attr:  strings.ToLower(fn) + "(" + dgPred + ")",
+					})
+					isAggAdded[fldName] = true
+				}
+				break
+			}
+		}
+	}
+
+	// Emit in dependency order: auth/filter var blocks first (they define the root variable
+	// that mainQuery may reference via uid(XRoot)), then the @groupby query itself.
+	authAndFilterQrys := dgQuery[1:]
+	result := make([]*dql.GraphQuery, 0, 1+len(authAndFilterQrys))
 	result = append(result, authAndFilterQrys...)
 	result = append(result, mainQuery)
 	return result

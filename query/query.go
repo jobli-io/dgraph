@@ -185,6 +185,11 @@ type params struct {
 	IsGroupBy bool // True if @groupby is specified.
 	// GroupbyAttrs holds the list of attributes to group by.
 	GroupbyAttrs []dql.GroupByAttr
+	// TokenizerName is the DateTime tokenizer to apply for interval-based groupby bucketing
+	// ("year", "month", "day", "hour"). Empty means use the raw stored value.
+	TokenizerName string
+	// Timezone is the IANA timezone name for interval floor computation. Empty means UTC.
+	Timezone string
 
 	// ParentIds is a stack that is maintained and passed down to children.
 	ParentIds []uint64
@@ -2338,9 +2343,11 @@ func ProcessGraph(ctx context.Context, sg, parent *SubGraph, rch chan error) {
 				Attr:   it.Attr,
 				ReadTs: sg.ReadTs,
 				Params: params{
-					Alias:        it.Alias,
-					IgnoreResult: true,
-					Langs:        it.Langs,
+					Alias:         it.Alias,
+					IgnoreResult:  true,
+					Langs:         it.Langs,
+					TokenizerName: it.TokenizerName,
+					Timezone:      it.Timezone,
 				},
 			})
 		}

@@ -345,6 +345,13 @@ type CharacterAggregateResult {
 	nameMax: String
 }
 
+type CharacterGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type DeleteCharacterPayload {
 	character(filter: CharacterFilter, order: CharacterOrder, first: Int, offset: Int): [Character]
 	msg: String
@@ -367,7 +374,26 @@ type HumanAggregateResult {
 	totalCreditsAvg: Float
 }
 
+type HumanGroupByResult {
+	name: String
+	totalCredits: Int
+	count: Int
+	nameMin: String
+	nameMax: String
+	totalCreditsMin: Int
+	totalCreditsMax: Int
+	totalCreditsSum: Int
+	totalCreditsAvg: Float
+}
+
 type PersonAggregateResult {
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
+type PersonGroupByResult {
+	name: String
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -405,6 +431,10 @@ enum CascadeAuthVariableContext {
 	adaptive
 }
 
+enum CharacterGroupableField {
+	name
+}
+
 enum CharacterHasFilter {
 	name
 	friends
@@ -418,6 +448,18 @@ enum CharacterTypename {
 	Human
 }
 
+enum DateTimeGranularity {
+	year
+	month
+	day
+	hour
+}
+
+enum HumanGroupableField {
+	name
+	totalCredits
+}
+
 enum HumanHasFilter {
 	name
 	friends
@@ -427,6 +469,10 @@ enum HumanHasFilter {
 enum HumanOrderable {
 	name
 	totalCredits
+}
+
+enum PersonGroupableField {
+	name
 }
 
 enum PersonHasFilter {
@@ -463,6 +509,12 @@ input CharacterFilter {
 	not: CharacterFilter
 }
 
+input CharacterGroupBySpec {
+	field: CharacterGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input CharacterOrder {
 	asc: CharacterOrderable
 	desc: CharacterOrderable
@@ -486,6 +538,12 @@ input HumanFilter {
 	and: [HumanFilter]
 	or: [HumanFilter]
 	not: HumanFilter
+}
+
+input HumanGroupBySpec {
+	field: HumanGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input HumanOrder {
@@ -521,6 +579,12 @@ input PersonFilter {
 	and: [PersonFilter]
 	or: [PersonFilter]
 	not: PersonFilter
+}
+
+input PersonGroupBySpec {
+	field: PersonGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input PersonOrder {

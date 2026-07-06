@@ -21,6 +21,7 @@ are in addition to Dgraph's built-in directives (`@auth`, `@search`, `@id`, `@dg
 | [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`    | Fetch pre-mutation field values for expr-lang expressions                                                      | [old_value.md](old_value.md)                                         |
 | [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`    | Make a bidirectional edge write-once                                                                           | [immutable_inverse.md](immutable_inverse.md)                         |
 | `memberTypes` filter                               | Interface `XxxFilter` | Scope an interface query to a subset of implementing types                                                     | [interface_member_types_filter.md](interface_member_types_filter.md) |
+| `groupByXxx` query                                 | Root query (auto)     | Bucket-aggregate over filtered nodes; DateTime interval bucketing via `by`/`tz`                                | [groupby_queries.md](groupby_queries.md)                             |
 
 ---
 

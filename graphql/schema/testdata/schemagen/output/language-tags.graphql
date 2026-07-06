@@ -243,6 +243,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -385,7 +386,57 @@ type NodeAggregateResult {
 	f1Max: String
 }
 
+type NodeGroupByResult {
+	f1: String
+	count: Int
+	f1Min: String
+	f1Max: String
+}
+
 type PersonAggregateResult {
+	count: Int
+	f1Min: String
+	f1Max: String
+	f1HiMin: String
+	f1HiMax: String
+	f2Min: String
+	f2Max: String
+	f3Min: String
+	f3Max: String
+	nameMin: String
+	nameMax: String
+	nameHiMin: String
+	nameHiMax: String
+	nameEnMin: String
+	nameEnMax: String
+	nameHiEnMin: String
+	nameHiEnMax: String
+	nameHi_En_UntagMin: String
+	nameHi_En_UntagMax: String
+	name_Untag_AnyLangMin: String
+	name_Untag_AnyLangMax: String
+	addressMin: String
+	addressMax: String
+	addressHiMin: String
+	addressHiMax: String
+	professionEnMin: String
+	professionEnMax: String
+}
+
+type PersonGroupByResult {
+	f1: String
+	f1Hi: String
+	f2: String
+	f3: String
+	name: String
+	nameHi: String
+	nameEn: String
+	nameHiEn: String
+	nameHi_En_Untag: String
+	name_Untag_AnyLang: String
+	address: String
+	addressHi: String
+	professionEn: String
 	count: Int
 	f1Min: String
 	f1Max: String
@@ -429,6 +480,10 @@ type UpdatePersonPayload {
 # Generated Enums
 #######################
 
+enum NodeGroupableField {
+	f1
+}
+
 enum NodeHasFilter {
 	f1
 }
@@ -439,6 +494,22 @@ enum NodeOrderable {
 
 enum NodeTypename {
 	Person
+}
+
+enum PersonGroupableField {
+	f1
+	f1Hi
+	f2
+	f3
+	name
+	nameHi
+	nameEn
+	nameHiEn
+	nameHi_En_Untag
+	name_Untag_AnyLang
+	address
+	addressHi
+	professionEn
 }
 
 enum PersonHasFilter {
@@ -494,6 +565,12 @@ input NodeFilter {
 	not: NodeFilter
 }
 
+input NodeGroupBySpec {
+	field: NodeGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input NodeOrder {
 	asc: NodeOrderable
 	desc: NodeOrderable
@@ -513,6 +590,12 @@ input PersonFilter {
 	and: [PersonFilter]
 	or: [PersonFilter]
 	not: PersonFilter
+}
+
+input PersonGroupBySpec {
+	field: PersonGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input PersonOrder {

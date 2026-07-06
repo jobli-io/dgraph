@@ -326,6 +326,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -586,6 +587,17 @@ var summable = map[string]bool{
 	"Int":   true,
 	"Int64": true,
 	"Float": true,
+}
+
+// groupableScalars contains the GraphQL scalar types that produce meaningful groupby buckets.
+// Enum fields (detected via schema.Types lookup) are also groupable, handled in isGroupable.
+var groupableScalars = map[string]bool{
+	"Int":      true,
+	"Int64":    true,
+	"Float":    true,
+	"String":   true,
+	"Boolean":  true,
+	"DateTime": true,
 }
 
 var enumDirectives = map[string]bool{
@@ -1129,10 +1141,16 @@ func completeSchema(
 		addTypeOrderable(sch, defn, providesTypeMap)
 		addFieldFilters(sch, defn, providesTypeMap, apolloServiceQuery)
 		addAggregationResultType(sch, defn, providesTypeMap)
+		// groupByXxx query and supporting types (XxxGroupableField enum, XxxGroupBySpec input,
+		// XxxGroupByResult type). Generated for any type that has at least one groupable field.
+		addGroupableFieldEnum(sch, defn, providesTypeMap)
+		addGroupBySpecInput(sch, defn)
+		addGroupByResultType(sch, defn, providesTypeMap)
 		// Don't expose queries for the @extends type to the gateway
 		// as it is resolved through `_entities` resolver.
 		if !(apolloServiceQuery && hasExtends(defn)) {
 			addQueries(sch, defn, providesTypeMap, params)
+			addGroupByQuery(sch, defn)
 		}
 		addTypeHasFilter(sch, defn, providesTypeMap)
 		// We need to call this at last as aggregateFields
@@ -1899,6 +1917,41 @@ func isSummable(fld *ast.FieldDefinition, defn *ast.Definition, providesTypeMap 
 	return summable[fld.Type.NamedType] && !hasCustomOrLambda(fld)
 }
 
+// isGroupable returns true if fld should appear in the XxxGroupableField enum.
+// A field is groupable when it is:
+//   - a non-list scalar (Int, Int64, Float, String, Boolean, DateTime) or an enum type
+//   - not computed via @custom or @lambda
+//   - not an external non-key field
+//   - not of type ID (auto-generated, meaningless as a group key)
+func isGroupable(fld *ast.FieldDefinition, schema *ast.Schema, defn *ast.Definition,
+	providesTypeMap map[string]bool) bool {
+	if fld.Type.NamedType == "" || fld.Type.NamedType == "ID" {
+		return false
+	}
+	if hasCustomOrLambda(fld) {
+		return false
+	}
+	if externalAndNonKeyField(fld, defn, providesTypeMap) {
+		return false
+	}
+	if groupableScalars[fld.Type.NamedType] {
+		return true
+	}
+	// Allow enum types as group keys (e.g. NoteStatus, JobType).
+	typDef := schema.Types[fld.Type.NamedType]
+	return typDef != nil && typDef.Kind == ast.Enum
+}
+
+// hasGroupables returns true if defn has at least one groupable field.
+func hasGroupables(defn *ast.Definition, schema *ast.Schema, providesTypeMap map[string]bool) bool {
+	for _, fld := range defn.Fields {
+		if isGroupable(fld, schema, defn, providesTypeMap) {
+			return true
+		}
+	}
+	return false
+}
+
 func hasID(defn *ast.Definition) bool {
 	return fieldAny(nonExternalAndKeyFields(defn), isID)
 }
@@ -2183,6 +2236,156 @@ func addAggregationResultType(schema *ast.Schema, defn *ast.Definition, provides
 		Name:   aggregationResultTypeName,
 		Fields: aggregateFields,
 	}
+}
+
+// addGroupableFieldEnum generates the XxxGroupableField enum listing every scalar/enum field
+// that can be used as a groupby key in a groupByXxx query.
+func addGroupableFieldEnum(schema *ast.Schema, defn *ast.Definition, providesTypeMap map[string]bool) {
+	enumName := defn.Name + "GroupableField"
+	enum := &ast.Definition{
+		Kind: ast.Enum,
+		Name: enumName,
+	}
+	for _, fld := range defn.Fields {
+		if isGroupable(fld, schema, defn, providesTypeMap) {
+			enum.EnumValues = append(enum.EnumValues,
+				&ast.EnumValueDefinition{Name: fld.Name})
+		}
+	}
+	if len(enum.EnumValues) == 0 {
+		return
+	}
+	schema.Types[enumName] = enum
+}
+
+// addGroupBySpecInput generates the XxxGroupBySpec input type:
+//
+//	input NoteGroupBySpec {
+//	    field: NoteGroupableField!
+//	    by:    DateTimeGranularity   # only valid on DateTime fields with @search(by: [...])
+//	    tz:    String               # IANA timezone, only valid together with `by`
+//	}
+func addGroupBySpecInput(schema *ast.Schema, defn *ast.Definition) {
+	enumName := defn.Name + "GroupableField"
+	if schema.Types[enumName] == nil {
+		return // no groupable fields on this type
+	}
+	inputName := defn.Name + "GroupBySpec"
+	schema.Types[inputName] = &ast.Definition{
+		Kind: ast.InputObject,
+		Name: inputName,
+		Fields: []*ast.FieldDefinition{
+			{
+				Name: "field",
+				Type: &ast.Type{NamedType: enumName, NonNull: true},
+			},
+			{
+				Name: "by",
+				Type: &ast.Type{NamedType: "DateTimeGranularity"},
+			},
+			{
+				Name: "tz",
+				Type: &ast.Type{NamedType: "String"},
+			},
+		},
+	}
+}
+
+// addGroupByResultType generates the XxxGroupByResult type, which combines:
+//   - one nullable key field per groupable field (holds the bucket value; null if not grouped on)
+//   - count: Int
+//   - {field}Min / {field}Max for every orderable field
+//   - {field}Sum / {field}Avg for every summable field
+func addGroupByResultType(schema *ast.Schema, defn *ast.Definition, providesTypeMap map[string]bool) {
+	enumName := defn.Name + "GroupableField"
+	if schema.Types[enumName] == nil {
+		return // no groupable fields, skip
+	}
+	resultTypeName := defn.Name + "GroupByResult"
+	var fields []*ast.FieldDefinition
+
+	// Group key fields — one per groupable field, all nullable so that fields not in
+	// the groupBy argument are simply omitted (returned as null) in each result row.
+	// "count" is reserved for the aggregate field below; skip any user field with that name.
+	for _, fld := range defn.Fields {
+		if fld.Name == "count" {
+			continue // reserved for the aggregate
+		}
+		if !isGroupable(fld, schema, defn, providesTypeMap) {
+			continue
+		}
+		fields = append(fields, &ast.FieldDefinition{
+			Name: fld.Name,
+			Type: &ast.Type{NamedType: fld.Type.NamedType, NonNull: false},
+		})
+	}
+
+	// Aggregate fields (mirrors addAggregationResultType).
+	fields = append(fields, &ast.FieldDefinition{
+		Name: "count",
+		Type: &ast.Type{NamedType: "Int"},
+	})
+
+	for _, fld := range defn.Fields {
+		aggFieldType := &ast.Type{NamedType: fld.Type.NamedType, NonNull: false}
+		if isOrderable(fld, defn, providesTypeMap) || isMultiLangField(fld, false) {
+			fields = append(fields,
+				&ast.FieldDefinition{Name: fld.Name + "Min", Type: aggFieldType},
+				&ast.FieldDefinition{Name: fld.Name + "Max", Type: aggFieldType},
+			)
+		}
+		if isSummable(fld, defn, providesTypeMap) {
+			fields = append(fields,
+				&ast.FieldDefinition{Name: fld.Name + "Sum", Type: aggFieldType},
+				&ast.FieldDefinition{Name: fld.Name + "Avg", Type: &ast.Type{NamedType: "Float"}},
+			)
+		}
+	}
+
+	schema.Types[resultTypeName] = &ast.Definition{
+		Kind:   ast.Object,
+		Name:   resultTypeName,
+		Fields: fields,
+	}
+}
+
+// addGroupByQuery adds the groupByXxx root query to the Query type:
+//
+//	groupByNote(filter: NoteFilter, groupBy: [NoteGroupBySpec!]!): [NoteGroupByResult]
+func addGroupByQuery(schema *ast.Schema, defn *ast.Definition) {
+	specTypeName := defn.Name + "GroupBySpec"
+	resultTypeName := defn.Name + "GroupByResult"
+	if schema.Types[specTypeName] == nil || schema.Types[resultTypeName] == nil {
+		return
+	}
+
+	qry := &ast.FieldDefinition{
+		Name: "groupBy" + defn.Name,
+		Type: ast.ListType(&ast.Type{NamedType: resultTypeName}, nil),
+	}
+
+	// Optional filter argument — same filter input used by queryXxx.
+	filterName := defn.Name + "Filter"
+	if schema.Types[filterName] != nil {
+		qry.Arguments = append(qry.Arguments, &ast.ArgumentDefinition{
+			Name: "filter",
+			Type: &ast.Type{NamedType: filterName},
+		})
+	}
+
+	// Required groupBy argument: [NoteGroupBySpec!]!
+	qry.Arguments = append(qry.Arguments, &ast.ArgumentDefinition{
+		Name: "groupBy",
+		Type: &ast.Type{
+			Elem:    &ast.Type{NamedType: specTypeName, NonNull: true},
+			NonNull: true,
+		},
+	})
+
+	if schema.Types["Query"] == nil {
+		return
+	}
+	schema.Types["Query"].Fields = append(schema.Types["Query"].Fields, qry)
 }
 
 func addGetQuery(schema *ast.Schema, defn *ast.Definition,

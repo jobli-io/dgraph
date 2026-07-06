@@ -241,6 +241,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -394,6 +395,23 @@ type TodoAggregateResult {
 	somethingPrivateMax: String
 }
 
+type TodoGroupByResult {
+	title: String
+	text: String
+	isPublic: Boolean
+	dateCompleted: String
+	somethingPrivate: String
+	count: Int
+	titleMin: String
+	titleMax: String
+	textMin: String
+	textMax: String
+	dateCompletedMin: String
+	dateCompletedMax: String
+	somethingPrivateMin: String
+	somethingPrivateMax: String
+}
+
 type UpdateTodoPayload {
 	todo(filter: TodoFilter, order: TodoOrder, first: Int, offset: Int): [Todo]
 	numUids: Int
@@ -410,9 +428,24 @@ type UserAggregateResult {
 	usernameMax: String
 }
 
+type UserGroupByResult {
+	username: String
+	count: Int
+	usernameMin: String
+	usernameMax: String
+}
+
 #######################
 # Generated Enums
 #######################
+
+enum TodoGroupableField {
+	title
+	text
+	isPublic
+	dateCompleted
+	somethingPrivate
+}
 
 enum TodoHasFilter {
 	title
@@ -429,6 +462,10 @@ enum TodoOrderable {
 	text
 	dateCompleted
 	somethingPrivate
+}
+
+enum UserGroupableField {
+	username
 }
 
 enum UserHasFilter {
@@ -468,6 +505,12 @@ input TodoFilter {
 	and: [TodoFilter]
 	or: [TodoFilter]
 	not: TodoFilter
+}
+
+input TodoGroupBySpec {
+	field: TodoGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input TodoOrder {
@@ -517,6 +560,12 @@ input UserFilter {
 	and: [UserFilter]
 	or: [UserFilter]
 	not: UserFilter
+}
+
+input UserGroupBySpec {
+	field: UserGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input UserOrder {

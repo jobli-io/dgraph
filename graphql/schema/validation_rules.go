@@ -295,3 +295,158 @@ func valueKindToString(valKind ast.ValueKind) string {
 	}
 	return ""
 }
+
+// groupByArgumentsCheck validates the arguments of groupByXxx queries at request-parse
+// time, before any DQL is generated. It enforces three constraints:
+//
+//  1. The `by` (DateTimeGranularity) argument is only valid when the referenced `field`
+//     is of type DateTime in the schema. Applying `by` to a non-DateTime field (e.g. a
+//     String or Int) is meaningless and will produce unexpected bucketing behaviour.
+//
+//  2. When `by` is provided, the DateTime field must have a @search(by: [...]) index
+//     that includes the requested tokenizer (year | month | day | hour). Without this
+//     index the bucket key calculation still works (the tokenizer is applied in-memory)
+//     but the query requires a full scan of every predicate value.
+//
+//  3. The `tz` (UTC-offset timezone string) is only meaningful when `by` is also
+//     specified. Supplying `tz` without `by` has no effect and is almost certainly a
+//     mistake in the client query.
+func groupByArgumentsCheck(observers *validator.Events, addError validator.AddErrFunc) {
+	observers.OnField(func(walker *validator.Walker, field *ast.Field) {
+		// Only intercept groupByXxx query fields. The prefix is always 7 chars ("groupBy")
+		// and the type name always starts immediately after.
+		const prefix = "groupBy"
+		if !strings.HasPrefix(field.Name, prefix) || len(field.Name) <= len(prefix) {
+			return
+		}
+
+		groupByArg := field.Arguments.ForName("groupBy")
+		if groupByArg == nil || groupByArg.Value == nil {
+			return
+		}
+		gv := groupByArg.Value
+
+		// Skip variable arguments — they are validated by the runtime at execution time.
+		if gv.Kind == ast.Variable || gv.Kind != ast.ListValue {
+			return
+		}
+
+		// Derive the concrete type name: "groupByNote" → "Note".
+		typeName := field.Name[len(prefix):]
+		typeDef := walker.Schema.Types[typeName]
+		if typeDef == nil {
+			return // unknown type — existing schema validation handles this
+		}
+
+		for _, specChild := range gv.Children {
+			spec := specChild.Value
+			if spec == nil || spec.Kind != ast.ObjectValue {
+				continue
+			}
+
+			// Extract field, by, tz from the input object children.
+			var fieldName, by, tz string
+			var byPos, tzPos *ast.Position
+			for _, c := range spec.Children {
+				if c.Value == nil || c.Value.Kind == ast.NullValue || c.Value.Kind == ast.Variable {
+					continue
+				}
+				switch c.Name {
+				case "field":
+					fieldName = c.Value.Raw
+				case "by":
+					by = c.Value.Raw
+					byPos = c.Value.Position
+				case "tz":
+					tz = c.Value.Raw
+					tzPos = c.Value.Position
+				}
+			}
+
+			if fieldName == "" {
+				continue
+			}
+
+			// Constraint 3: tz requires by.
+			if tz != "" && by == "" {
+				addError(
+					validator.Message("groupBy: `tz` (timezone offset) is only valid when `by` "+
+						"is also specified for field %q — did you forget to add `by: day` (or similar)?",
+						fieldName),
+					validator.At(tzPos),
+				)
+			}
+
+			if by == "" {
+				continue
+			}
+
+			// Constraint 1: by is only valid for DateTime fields.
+			fieldDef := typeDef.Fields.ForName(fieldName)
+			if fieldDef == nil {
+				continue // unknown field — schema validation handles this
+			}
+			fldType := fieldDef.Type.NamedType
+			if fldType != "DateTime" {
+				addError(
+					validator.Message("groupBy: `by` is only valid for DateTime fields; "+
+						"field %q has type %s in type %s. Remove `by` or choose a DateTime field.",
+						fieldName, fldType, typeName),
+					validator.At(byPos),
+				)
+				continue
+			}
+
+			// Constraint 2: @search(by: [...]) must include the requested tokenizer.
+			dir := fieldDef.Directives.ForName(searchDirective)
+			if dir == nil {
+				addError(
+					validator.Message("groupBy: `by: %s` on DateTime field %q in type %s requires "+
+						"@search(by: [%s]) to be declared on the field in the schema. "+
+						"Without this index the query will perform a full scan.",
+						by, fieldName, typeName, by),
+					validator.At(byPos),
+				)
+				continue
+			}
+			byArgVal := dir.Arguments.ForName(searchArgs)
+			if byArgVal == nil {
+				continue // @search without explicit by → default index applies; skip check
+			}
+			var searchTokenizers []string
+			if byArgVal.Value.Kind == ast.ListValue {
+				for _, item := range byArgVal.Value.Children {
+					searchTokenizers = append(searchTokenizers, item.Value.Raw)
+				}
+			} else {
+				searchTokenizers = []string{byArgVal.Value.Raw}
+			}
+			// Constraint 2b: the field must have at least one DateTime index.
+			// The specific granularity requested (by) does not need to match
+			// any indexed tokenizer exactly.  Dgraph can resolve
+			// @groupby(Pred@day) using any existing DateTime index (e.g. @hour),
+			// and our floorToInterval layer in query/groupby.go applies the
+			// correct bucket granularity independently.
+			dateTimeTokenizers := map[string]bool{
+				"year": true, "month": true, "day": true, "hour": true,
+			}
+			hasDateTimeIndex := false
+			for _, tok := range searchTokenizers {
+				if dateTimeTokenizers[tok] {
+					hasDateTimeIndex = true
+					break
+				}
+			}
+			if !hasDateTimeIndex {
+				addError(
+					validator.Message("groupBy: `by: %s` on DateTime field %q in type %s requires "+
+						"at least one DateTime index (@search(by: [year|month|day|hour])) but "+
+						"the field only has @search(by: %v). "+
+						"Add a DateTime tokenizer to the field's @search directive.",
+						by, fieldName, typeName, searchTokenizers),
+					validator.At(byPos),
+				)
+			}
+		}
+	})
+}

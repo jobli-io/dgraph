@@ -8,6 +8,8 @@ package main
 import (
 	"runtime"
 	"time"
+	_ "time/tzdata" // embed IANA timezone database so time.LoadLocation works in
+	// container images that have no /usr/share/zoneinfo (e.g. minimal/distroless).
 
 	"github.com/dustin/go-humanize"
 	"github.com/golang/glog"

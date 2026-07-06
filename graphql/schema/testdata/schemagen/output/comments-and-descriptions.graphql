@@ -254,6 +254,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -396,7 +397,26 @@ type IAggregateResult {
 	sMax: String
 }
 
+type IGroupByResult {
+	s: String
+	count: Int
+	sMin: String
+	sMax: String
+}
+
 type TAggregateResult {
+	count: Int
+	sMin: String
+	sMax: String
+	iMin: Int
+	iMax: Int
+	iSum: Int
+	iAvg: Float
+}
+
+type TGroupByResult {
+	s: String
+	i: Int
 	count: Int
 	sMin: String
 	sMax: String
@@ -424,6 +444,10 @@ enum A_UnionType {
 	T
 }
 
+enum IGroupableField {
+	s
+}
+
 enum IHasFilter {
 	s
 }
@@ -434,6 +458,11 @@ enum IOrderable {
 
 enum ITypename {
 	T
+}
+
+enum TGroupableField {
+	s
+	i
 }
 
 enum THasFilter {
@@ -473,6 +502,12 @@ input IFilter {
 	not: IFilter
 }
 
+input IGroupBySpec {
+	field: IGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input IOrder {
 	asc: IOrderable
 	desc: IOrderable
@@ -490,6 +525,12 @@ input TFilter {
 	and: [TFilter]
 	or: [TFilter]
 	not: TFilter
+}
+
+input TGroupBySpec {
+	field: TGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input TOrder {

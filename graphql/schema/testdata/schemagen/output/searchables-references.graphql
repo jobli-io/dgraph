@@ -238,6 +238,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -375,6 +376,16 @@ type AuthorAggregateResult {
 	dobMax: DateTime
 }
 
+type AuthorGroupByResult {
+	name: String
+	dob: DateTime
+	count: Int
+	nameMin: String
+	nameMax: String
+	dobMin: DateTime
+	dobMax: DateTime
+}
+
 type DeleteAuthorPayload {
 	author(filter: AuthorFilter, order: AuthorOrder, first: Int, offset: Int): [Author]
 	msg: String
@@ -388,6 +399,19 @@ type DeletePostPayload {
 }
 
 type PostAggregateResult {
+	count: Int
+	titleMin: String
+	titleMax: String
+	textMin: String
+	textMax: String
+	datePublishedMin: DateTime
+	datePublishedMax: DateTime
+}
+
+type PostGroupByResult {
+	title: String
+	text: String
+	datePublished: DateTime
 	count: Int
 	titleMin: String
 	titleMax: String
@@ -411,6 +435,11 @@ type UpdatePostPayload {
 # Generated Enums
 #######################
 
+enum AuthorGroupableField {
+	name
+	dob
+}
+
 enum AuthorHasFilter {
 	name
 	dob
@@ -420,6 +449,12 @@ enum AuthorHasFilter {
 enum AuthorOrderable {
 	name
 	dob
+}
+
+enum PostGroupableField {
+	title
+	text
+	datePublished
 }
 
 enum PostHasFilter {
@@ -459,6 +494,12 @@ input AuthorFilter {
 	not: AuthorFilter
 }
 
+input AuthorGroupBySpec {
+	field: AuthorGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input AuthorOrder {
 	asc: AuthorOrderable
 	desc: AuthorOrderable
@@ -486,6 +527,12 @@ input PostFilter {
 	and: [PostFilter]
 	or: [PostFilter]
 	not: PostFilter
+}
+
+input PostGroupBySpec {
+	field: PostGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input PostOrder {

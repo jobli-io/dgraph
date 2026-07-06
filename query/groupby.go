@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/pkg/errors"
 
@@ -108,6 +109,13 @@ func (d *dedup) addValue(attr string, value types.Val, uid uint64) {
 	if value.Tid == types.UidID {
 		strKey = strconv.FormatUint(value.Value.(uint64), 10)
 	} else {
+		// Normalize DateTime to UTC before marshalling as the dedup map key.
+		// Without this, the same instant stored with different timezone offsets
+		// (e.g. "2024-01-15T23:00:00Z" vs "2024-01-15T23:00:00+00:00") would
+		// produce different string keys and land in separate groups.
+		if value.Tid == types.DateTimeID {
+			value.Value = value.Value.(time.Time).UTC()
+		}
 		valC := types.Val{Tid: types.StringID, Value: ""}
 		err := types.Marshal(value, &valC)
 		if err != nil {
@@ -192,6 +200,39 @@ func (res *groupResults) formGroups(dedupMap dedup, cur *pb.List, groupVal []gro
 	}
 }
 
+// floorToInterval returns a time.Time floored to the start of the requested interval in the
+// given timezone. tokName must be one of "year", "month", "day", "hour". tz is an IANA
+// timezone name; an empty string means UTC, which is consistent with how Dgraph's DateTime
+// index tokenizers operate (all four call t.UTC() before extracting date components).
+//
+// The returned time has the zone of loc embedded, so its RFC3339 representation carries the
+// correct offset (e.g. "2024-01-15T00:00:00+11:00" for Sydney day buckets).
+func floorToInterval(t time.Time, tokName string, tz string) (time.Time, error) {
+	loc := time.UTC
+	if tz != "" {
+		var err error
+		loc, err = time.LoadLocation(tz)
+		if err != nil {
+			return time.Time{}, err
+		}
+	}
+	tLocal := t.In(loc)
+	y, m, d := tLocal.Date()
+	h := tLocal.Hour()
+	switch tokName {
+	case "year":
+		return time.Date(y, 1, 1, 0, 0, 0, 0, loc), nil
+	case "month":
+		return time.Date(y, m, 1, 0, 0, 0, 0, loc), nil
+	case "day":
+		return time.Date(y, m, d, 0, 0, 0, 0, loc), nil
+	case "hour":
+		return time.Date(y, m, d, h, 0, 0, 0, loc), nil
+	default:
+		return time.Time{}, fmt.Errorf("floorToInterval: unknown tokenizer name %q; must be year, month, day, or hour", tokName)
+	}
+}
+
 func (sg *SubGraph) formResult(ul *pb.List) (*groupResults, error) {
 	var dedupMap dedup
 	res := new(groupResults)
@@ -229,6 +270,16 @@ func (sg *SubGraph) formResult(ul *pb.List) (*groupResults, error) {
 				val, err := convertTo(v.Values[0])
 				if err != nil {
 					continue
+				}
+				// Apply a DateTime tokenizer interval if requested (e.g. by: day).
+				// This floors the raw timestamp to the requested granularity so that
+				// all timestamps within the same day/month/year/hour land in one bucket.
+				if child.Params.TokenizerName != "" && val.Tid == types.DateTimeID {
+					floor, ferr := floorToInterval(val.Value.(time.Time),
+						child.Params.TokenizerName, child.Params.Timezone)
+					if ferr == nil {
+						val = types.Val{Tid: types.DateTimeID, Value: floor}
+					}
 				}
 				dedupMap.addValue(attr, val, srcUid)
 			}

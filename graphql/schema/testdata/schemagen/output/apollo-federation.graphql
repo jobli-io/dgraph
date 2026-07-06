@@ -263,6 +263,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -438,6 +439,16 @@ type CountryAggregateResult {
 	nameMax: String
 }
 
+type CountryGroupByResult {
+	code: String
+	name: String
+	count: Int
+	codeMin: String
+	codeMax: String
+	nameMin: String
+	nameMax: String
+}
+
 type DeleteCountryPayload {
 	country(filter: CountryFilter, order: CountryOrder, first: Int, offset: Int): [Country]
 	msg: String
@@ -486,11 +497,30 @@ type ReviewsAggregateResult {
 	reviewMax: String
 }
 
+type ReviewsGroupByResult {
+	review: String
+	count: Int
+	reviewMin: String
+	reviewMax: String
+}
+
 type SchoolAggregateResult {
 	count: Int
 }
 
 type StudentAggregateResult {
+	count: Int
+	nameMin: String
+	nameMax: String
+	ageMin: Int
+	ageMax: Int
+	ageSum: Int
+	ageAvg: Float
+}
+
+type StudentGroupByResult {
+	name: String
+	age: Int
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -540,9 +570,26 @@ type UserAggregateResult {
 	ageAvg: Float
 }
 
+type UserGroupByResult {
+	name: String
+	age: Int
+	count: Int
+	nameMin: String
+	nameMax: String
+	ageMin: Int
+	ageMax: Int
+	ageSum: Int
+	ageAvg: Float
+}
+
 #######################
 # Generated Enums
 #######################
+
+enum CountryGroupableField {
+	code
+	name
+}
 
 enum CountryHasFilter {
 	code
@@ -562,6 +609,10 @@ enum ProductOrderable {
 	id
 }
 
+enum ReviewsGroupableField {
+	review
+}
+
 enum ReviewsHasFilter {
 	review
 	user
@@ -575,12 +626,22 @@ enum SchoolHasFilter {
 	students
 }
 
+enum StudentGroupableField {
+	name
+	age
+}
+
 enum StudentHasFilter {
 	name
 	age
 }
 
 enum StudentOrderable {
+	name
+	age
+}
+
+enum UserGroupableField {
 	name
 	age
 }
@@ -638,6 +699,12 @@ input CountryFilter {
 	not: CountryFilter
 }
 
+input CountryGroupBySpec {
+	field: CountryGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input CountryOrder {
 	asc: CountryOrderable
 	desc: CountryOrderable
@@ -685,6 +752,12 @@ input ReviewsFilter {
 	not: ReviewsFilter
 }
 
+input ReviewsGroupBySpec {
+	field: ReviewsGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input ReviewsOrder {
 	asc: ReviewsOrderable
 	desc: ReviewsOrderable
@@ -725,6 +798,12 @@ input StudentFilter {
 	and: [StudentFilter]
 	or: [StudentFilter]
 	not: StudentFilter
+}
+
+input StudentGroupBySpec {
+	field: StudentGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input StudentOrder {
@@ -788,6 +867,12 @@ input UserFilter {
 	not: UserFilter
 }
 
+input UserGroupBySpec {
+	field: UserGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input UserOrder {
 	asc: UserOrderable
 	desc: UserOrderable
@@ -816,21 +901,25 @@ type Query {
 	getReviews(id: ID!): Reviews
 	queryReviews(filter: ReviewsFilter, order: ReviewsOrder, first: Int, offset: Int): [Reviews]
 	aggregateReviews(filter: ReviewsFilter): ReviewsAggregateResult
+	groupByReviews(filter: ReviewsFilter, groupBy: [ReviewsGroupBySpec!]!): [ReviewsGroupByResult]
 	getStudent(id: ID!): Student
 	queryStudent(filter: StudentFilter, order: StudentOrder, first: Int, offset: Int): [Student]
 	aggregateStudent(filter: StudentFilter): StudentAggregateResult
+	groupByStudent(filter: StudentFilter, groupBy: [StudentGroupBySpec!]!): [StudentGroupByResult]
 	getSchool(id: ID!): School
 	querySchool(filter: SchoolFilter, first: Int, offset: Int): [School]
 	aggregateSchool(filter: SchoolFilter): SchoolAggregateResult
 	getCountry(code: String!): Country
 	queryCountry(filter: CountryFilter, order: CountryOrder, first: Int, offset: Int): [Country]
 	aggregateCountry(filter: CountryFilter): CountryAggregateResult
+	groupByCountry(filter: CountryFilter, groupBy: [CountryGroupBySpec!]!): [CountryGroupByResult]
 	getProduct(id: ID!): Product
 	queryProduct(filter: ProductFilter, order: ProductOrder, first: Int, offset: Int): [Product]
 	aggregateProduct(filter: ProductFilter): ProductAggregateResult
 	getUser(name: String!): User
 	queryUser(filter: UserFilter, order: UserOrder, first: Int, offset: Int): [User]
 	aggregateUser(filter: UserFilter): UserAggregateResult
+	groupByUser(filter: UserFilter, groupBy: [UserGroupBySpec!]!): [UserGroupByResult]
 }
 
 #######################

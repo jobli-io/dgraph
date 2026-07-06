@@ -238,6 +238,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -391,7 +392,21 @@ type MessageAggregateResult {
 	textMax: String
 }
 
+type MessageGroupByResult {
+	text: String
+	count: Int
+	textMin: String
+	textMax: String
+}
+
 type QuestionAggregateResult {
+	count: Int
+	textMin: String
+	textMax: String
+}
+
+type QuestionGroupByResult {
+	text: String
 	count: Int
 	textMin: String
 	textMax: String
@@ -418,9 +433,20 @@ type UserAggregateResult {
 	nameMax: String
 }
 
+type UserGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 #######################
 # Generated Enums
 #######################
+
+enum MessageGroupableField {
+	text
+}
 
 enum MessageHasFilter {
 	text
@@ -434,6 +460,10 @@ enum MessageTypename {
 	Question
 }
 
+enum QuestionGroupableField {
+	text
+}
+
 enum QuestionHasFilter {
 	text
 	askedBy
@@ -441,6 +471,10 @@ enum QuestionHasFilter {
 
 enum QuestionOrderable {
 	text
+}
+
+enum UserGroupableField {
+	name
 }
 
 enum UserHasFilter {
@@ -473,6 +507,12 @@ input MessageFilter {
 	not: MessageFilter
 }
 
+input MessageGroupBySpec {
+	field: MessageGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input MessageOrder {
 	asc: MessageOrderable
 	desc: MessageOrderable
@@ -488,6 +528,12 @@ input QuestionFilter {
 	and: [QuestionFilter]
 	or: [QuestionFilter]
 	not: QuestionFilter
+}
+
+input QuestionGroupBySpec {
+	field: QuestionGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input QuestionOrder {
@@ -529,6 +575,12 @@ input UserFilter {
 	and: [UserFilter]
 	or: [UserFilter]
 	not: UserFilter
+}
+
+input UserGroupBySpec {
+	field: UserGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input UserOrder {

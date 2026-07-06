@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/golang/glog"
 	"go.opentelemetry.io/otel/trace"
@@ -118,7 +119,15 @@ func (qr *queryResolver) rewriteAndExecute(ctx context.Context, query schema.Que
 	qry := dgraph.AsString(dgQuery)
 	queryTimer := newtimer(ctx, &dgraphQueryDuration.OffsetDuration)
 	queryTimer.Start()
-	resp, err := qr.executor.Execute(ctx, &dgoapi.Request{Query: qry, ReadOnly: true}, query)
+	// For groupBy queries we need the raw DQL-form JSON (containing the
+	// {"@groupby":[...]} envelope) so that completeGroupByResult can transform
+	// it.  Passing a non-nil field triggers Dgraph's GraphQL result processor
+	// which strips the @groupby envelope into an unrecognisable shape.
+	execField := query
+	if query.QueryType() == schema.GroupByQuery {
+		execField = nil
+	}
+	resp, err := qr.executor.Execute(ctx, &dgoapi.Request{Query: qry, ReadOnly: true}, execField)
 	queryTimer.Stop()
 
 	if err != nil && !x.IsGqlErrorList(err) {
@@ -135,6 +144,14 @@ func (qr *queryResolver) rewriteAndExecute(ctx context.Context, query schema.Que
 		Field:      query,
 		Err:        schema.SetPathIfEmpty(err, query.ResponseName()),
 		Extensions: ext,
+	}
+
+	// For groupBy queries, transform the raw DQL @groupby response envelope into the
+	// flat list shape that GraphQL clients expect for XxxGroupByResult.
+	if query.QueryType() == schema.GroupByQuery && resolved.Data != nil && err == nil {
+		if transformed, transformErr := completeGroupByResult(query.ResponseName(), resolved.Data); transformErr == nil {
+			resolved.Data = transformed
+		}
 	}
 
 	return resolved
@@ -253,4 +270,79 @@ func convertScalarToString(val interface{}) (string, error) {
 		return "", errNotScalar
 	}
 	return str, nil
+}
+
+// completeGroupByResult transforms the raw DQL @groupby response into the flat list
+// shape that GraphQL clients expect for XxxGroupByResult queries.
+//
+// DQL emits:
+//
+//	{ "groupByNote": [ { "@groupby": [ {"Note.status":"ACTIVE","count":1,"titleMin":"X"} ] } ] }
+//
+// GraphQL expects:
+//
+//	{ "groupByNote": [ {"status":"ACTIVE","count":1,"titleMin":"X"} ] }
+//
+// The transformation performs two steps:
+//  1. Unwrap the outer [{"@groupby":[...]}] array+object envelope → flat [...]
+//  2. Strip the "TypeName." prefix from predicate-keyed group fields
+//     (e.g. "Note.status" → "status", "Note.createdAt" → "createdAt").
+//     Aggregate alias fields (count, titleMin, prioritySum …) have no dot and pass through.
+func completeGroupByResult(queryName string, rawData []byte) ([]byte, error) {
+	// Unmarshal the top-level map, preserving numeric types as json.RawMessage.
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(rawData, &top); err != nil {
+		return rawData, err
+	}
+
+	rawField, ok := top[queryName]
+	if !ok {
+		return rawData, nil
+	}
+
+	// The DQL groupby result is wrapped in an extra array+object layer:
+	// [ { "@groupby": [...] } ]
+	var outerList []map[string]json.RawMessage
+	if err := json.Unmarshal(rawField, &outerList); err != nil {
+		return rawData, err
+	}
+
+	if len(outerList) == 0 {
+		top[queryName] = json.RawMessage("[]")
+		return json.Marshal(top)
+	}
+
+	// Extract the "@groupby" inner array from the first (and only) wrapper object.
+	rawGroupBy, ok := outerList[0]["@groupby"]
+	if !ok {
+		// No @groupby key — return an empty list to avoid confusing the client.
+		top[queryName] = json.RawMessage("[]")
+		return json.Marshal(top)
+	}
+
+	var groups []map[string]json.RawMessage
+	if err := json.Unmarshal(rawGroupBy, &groups); err != nil {
+		return rawData, err
+	}
+
+	// For each group result, strip the "TypeName." prefix from predicate-keyed fields.
+	// Aggregate alias fields (count, titleMin, …) have no dot and pass through unchanged.
+	result := make([]map[string]json.RawMessage, 0, len(groups))
+	for _, grp := range groups {
+		transformed := make(map[string]json.RawMessage, len(grp))
+		for k, v := range grp {
+			if idx := strings.LastIndexByte(k, '.'); idx >= 0 {
+				k = k[idx+1:]
+			}
+			transformed[k] = v
+		}
+		result = append(result, transformed)
+	}
+
+	transformedJSON, err := json.Marshal(result)
+	if err != nil {
+		return rawData, err
+	}
+	top[queryName] = transformedJSON
+	return json.Marshal(top)
 }

@@ -236,6 +236,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -361,6 +362,13 @@ type AbstractAggregateResult {
 	nameMax: String
 }
 
+type AbstractGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type AddMessagePayload {
 	message(filter: MessageFilter, order: MessageOrder, first: Int, offset: Int): [Message]
 	numUids: Int
@@ -390,6 +398,22 @@ type MessageAggregateResult {
 	datePostedMax: DateTime
 }
 
+type MessageGroupByResult {
+	name: String
+	content: String
+	author: String
+	datePosted: DateTime
+	count: Int
+	nameMin: String
+	nameMax: String
+	contentMin: String
+	contentMax: String
+	authorMin: String
+	authorMax: String
+	datePostedMin: DateTime
+	datePostedMax: DateTime
+}
+
 type UpdateAbstractPayload {
 	abstract(filter: AbstractFilter, order: AbstractOrder, first: Int, offset: Int): [Abstract]
 	numUids: Int
@@ -404,6 +428,10 @@ type UpdateMessagePayload {
 # Generated Enums
 #######################
 
+enum AbstractGroupableField {
+	name
+}
+
 enum AbstractHasFilter {
 	name
 }
@@ -414,6 +442,13 @@ enum AbstractOrderable {
 
 enum AbstractTypename {
 	Message
+}
+
+enum MessageGroupableField {
+	name
+	content
+	author
+	datePosted
 }
 
 enum MessageHasFilter {
@@ -443,6 +478,12 @@ input AbstractFilter {
 	not: AbstractFilter
 }
 
+input AbstractGroupBySpec {
+	field: AbstractGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input AbstractOrder {
 	asc: AbstractOrderable
 	desc: AbstractOrderable
@@ -470,6 +511,12 @@ input MessageFilter {
 	and: [MessageFilter]
 	or: [MessageFilter]
 	not: MessageFilter
+}
+
+input MessageGroupBySpec {
+	field: MessageGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input MessageOrder {

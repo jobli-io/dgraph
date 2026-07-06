@@ -277,6 +277,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -422,6 +423,13 @@ type CharacterAggregateResult {
 	nameMax: String
 }
 
+type CharacterGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type DeleteCharacterPayload {
 	character(filter: CharacterFilter, order: CharacterOrder, first: Int, offset: Int): [Character]
 	msg: String
@@ -460,7 +468,29 @@ type DroidAggregateResult {
 	primaryFunctionMax: String
 }
 
+type DroidGroupByResult {
+	name: String
+	primaryFunction: String
+	count: Int
+	nameMin: String
+	nameMax: String
+	primaryFunctionMin: String
+	primaryFunctionMax: String
+}
+
 type HumanAggregateResult {
+	count: Int
+	nameMin: String
+	nameMax: String
+	totalCreditsMin: Int
+	totalCreditsMax: Int
+	totalCreditsSum: Int
+	totalCreditsAvg: Float
+}
+
+type HumanGroupByResult {
+	name: String
+	totalCredits: Int
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -476,7 +506,26 @@ type PlanetAggregateResult {
 	nameMax: String
 }
 
+type PlanetGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type StarshipAggregateResult {
+	count: Int
+	nameMin: String
+	nameMax: String
+	lengthMin: Float
+	lengthMax: Float
+	lengthSum: Float
+	lengthAvg: Float
+}
+
+type StarshipGroupByResult {
+	name: String
+	length: Float
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -515,6 +564,10 @@ type UpdateStarshipPayload {
 # Generated Enums
 #######################
 
+enum CharacterGroupableField {
+	name
+}
+
 enum CharacterHasFilter {
 	name
 	friends
@@ -531,6 +584,11 @@ enum CharacterTypename {
 	Human
 }
 
+enum DroidGroupableField {
+	name
+	primaryFunction
+}
+
 enum DroidHasFilter {
 	name
 	friends
@@ -542,6 +600,11 @@ enum DroidHasFilter {
 enum DroidOrderable {
 	name
 	primaryFunction
+}
+
+enum HumanGroupableField {
+	name
+	totalCredits
 }
 
 enum HumanHasFilter {
@@ -558,6 +621,10 @@ enum HumanOrderable {
 	totalCredits
 }
 
+enum PlanetGroupableField {
+	name
+}
+
 enum PlanetHasFilter {
 	name
 	residents
@@ -571,6 +638,11 @@ enum ResidentType {
 	Human
 	Droid
 	Starship
+}
+
+enum StarshipGroupableField {
+	name
+	length
 }
 
 enum StarshipHasFilter {
@@ -625,6 +697,12 @@ input CharacterFilter {
 	not: CharacterFilter
 }
 
+input CharacterGroupBySpec {
+	field: CharacterGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input CharacterOrder {
 	asc: CharacterOrderable
 	desc: CharacterOrderable
@@ -650,6 +728,12 @@ input DroidFilter {
 	and: [DroidFilter]
 	or: [DroidFilter]
 	not: DroidFilter
+}
+
+input DroidGroupBySpec {
+	field: DroidGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input DroidOrder {
@@ -690,6 +774,12 @@ input HumanFilter {
 	not: HumanFilter
 }
 
+input HumanGroupBySpec {
+	field: HumanGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input HumanOrder {
 	asc: HumanOrderable
 	desc: HumanOrderable
@@ -721,6 +811,12 @@ input PlanetFilter {
 	and: [PlanetFilter]
 	or: [PlanetFilter]
 	not: PlanetFilter
+}
+
+input PlanetGroupBySpec {
+	field: PlanetGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input PlanetOrder {
@@ -760,6 +856,12 @@ input StarshipFilter {
 	and: [StarshipFilter]
 	or: [StarshipFilter]
 	not: StarshipFilter
+}
+
+input StarshipGroupBySpec {
+	field: StarshipGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input StarshipOrder {

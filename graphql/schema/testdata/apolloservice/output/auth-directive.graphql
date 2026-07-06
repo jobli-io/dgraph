@@ -366,6 +366,23 @@ type TodoAggregateResult {
 	somethingPrivateMax: String
 }
 
+type TodoGroupByResult {
+	title: String
+	text: String
+	isPublic: Boolean
+	dateCompleted: String
+	somethingPrivate: String
+	count: Int
+	titleMin: String
+	titleMax: String
+	textMin: String
+	textMax: String
+	dateCompletedMin: String
+	dateCompletedMax: String
+	somethingPrivateMin: String
+	somethingPrivateMax: String
+}
+
 type UpdateTodoPayload {
 	todo(filter: TodoFilter, order: TodoOrder, first: Int, offset: Int): [Todo]
 	numUids: Int
@@ -377,6 +394,13 @@ type UpdateUserPayload {
 }
 
 type UserAggregateResult {
+	count: Int
+	usernameMin: String
+	usernameMax: String
+}
+
+type UserGroupByResult {
+	username: String
 	count: Int
 	usernameMin: String
 	usernameMax: String
@@ -399,6 +423,21 @@ enum CascadeAuthVariableContext {
 	adaptive
 }
 
+enum DateTimeGranularity {
+	year
+	month
+	day
+	hour
+}
+
+enum TodoGroupableField {
+	title
+	text
+	isPublic
+	dateCompleted
+	somethingPrivate
+}
+
 enum TodoHasFilter {
 	title
 	text
@@ -414,6 +453,10 @@ enum TodoOrderable {
 	text
 	dateCompleted
 	somethingPrivate
+}
+
+enum UserGroupableField {
+	username
 }
 
 enum UserHasFilter {
@@ -466,6 +509,12 @@ input TodoFilter {
 	not: TodoFilter
 }
 
+input TodoGroupBySpec {
+	field: TodoGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input TodoOrder {
 	asc: TodoOrderable
 	desc: TodoOrderable
@@ -515,6 +564,12 @@ input UserFilter {
 	not: UserFilter
 }
 
+input UserGroupBySpec {
+	field: UserGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input UserOrder {
 	asc: UserOrderable
 	desc: UserOrderable
@@ -540,9 +595,11 @@ type Query {
 	checkTodoPassword(id: ID!, pwd: String!): Todo
 	queryTodo(filter: TodoFilter, order: TodoOrder, first: Int, offset: Int): [Todo]
 	aggregateTodo(filter: TodoFilter): TodoAggregateResult
+	groupByTodo(filter: TodoFilter, groupBy: [TodoGroupBySpec!]!): [TodoGroupByResult]
 	getUser(username: String!): User
 	queryUser(filter: UserFilter, order: UserOrder, first: Int, offset: Int): [User]
 	aggregateUser(filter: UserFilter): UserAggregateResult
+	groupByUser(filter: UserFilter, groupBy: [UserGroupBySpec!]!): [UserGroupByResult]
 }
 
 #######################

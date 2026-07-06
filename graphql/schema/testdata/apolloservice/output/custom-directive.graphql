@@ -335,6 +335,13 @@ type CarAggregateResult {
 	nameMax: String
 }
 
+type CarGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type DeleteCarPayload {
 	car(filter: CarFilter, order: CarOrder, first: Int, offset: Int): [Car]
 	msg: String
@@ -349,6 +356,10 @@ type UpdateCarPayload {
 #######################
 # Generated Enums
 #######################
+
+enum CarGroupableField {
+	name
+}
 
 enum CarHasFilter {
 	name
@@ -371,6 +382,13 @@ enum CascadeAuthVariableContext {
 	adaptive
 }
 
+enum DateTimeGranularity {
+	year
+	month
+	day
+	hour
+}
+
 #######################
 # Generated Inputs
 #######################
@@ -390,6 +408,12 @@ input CarFilter {
 	and: [CarFilter]
 	or: [CarFilter]
 	not: CarFilter
+}
+
+input CarGroupBySpec {
+	field: CarGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input CarOrder {
@@ -428,6 +452,7 @@ type Query {
 	getCar(id: ID!): Car
 	queryCar(filter: CarFilter, order: CarOrder, first: Int, offset: Int): [Car]
 	aggregateCar(filter: CarFilter): CarAggregateResult
+	groupByCar(filter: CarFilter, groupBy: [CarGroupBySpec!]!): [CarGroupByResult]
 }
 
 #######################

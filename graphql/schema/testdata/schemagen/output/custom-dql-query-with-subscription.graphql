@@ -242,6 +242,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -391,6 +392,16 @@ type TweetsAggregateResult {
 	timestampMax: DateTime
 }
 
+type TweetsGroupByResult {
+	text: String
+	timestamp: DateTime
+	count: Int
+	textMin: String
+	textMax: String
+	timestampMin: DateTime
+	timestampMax: DateTime
+}
+
 type UpdateTweetsPayload {
 	tweets(filter: TweetsFilter, order: TweetsOrder, first: Int, offset: Int): [Tweets]
 	numUids: Int
@@ -411,9 +422,26 @@ type UserAggregateResult {
 	followersAvg: Float
 }
 
+type UserGroupByResult {
+	screenName: String
+	followers: Int
+	count: Int
+	screenNameMin: String
+	screenNameMax: String
+	followersMin: Int
+	followersMax: Int
+	followersSum: Int
+	followersAvg: Float
+}
+
 #######################
 # Generated Enums
 #######################
+
+enum TweetsGroupableField {
+	text
+	timestamp
+}
 
 enum TweetsHasFilter {
 	text
@@ -424,6 +452,11 @@ enum TweetsHasFilter {
 enum TweetsOrderable {
 	text
 	timestamp
+}
+
+enum UserGroupableField {
+	screenName
+	followers
 }
 
 enum UserHasFilter {
@@ -461,6 +494,12 @@ input TweetsFilter {
 	and: [TweetsFilter]
 	or: [TweetsFilter]
 	not: TweetsFilter
+}
+
+input TweetsGroupBySpec {
+	field: TweetsGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input TweetsOrder {
@@ -503,6 +542,12 @@ input UserFilter {
 	not: UserFilter
 }
 
+input UserGroupBySpec {
+	field: UserGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input UserOrder {
 	asc: UserOrderable
 	desc: UserOrderable
@@ -530,9 +575,11 @@ type Query {
 	getTweets(id: ID!): Tweets
 	queryTweets(filter: TweetsFilter, order: TweetsOrder, first: Int, offset: Int): [Tweets]
 	aggregateTweets(filter: TweetsFilter): TweetsAggregateResult
+	groupByTweets(filter: TweetsFilter, groupBy: [TweetsGroupBySpec!]!): [TweetsGroupByResult]
 	getUser(screenName: String!): User
 	queryUser(filter: UserFilter, order: UserOrder, first: Int, offset: Int): [User]
 	aggregateUser(filter: UserFilter): UserAggregateResult
+	groupByUser(filter: UserFilter, groupBy: [UserGroupBySpec!]!): [UserGroupByResult]
 }
 
 #######################

@@ -258,6 +258,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -422,6 +423,60 @@ type PostAggregateResult {
 	scoreAvg: Float
 }
 
+type PostGroupByResult {
+	title: String
+	titleByEverything: String
+	text: String
+	publishByYear: DateTime
+	publishByMonth: DateTime
+	publishByDay: DateTime
+	publishByHour: DateTime
+	publishTimestamp: Int64
+	numViewers: Int64
+	numLikes: Int
+	score: Float
+	isPublished: Boolean
+	postType: PostType
+	postTypeNonNull: PostType
+	postTypeTrigram: PostType
+	postTypeRegexp: PostType
+	postTypeHash: PostType
+	postTypeRegexpExact: PostType
+	postTypeHashRegexp: PostType
+	postTypeNone: PostType
+	count: Int
+	titleMin: String
+	titleMax: String
+	titleByEverythingMin: String
+	titleByEverythingMax: String
+	textMin: String
+	textMax: String
+	publishByYearMin: DateTime
+	publishByYearMax: DateTime
+	publishByMonthMin: DateTime
+	publishByMonthMax: DateTime
+	publishByDayMin: DateTime
+	publishByDayMax: DateTime
+	publishByHourMin: DateTime
+	publishByHourMax: DateTime
+	publishTimestampMin: Int64
+	publishTimestampMax: Int64
+	publishTimestampSum: Int64
+	publishTimestampAvg: Float
+	numViewersMin: Int64
+	numViewersMax: Int64
+	numViewersSum: Int64
+	numViewersAvg: Float
+	numLikesMin: Int
+	numLikesMax: Int
+	numLikesSum: Int
+	numLikesAvg: Float
+	scoreMin: Float
+	scoreMax: Float
+	scoreSum: Float
+	scoreAvg: Float
+}
+
 type UpdatePostPayload {
 	post(filter: PostFilter, order: PostOrder, first: Int, offset: Int): [Post]
 	numUids: Int
@@ -430,6 +485,29 @@ type UpdatePostPayload {
 #######################
 # Generated Enums
 #######################
+
+enum PostGroupableField {
+	title
+	titleByEverything
+	text
+	publishByYear
+	publishByMonth
+	publishByDay
+	publishByHour
+	publishTimestamp
+	numViewers
+	numLikes
+	score
+	isPublished
+	postType
+	postTypeNonNull
+	postTypeTrigram
+	postTypeRegexp
+	postTypeHash
+	postTypeRegexpExact
+	postTypeHashRegexp
+	postTypeNone
+}
 
 enum PostHasFilter {
 	title
@@ -536,6 +614,12 @@ input PostFilter {
 	and: [PostFilter]
 	or: [PostFilter]
 	not: PostFilter
+}
+
+input PostGroupBySpec {
+	field: PostGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input PostOrder {

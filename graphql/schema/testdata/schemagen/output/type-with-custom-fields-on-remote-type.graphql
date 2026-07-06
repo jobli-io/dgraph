@@ -235,6 +235,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -378,9 +379,22 @@ type UserAggregateResult {
 	ageAvg: Float
 }
 
+type UserGroupByResult {
+	age: Int
+	count: Int
+	ageMin: Int
+	ageMax: Int
+	ageSum: Int
+	ageAvg: Float
+}
+
 #######################
 # Generated Enums
 #######################
+
+enum UserGroupableField {
+	age
+}
 
 enum UserHasFilter {
 	age
@@ -411,6 +425,12 @@ input UserFilter {
 	and: [UserFilter]
 	or: [UserFilter]
 	not: UserFilter
+}
+
+input UserGroupBySpec {
+	field: UserGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input UserOrder {

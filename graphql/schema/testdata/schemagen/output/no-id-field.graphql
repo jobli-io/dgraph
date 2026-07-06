@@ -240,6 +240,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -380,6 +381,13 @@ type AuthorAggregateResult {
 	nameMax: String
 }
 
+type AuthorGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type DeleteAuthorPayload {
 	author(filter: AuthorFilter, order: AuthorOrder, first: Int, offset: Int): [Author]
 	msg: String
@@ -404,7 +412,21 @@ type GenreAggregateResult {
 	nameMax: String
 }
 
+type GenreGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type PostAggregateResult {
+	count: Int
+	contentMin: String
+	contentMax: String
+}
+
+type PostGroupByResult {
+	content: String
 	count: Int
 	contentMin: String
 	contentMax: String
@@ -429,6 +451,10 @@ type UpdatePostPayload {
 # Generated Enums
 #######################
 
+enum AuthorGroupableField {
+	name
+}
+
 enum AuthorHasFilter {
 	name
 	posts
@@ -438,12 +464,20 @@ enum AuthorOrderable {
 	name
 }
 
+enum GenreGroupableField {
+	name
+}
+
 enum GenreHasFilter {
 	name
 }
 
 enum GenreOrderable {
 	name
+}
+
+enum PostGroupableField {
+	content
 }
 
 enum PostHasFilter {
@@ -483,6 +517,12 @@ input AuthorFilter {
 	not: AuthorFilter
 }
 
+input AuthorGroupBySpec {
+	field: AuthorGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input AuthorOrder {
 	asc: AuthorOrderable
 	desc: AuthorOrderable
@@ -507,6 +547,12 @@ input GenreFilter {
 	not: GenreFilter
 }
 
+input GenreGroupBySpec {
+	field: GenreGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input GenreOrder {
 	asc: GenreOrderable
 	desc: GenreOrderable
@@ -526,6 +572,12 @@ input PostFilter {
 	and: [PostFilter]
 	or: [PostFilter]
 	not: PostFilter
+}
+
+input PostGroupBySpec {
+	field: PostGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input PostOrder {

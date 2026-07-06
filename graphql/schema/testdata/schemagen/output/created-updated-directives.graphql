@@ -237,6 +237,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -376,7 +377,36 @@ type BookingAggregateResult {
 	updatedMax: DateTime
 }
 
+type BookingGroupByResult {
+	name: String
+	created: DateTime
+	updated: DateTime
+	count: Int
+	nameMin: String
+	nameMax: String
+	createdMin: DateTime
+	createdMax: DateTime
+	updatedMin: DateTime
+	updatedMax: DateTime
+}
+
 type BookingXIDAggregateResult {
+	count: Int
+	idMin: String
+	idMax: String
+	nameMin: String
+	nameMax: String
+	createdMin: DateTime
+	createdMax: DateTime
+	updatedMin: DateTime
+	updatedMax: DateTime
+}
+
+type BookingXIDGroupByResult {
+	id: String
+	name: String
+	created: DateTime
+	updated: DateTime
 	count: Int
 	idMin: String
 	idMax: String
@@ -414,6 +444,12 @@ type UpdateBookingXIDPayload {
 # Generated Enums
 #######################
 
+enum BookingGroupableField {
+	name
+	created
+	updated
+}
+
 enum BookingHasFilter {
 	name
 	created
@@ -421,6 +457,13 @@ enum BookingHasFilter {
 }
 
 enum BookingOrderable {
+	name
+	created
+	updated
+}
+
+enum BookingXIDGroupableField {
+	id
 	name
 	created
 	updated
@@ -465,6 +508,12 @@ input BookingFilter {
 	not: BookingFilter
 }
 
+input BookingGroupBySpec {
+	field: BookingGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input BookingOrder {
 	asc: BookingOrderable
 	desc: BookingOrderable
@@ -490,6 +539,12 @@ input BookingXIDFilter {
 	and: [BookingXIDFilter]
 	or: [BookingXIDFilter]
 	not: BookingXIDFilter
+}
+
+input BookingXIDGroupBySpec {
+	field: BookingXIDGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input BookingXIDOrder {

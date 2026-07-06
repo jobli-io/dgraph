@@ -240,6 +240,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -381,6 +382,22 @@ type BookAggregateResult {
 	authorMax: String
 }
 
+type BookGroupByResult {
+	refID: String
+	itemID: String
+	title: String
+	author: String
+	count: Int
+	refIDMin: String
+	refIDMax: String
+	itemIDMin: String
+	itemIDMax: String
+	titleMin: String
+	titleMax: String
+	authorMin: String
+	authorMax: String
+}
+
 type DeleteBookPayload {
 	book(filter: BookFilter, order: BookOrder, first: Int, offset: Int): [Book]
 	msg: String
@@ -411,6 +428,16 @@ type LibraryItemAggregateResult {
 	itemIDMax: String
 }
 
+type LibraryItemGroupByResult {
+	refID: String
+	itemID: String
+	count: Int
+	refIDMin: String
+	refIDMax: String
+	itemIDMin: String
+	itemIDMax: String
+}
+
 type UpdateBookPayload {
 	book(filter: BookFilter, order: BookOrder, first: Int, offset: Int): [Book]
 	numUids: Int
@@ -430,6 +457,13 @@ type UpdateLibraryPayload {
 # Generated Enums
 #######################
 
+enum BookGroupableField {
+	refID
+	itemID
+	title
+	author
+}
+
 enum BookHasFilter {
 	refID
 	itemID
@@ -446,6 +480,11 @@ enum BookOrderable {
 
 enum LibraryHasFilter {
 	items
+}
+
+enum LibraryItemGroupableField {
+	refID
+	itemID
 }
 
 enum LibraryItemHasFilter {
@@ -486,6 +525,12 @@ input BookFilter {
 	not: BookFilter
 }
 
+input BookGroupBySpec {
+	field: BookGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input BookOrder {
 	asc: BookOrderable
 	desc: BookOrderable
@@ -521,6 +566,12 @@ input LibraryItemFilter {
 	and: [LibraryItemFilter]
 	or: [LibraryItemFilter]
 	not: LibraryItemFilter
+}
+
+input LibraryItemGroupBySpec {
+	field: LibraryItemGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input LibraryItemOrder {

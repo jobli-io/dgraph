@@ -245,6 +245,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
+enum DateTimeGranularity { year month day hour }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -398,13 +399,39 @@ type DirectorAggregateResult {
 	nameMax: String
 }
 
+type DirectorGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type MovieAggregateResult {
 	count: Int
 	nameMin: String
 	nameMax: String
 }
 
+type MovieGroupByResult {
+	name: String
+	count: Int
+	nameMin: String
+	nameMax: String
+}
+
 type OscarMovieAggregateResult {
+	count: Int
+	nameMin: String
+	nameMax: String
+	yearMin: Int
+	yearMax: Int
+	yearSum: Int
+	yearAvg: Float
+}
+
+type OscarMovieGroupByResult {
+	name: String
+	year: Int
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -433,12 +460,20 @@ type UpdateOscarMoviePayload {
 # Generated Enums
 #######################
 
+enum DirectorGroupableField {
+	name
+}
+
 enum DirectorHasFilter {
 	name
 	directed
 }
 
 enum DirectorOrderable {
+	name
+}
+
+enum MovieGroupableField {
 	name
 }
 
@@ -453,6 +488,11 @@ enum MovieOrderable {
 
 enum MovieTypename {
 	OscarMovie
+}
+
+enum OscarMovieGroupableField {
+	name
+	year
 }
 
 enum OscarMovieHasFilter {
@@ -488,6 +528,12 @@ input DirectorFilter {
 	not: DirectorFilter
 }
 
+input DirectorGroupBySpec {
+	field: DirectorGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input DirectorOrder {
 	asc: DirectorOrderable
 	desc: DirectorOrderable
@@ -514,6 +560,12 @@ input MovieFilter {
 	not: MovieFilter
 }
 
+input MovieGroupBySpec {
+	field: MovieGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input MovieOrder {
 	asc: MovieOrderable
 	desc: MovieOrderable
@@ -534,6 +586,12 @@ input OscarMovieFilter {
 	and: [OscarMovieFilter]
 	or: [OscarMovieFilter]
 	not: OscarMovieFilter
+}
+
+input OscarMovieGroupBySpec {
+	field: OscarMovieGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input OscarMovieOrder {

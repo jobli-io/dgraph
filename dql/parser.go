@@ -103,6 +103,14 @@ type GroupByAttr struct {
 	Attr  string
 	Alias string
 	Langs []string
+	// TokenizerName, if non-empty, is the name of a DateTime tokenizer ("year", "month",
+	// "day", "hour") to apply when bucketing DateTime values. The raw stored timestamp is
+	// floored to the requested granularity before being used as the group key.
+	TokenizerName string
+	// Timezone is an IANA timezone name (e.g. "America/New_York") used when computing the
+	// interval floor. Empty means UTC, which is consistent with how Dgraph's DateTime index
+	// tokenizers work.
+	Timezone string
 }
 
 // FacetOrder stores ordering for single facet key.
@@ -802,7 +810,15 @@ func (gq *GraphQuery) collectVars(v *Vars) {
 	}
 
 	for _, ch := range gq.Children {
-		ch.collectVars(v)
+		if gq.IsGroupby {
+			// Variables declared as aggregates inside a @groupby block
+			// (e.g. "count as count(uid)") are implicitly consumed by the
+			// @groupby result.  They must not be required to appear in an
+			// explicit uid()/val() usage elsewhere in the query.
+			ch.collectVarsInsideGroupBy(v)
+		} else {
+			ch.collectVars(v)
+		}
 	}
 	if gq.Filter != nil {
 		gq.Filter.collectVars(v)
@@ -818,6 +834,26 @@ func (gq *GraphQuery) collectVars(v *Vars) {
 	shortestPathTo := gq.ShortestPathArgs.To
 	if shortestPathTo != nil && len(shortestPathTo.NeedsVar) > 0 {
 		v.Needs = append(v.Needs, shortestPathTo.NeedsVar[0].Name)
+	}
+}
+
+// collectVarsInsideGroupBy is like collectVars but deliberately omits adding
+// gq.Var to Defines.  It is used for direct children of a @groupby block so
+// that aggregate-alias variables (e.g. the "count" in "count as count(uid)")
+// are not flagged as "defined but not used" by checkDependency.
+func (gq *GraphQuery) collectVarsInsideGroupBy(v *Vars) {
+	// NeedsVar still applies (a child may reference outer variables in a filter).
+	for _, va := range gq.NeedsVar {
+		v.Needs = append(v.Needs, va.Name)
+	}
+	for _, ch := range gq.Children {
+		ch.collectVarsInsideGroupBy(v)
+	}
+	if gq.Filter != nil {
+		gq.Filter.collectVars(v)
+	}
+	if gq.MathExp != nil {
+		gq.MathExp.collectVars(v)
 	}
 }
 
@@ -2269,6 +2305,20 @@ loop:
 }
 
 // parseGroupby parses the groupby directive.
+// isGroupByTokenizer reports whether name (the raw token value after the @
+// in a @groupby attribute) contains one of the DateTime bucket tokenizer names
+// as a prefix.  When a timezone is also encoded, the full token looks like
+// "hour__Australia__Sydney" (with '__' replacing '/' in the IANA name).
+// Only the prefix up to the first '__' is checked here.
+func isGroupByTokenizer(name string) bool {
+	part, _, _ := strings.Cut(name, "__")
+	switch part {
+	case "year", "month", "day", "hour":
+		return true
+	}
+	return false
+}
+
 func parseGroupby(it *lex.ItemIterator, gq *GraphQuery) error {
 	count := 0
 	expectArg := true
@@ -2313,19 +2363,38 @@ loop:
 			}
 
 			var langs []string
+			var tokenizerName, timezone string
 			items, err := it.Peek(1)
 			if err == nil && items[0].Typ == itemAt {
 				it.Next() // consume '@'
-				it.Next() // move forward
-				langs, err = parseLanguageList(it)
-				if err != nil {
-					return err
+				it.Next() // move forward to item after '@'
+				nameItem := it.Item()
+				if nameItem.Typ == itemName && isGroupByTokenizer(nameItem.Val) {
+					// @hour / @hour__Australia__Sydney — DateTime bucket tokenizer.
+					// Timezone is encoded with '__' instead of '/' because '/'
+					// is not valid in lexDirectiveOrLangList (dql/state.go) but
+					// '_' is.  SplitN on the first '__' gives the tokenizer
+					// prefix; '__' in the remainder decodes back to '/'.
+					part, rest, hasTZ := strings.Cut(nameItem.Val, "__")
+					tokenizerName = part
+					if hasTZ {
+						timezone = strings.ReplaceAll(rest, "__", "/")
+					}
+				} else {
+					// Regular language tag (e.g. @en, @en:fr).
+					// The iterator is already at the first lang token.
+					langs, err = parseLanguageList(it)
+					if err != nil {
+						return err
+					}
 				}
 			}
 			attrLang := GroupByAttr{
-				Attr:  val,
-				Alias: alias,
-				Langs: langs,
+				Attr:          val,
+				Alias:         alias,
+				Langs:         langs,
+				TokenizerName: tokenizerName,
+				Timezone:      timezone,
 			}
 			alias = ""
 			gq.GroupbyAttrs = append(gq.GroupbyAttrs, attrLang)

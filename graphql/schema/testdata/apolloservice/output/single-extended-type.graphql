@@ -338,6 +338,16 @@ type ProductAggregateResult {
 	nameMax: String
 }
 
+type ProductGroupByResult {
+	id: String
+	name: String
+	count: Int
+	idMin: String
+	idMax: String
+	nameMin: String
+	nameMax: String
+}
+
 type UpdateProductPayload {
 	product(filter: ProductFilter, order: ProductOrder, first: Int, offset: Int): [Product]
 	numUids: Int
@@ -358,6 +368,18 @@ enum CascadeAuthVariableContext {
 	self
 	parent
 	adaptive
+}
+
+enum DateTimeGranularity {
+	year
+	month
+	day
+	hour
+}
+
+enum ProductGroupableField {
+	id
+	name
 }
 
 enum ProductHasFilter {
@@ -396,6 +418,12 @@ input ProductFilter {
 	and: [ProductFilter]
 	or: [ProductFilter]
 	not: ProductFilter
+}
+
+input ProductGroupBySpec {
+	field: ProductGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input ProductOrder {

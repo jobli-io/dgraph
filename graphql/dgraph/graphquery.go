@@ -104,6 +104,31 @@ func writeQuery(b *strings.Builder, query *dql.GraphQuery, prefix string) {
 		}
 	}
 
+	if len(query.GroupbyAttrs) > 0 {
+		x.Check2(b.WriteString(" @groupby("))
+		for i, attr := range query.GroupbyAttrs {
+			if i > 0 {
+				x.Check2(b.WriteString(", "))
+			}
+			if attr.TokenizerName != "" {
+				// Emit: Pred@tokenizer[__TZ__Encoded]
+				// The IANA timezone name is appended with '__' replacing '/'
+				// because lexDirectiveOrLangList (dql/state.go) treats '.' as
+				// a token boundary but '_' is a valid lang/directive character.
+				// Example: "Australia/Sydney" → suffix "hour__Australia__Sydney",
+				// which the lexer reads as a single itemName token.
+				suffix := attr.TokenizerName
+				if attr.Timezone != "" {
+					suffix += "__" + strings.ReplaceAll(attr.Timezone, "/", "__")
+				}
+				x.Check2(b.WriteString(attr.Attr + "@" + suffix))
+			} else {
+				x.Check2(b.WriteString(attr.Attr))
+			}
+		}
+		x.Check2(b.WriteRune(')'))
+	}
+
 	switch {
 	case len(query.Children) > 0:
 		prefixAdd := ""

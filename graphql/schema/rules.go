@@ -48,6 +48,7 @@ func init() {
 	validator.AddRuleWithOrder("Check range for Int type", baseRules, intRangeCheck)
 	validator.AddRuleWithOrder("Check filter functions", baseRules, filterCheck)
 	validator.AddRuleWithOrder("Check memberTypes not nested in and/or/not", baseRules, memberTypesCheck)
+	validator.AddRuleWithOrder("Check groupBy query arguments", baseRules, groupByArgumentsCheck)
 	// Graphql accept both single object and array of objects as value when the schema is defined
 	// as an array. listInputCoercion changes the value to array if the single object is provided.
 	// Changing the value can mess up with the other data validation rules hence we are setting

@@ -365,6 +365,20 @@ type AstronautAggregateResult {
 	ageAvg: Float
 }
 
+type AstronautGroupByResult {
+	name: String
+	age: Int
+	count: Int
+	idMin: ID
+	idMax: ID
+	nameMin: String
+	nameMax: String
+	ageMin: Int
+	ageMax: Int
+	ageSum: Int
+	ageAvg: Float
+}
+
 type DeleteAstronautPayload {
 	astronaut(filter: AstronautFilter, order: AstronautOrder, first: Int, offset: Int): [Astronaut]
 	msg: String
@@ -393,7 +407,33 @@ type MissionAggregateResult {
 	endDateMax: String
 }
 
+type MissionGroupByResult {
+	designation: String
+	startDate: String
+	endDate: String
+	count: Int
+	designationMin: String
+	designationMax: String
+	startDateMin: String
+	startDateMax: String
+	endDateMin: String
+	endDateMax: String
+}
+
 type ProductAggregateResult {
+	count: Int
+	upcMin: String
+	upcMax: String
+	shippingEstimateMin: Float
+	shippingEstimateMax: Float
+	shippingEstimateSum: Float
+	shippingEstimateAvg: Float
+}
+
+type ProductGroupByResult {
+	upc: String
+	inStock: Boolean
+	shippingEstimate: Float
 	count: Int
 	upcMin: String
 	upcMax: String
@@ -422,6 +462,11 @@ type UpdateProductPayload {
 # Generated Enums
 #######################
 
+enum AstronautGroupableField {
+	name
+	age
+}
+
 enum AstronautHasFilter {
 	name
 	age
@@ -447,6 +492,19 @@ enum CascadeAuthVariableContext {
 	adaptive
 }
 
+enum DateTimeGranularity {
+	year
+	month
+	day
+	hour
+}
+
+enum MissionGroupableField {
+	designation
+	startDate
+	endDate
+}
+
 enum MissionHasFilter {
 	crew
 	designation
@@ -458,6 +516,12 @@ enum MissionOrderable {
 	designation
 	startDate
 	endDate
+}
+
+enum ProductGroupableField {
+	upc
+	inStock
+	shippingEstimate
 }
 
 enum ProductHasFilter {
@@ -503,6 +567,12 @@ input AstronautFilter {
 	not: AstronautFilter
 }
 
+input AstronautGroupBySpec {
+	field: AstronautGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input AstronautOrder {
 	asc: AstronautOrderable
 	desc: AstronautOrderable
@@ -541,6 +611,12 @@ input MissionFilter {
 	not: MissionFilter
 }
 
+input MissionGroupBySpec {
+	field: MissionGroupableField!
+	by: DateTimeGranularity
+	tz: String
+}
+
 input MissionOrder {
 	asc: MissionOrderable
 	desc: MissionOrderable
@@ -568,6 +644,12 @@ input ProductFilter {
 	and: [ProductFilter]
 	or: [ProductFilter]
 	not: ProductFilter
+}
+
+input ProductGroupBySpec {
+	field: ProductGroupableField!
+	by: DateTimeGranularity
+	tz: String
 }
 
 input ProductOrder {
@@ -614,6 +696,7 @@ type Query {
 	getMission(id: ID!): Mission
 	queryMission(filter: MissionFilter, order: MissionOrder, first: Int, offset: Int): [Mission]
 	aggregateMission(filter: MissionFilter): MissionAggregateResult
+	groupByMission(filter: MissionFilter, groupBy: [MissionGroupBySpec!]!): [MissionGroupByResult]
 }
 
 #######################

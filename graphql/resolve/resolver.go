@@ -228,6 +228,7 @@ func (rf *resolverFactory) WithConventionResolvers(
 	queries = append(queries, s.Queries(schema.SimilarByEmbeddingQuery)...)
 	queries = append(queries, s.Queries(schema.PasswordQuery)...)
 	queries = append(queries, s.Queries(schema.AggregateQuery)...)
+	queries = append(queries, s.Queries(schema.GroupByQuery)...)
 	for _, q := range queries {
 		rf.WithQueryResolver(q, func(q schema.Query) QueryResolver {
 			return NewQueryResolver(fns.Qrw, fns.Ex)
