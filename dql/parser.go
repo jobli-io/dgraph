@@ -103,6 +103,18 @@ type GroupByAttr struct {
 	Attr  string
 	Alias string
 	Langs []string
+	// NestedPath, when non-empty, holds the intermediate DQL predicates to traverse in a
+	// var() block before the leaf value is extracted. The leaf predicate itself is in Attr.
+	// e.g. for groupBy: [{field: {hasStatus: {stage: {name: true}}}}]:
+	//   NestedPath = ["Application.hasStatus", "ApplicationStatus.stage"]
+	//   Attr       = "ApplicationStage.name"
+	//   VarName    = "__gby_0"
+	// Empty NestedPath means a direct-field @groupby (existing behaviour).
+	NestedPath []string
+	// VarName is the DQL value-variable alias used to pull the nested leaf value up to the
+	// root level: "VarName as Attr" inside the var() block, then @groupby(val(VarName)).
+	// Only set when NestedPath is non-empty.
+	VarName string
 	// TokenizerName, if non-empty, is the name of a DateTime tokenizer ("year", "month",
 	// "day", "hour") to apply when bucketing DateTime values. The raw stored timestamp is
 	// floored to the requested granularity before being used as the group key.

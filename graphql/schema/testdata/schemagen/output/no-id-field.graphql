@@ -241,6 +241,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -382,7 +383,7 @@ type AuthorAggregateResult {
 }
 
 type AuthorGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -413,7 +414,7 @@ type GenreAggregateResult {
 }
 
 type GenreGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -426,7 +427,7 @@ type PostAggregateResult {
 }
 
 type PostGroupByResult {
-	content: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	contentMin: String
 	contentMax: String
@@ -451,10 +452,6 @@ type UpdatePostPayload {
 # Generated Enums
 #######################
 
-enum AuthorGroupableField {
-	name
-}
-
 enum AuthorHasFilter {
 	name
 	posts
@@ -464,20 +461,12 @@ enum AuthorOrderable {
 	name
 }
 
-enum GenreGroupableField {
-	name
-}
-
 enum GenreHasFilter {
 	name
 }
 
 enum GenreOrderable {
 	name
-}
-
-enum PostGroupableField {
-	content
 }
 
 enum PostHasFilter {
@@ -517,8 +506,12 @@ input AuthorFilter {
 	not: AuthorFilter
 }
 
+input AuthorGroupByField {
+	name: Boolean
+}
+
 input AuthorGroupBySpec {
-	field: AuthorGroupableField!
+	field: AuthorGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -547,8 +540,12 @@ input GenreFilter {
 	not: GenreFilter
 }
 
+input GenreGroupByField {
+	name: Boolean
+}
+
 input GenreGroupBySpec {
-	field: GenreGroupableField!
+	field: GenreGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -574,8 +571,14 @@ input PostFilter {
 	not: PostFilter
 }
 
+input PostGroupByField {
+	content: Boolean
+	author: AuthorGroupByField
+	genre: GenreGroupByField
+}
+
 input PostGroupBySpec {
-	field: PostGroupableField!
+	field: PostGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

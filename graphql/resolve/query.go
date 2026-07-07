@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -149,7 +150,11 @@ func (qr *queryResolver) rewriteAndExecute(ctx context.Context, query schema.Que
 	// For groupBy queries, transform the raw DQL @groupby response envelope into the
 	// flat list shape that GraphQL clients expect for XxxGroupByResult.
 	if query.QueryType() == schema.GroupByQuery && resolved.Data != nil && err == nil {
-		if transformed, transformErr := completeGroupByResult(query.ResponseName(), resolved.Data); transformErr == nil {
+		// Build pathMap: for each nested spec (field is an object, not a string),
+		// record spec-index → dot-separated GraphQL path so that completeGroupByResult
+		// can label val(__gby_N) keys in the DQL response.
+		pathMap := buildGroupByPathMap(query)
+		if transformed, transformErr := completeGroupByResult(query.ResponseName(), resolved.Data, pathMap); transformErr == nil {
 			resolved.Data = transformed
 		}
 	}
@@ -272,23 +277,65 @@ func convertScalarToString(val interface{}) (string, error) {
 	return str, nil
 }
 
+// buildGroupByPathMap re-reads the groupBy argument from a GroupByQuery and returns
+// a map of spec-index → dot-separated GraphQL field path for nested specs.
+// Direct-field specs (where the field value walks to a boolean in one step) have a
+// path of length 1 and are NOT stored in the map (they appear with a type-prefixed
+// key in the @groupby DQL response and are handled by the existing type-prefix strip).
+func buildGroupByPathMap(query schema.Query) map[int]string {
+	pathMap := make(map[int]string)
+	groupByArg, _ := query.ArgValue("groupBy").([]interface{})
+	for i, spec := range groupByArg {
+		specMap, _ := spec.(map[string]interface{})
+		fieldObj, _ := specMap["field"].(map[string]interface{})
+		path := walkGroupByFieldPath(fieldObj)
+		if len(path) > 1 {
+			// Only nested specs land in pathMap; direct specs are len == 1.
+			pathMap[i] = strings.Join(path, ".")
+		}
+	}
+	return pathMap
+}
+
+// walkGroupByFieldPath recursively walks the XxxGroupByField object value and returns
+// the list of field-name segments from root to leaf.
+func walkGroupByFieldPath(obj map[string]interface{}) []string {
+	if len(obj) == 0 {
+		return nil
+	}
+	for k, v := range obj {
+		switch val := v.(type) {
+		case bool:
+			return []string{k}
+		case map[string]interface{}:
+			return append([]string{k}, walkGroupByFieldPath(val)...)
+		}
+	}
+	return nil
+}
+
 // completeGroupByResult transforms the raw DQL @groupby response into the flat list
 // shape that GraphQL clients expect for XxxGroupByResult queries.
 //
-// DQL emits:
+// DQL emits (direct field, before this change):
 //
 //	{ "groupByNote": [ { "@groupby": [ {"Note.status":"ACTIVE","count":1,"titleMin":"X"} ] } ] }
 //
-// GraphQL expects:
+// DQL emits (nested field via val variable):
 //
-//	{ "groupByNote": [ {"status":"ACTIVE","count":1,"titleMin":"X"} ] }
+//	{ "groupByApplication": [ { "@groupby": [ {"val(__gby_1)":"Screened","count":5,"ratingAvg":3.8} ] } ] }
 //
-// The transformation performs two steps:
-//  1. Unwrap the outer [{"@groupby":[...]}] array+object envelope → flat [...]
-//  2. Strip the "TypeName." prefix from predicate-keyed group fields
-//     (e.g. "Note.status" → "status", "Note.createdAt" → "createdAt").
-//     Aggregate alias fields (count, titleMin, prioritySum …) have no dot and pass through.
-func completeGroupByResult(queryName string, rawData []byte) ([]byte, error) {
+// GraphQL output (both cases):
+//
+//	{ "groupByXxx": [ {"groupKeys":[{"path":"...","value":"..."}], "count":N, "ratingAvg":3.8} ] }
+//
+// The transformation:
+//  1. Unwraps the outer [{ "@groupby": [...] }] envelope → flat [...].
+//  2. For each key in a group row:
+//     - "TypeName.fieldName" → strip type prefix, add to groupKeys as {path: fieldName, value: v}
+//     - "val(__gby_N)" → look up pathMap[N], add to groupKeys as {path: dotPath, value: v}
+//     - Anything else (count, ratingAvg, …) → pass through as a top-level field.
+func completeGroupByResult(queryName string, rawData []byte, pathMap map[int]string) ([]byte, error) {
 	// Unmarshal the top-level map, preserving numeric types as json.RawMessage.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(rawData, &top); err != nil {
@@ -325,16 +372,53 @@ func completeGroupByResult(queryName string, rawData []byte) ([]byte, error) {
 		return rawData, err
 	}
 
-	// For each group result, strip the "TypeName." prefix from predicate-keyed fields.
-	// Aggregate alias fields (count, titleMin, …) have no dot and pass through unchanged.
+	// For each group row, build the output object:
+	//   - Collect all group-key fields into a groupKeys JSON array.
+	//   - Pass aggregate fields (count, ratingAvg, …) through unchanged.
 	result := make([]map[string]json.RawMessage, 0, len(groups))
 	for _, grp := range groups {
+		var groupKeyEntries []map[string]json.RawMessage
 		transformed := make(map[string]json.RawMessage, len(grp))
+
 		for k, v := range grp {
 			if idx := strings.LastIndexByte(k, '.'); idx >= 0 {
-				k = k[idx+1:]
+				// "TypeName.fieldName" → direct-field group key.
+				fieldName := k[idx+1:]
+				// Serialise the value as a string for groupKeys.
+				valStr, _ := json.Marshal(strings.Trim(string(v), "\""))
+				groupKeyEntries = append(groupKeyEntries, map[string]json.RawMessage{
+					"path":  json.RawMessage(`"` + fieldName + `"`),
+					"value": valStr,
+				})
+				continue
 			}
+			if strings.HasPrefix(k, "val(") && strings.HasSuffix(k, ")") {
+				// "val(__gby_N)" → nested-field group key.
+				// Extract N from "val(__gby_N)".
+				inner := k[4 : len(k)-1] // "__gby_N"
+				var specIdx int
+				fmt.Sscanf(inner, "__gby_%d", &specIdx)
+				dotPath, ok := pathMap[specIdx]
+				if !ok {
+					dotPath = inner // fallback: use the var name
+				}
+				valStr, _ := json.Marshal(strings.Trim(string(v), "\""))
+				groupKeyEntries = append(groupKeyEntries, map[string]json.RawMessage{
+					"path":  json.RawMessage(`"` + dotPath + `"`),
+					"value": valStr,
+				})
+				continue
+			}
+			// Pass-through: count, ratingAvg, createdAtMin, etc.
 			transformed[k] = v
+		}
+
+		if len(groupKeyEntries) > 0 {
+			gkJSON, err := json.Marshal(groupKeyEntries)
+			if err != nil {
+				return rawData, err
+			}
+			transformed["groupKeys"] = gkJSON
 		}
 		result = append(result, transformed)
 	}

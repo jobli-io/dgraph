@@ -330,6 +330,11 @@ type DeleteProductPayload {
 	numUids: Int
 }
 
+type GroupByKeyValue {
+	path: String!
+	value: String
+}
+
 type ProductAggregateResult {
 	count: Int
 	idMin: String
@@ -339,8 +344,7 @@ type ProductAggregateResult {
 }
 
 type ProductGroupByResult {
-	id: String
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	idMin: String
 	idMax: String
@@ -375,11 +379,6 @@ enum DateTimeGranularity {
 	month
 	day
 	hour
-}
-
-enum ProductGroupableField {
-	id
-	name
 }
 
 enum ProductHasFilter {
@@ -420,8 +419,13 @@ input ProductFilter {
 	not: ProductFilter
 }
 
+input ProductGroupByField {
+	id: Boolean
+	name: Boolean
+}
+
 input ProductGroupBySpec {
-	field: ProductGroupableField!
+	field: ProductGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

@@ -243,6 +243,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -393,8 +394,7 @@ type TweetsAggregateResult {
 }
 
 type TweetsGroupByResult {
-	text: String
-	timestamp: DateTime
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	textMin: String
 	textMax: String
@@ -423,8 +423,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	screenName: String
-	followers: Int
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	screenNameMin: String
 	screenNameMax: String
@@ -438,11 +437,6 @@ type UserGroupByResult {
 # Generated Enums
 #######################
 
-enum TweetsGroupableField {
-	text
-	timestamp
-}
-
 enum TweetsHasFilter {
 	text
 	author
@@ -452,11 +446,6 @@ enum TweetsHasFilter {
 enum TweetsOrderable {
 	text
 	timestamp
-}
-
-enum UserGroupableField {
-	screenName
-	followers
 }
 
 enum UserHasFilter {
@@ -496,8 +485,14 @@ input TweetsFilter {
 	not: TweetsFilter
 }
 
+input TweetsGroupByField {
+	text: Boolean
+	author: UserGroupByField
+	timestamp: Boolean
+}
+
 input TweetsGroupBySpec {
-	field: TweetsGroupableField!
+	field: TweetsGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -542,8 +537,13 @@ input UserFilter {
 	not: UserFilter
 }
 
+input UserGroupByField {
+	screenName: Boolean
+	followers: Boolean
+}
+
 input UserGroupBySpec {
-	field: UserGroupableField!
+	field: UserGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

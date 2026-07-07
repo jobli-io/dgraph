@@ -245,6 +245,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -383,8 +384,7 @@ type BusinessManAggregateResult {
 }
 
 type BusinessManGroupByResult {
-	name: String
-	companyName: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -417,7 +417,7 @@ type ObjectAggregateResult {
 }
 
 type ObjectGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -430,7 +430,7 @@ type PersonAggregateResult {
 }
 
 type PersonGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -455,11 +455,6 @@ type UpdatePersonPayload {
 # Generated Enums
 #######################
 
-enum BusinessManGroupableField {
-	name
-	companyName
-}
-
 enum BusinessManHasFilter {
 	name
 	owns
@@ -471,20 +466,12 @@ enum BusinessManOrderable {
 	companyName
 }
 
-enum ObjectGroupableField {
-	name
-}
-
 enum ObjectHasFilter {
 	name
 	ownedBy
 }
 
 enum ObjectOrderable {
-	name
-}
-
-enum PersonGroupableField {
 	name
 }
 
@@ -523,8 +510,13 @@ input BusinessManFilter {
 	not: BusinessManFilter
 }
 
+input BusinessManGroupByField {
+	name: Boolean
+	companyName: Boolean
+}
+
 input BusinessManGroupBySpec {
-	field: BusinessManGroupableField!
+	field: BusinessManGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -554,8 +546,12 @@ input ObjectFilter {
 	not: ObjectFilter
 }
 
+input ObjectGroupByField {
+	name: Boolean
+}
+
 input ObjectGroupBySpec {
-	field: ObjectGroupableField!
+	field: ObjectGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -586,8 +582,12 @@ input PersonFilter {
 	not: PersonFilter
 }
 
+input PersonGroupByField {
+	name: Boolean
+}
+
 input PersonGroupBySpec {
-	field: PersonGroupableField!
+	field: PersonGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

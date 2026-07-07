@@ -336,7 +336,7 @@ type CarAggregateResult {
 }
 
 type CarGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -348,6 +348,11 @@ type DeleteCarPayload {
 	numUids: Int
 }
 
+type GroupByKeyValue {
+	path: String!
+	value: String
+}
+
 type UpdateCarPayload {
 	car(filter: CarFilter, order: CarOrder, first: Int, offset: Int): [Car]
 	numUids: Int
@@ -356,10 +361,6 @@ type UpdateCarPayload {
 #######################
 # Generated Enums
 #######################
-
-enum CarGroupableField {
-	name
-}
 
 enum CarHasFilter {
 	name
@@ -410,8 +411,12 @@ input CarFilter {
 	not: CarFilter
 }
 
+input CarGroupByField {
+	name: Boolean
+}
+
 input CarGroupBySpec {
-	field: CarGroupableField!
+	field: CarGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

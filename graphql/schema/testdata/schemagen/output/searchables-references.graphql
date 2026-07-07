@@ -239,6 +239,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -377,8 +378,7 @@ type AuthorAggregateResult {
 }
 
 type AuthorGroupByResult {
-	name: String
-	dob: DateTime
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -409,9 +409,7 @@ type PostAggregateResult {
 }
 
 type PostGroupByResult {
-	title: String
-	text: String
-	datePublished: DateTime
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	titleMin: String
 	titleMax: String
@@ -435,11 +433,6 @@ type UpdatePostPayload {
 # Generated Enums
 #######################
 
-enum AuthorGroupableField {
-	name
-	dob
-}
-
 enum AuthorHasFilter {
 	name
 	dob
@@ -449,12 +442,6 @@ enum AuthorHasFilter {
 enum AuthorOrderable {
 	name
 	dob
-}
-
-enum PostGroupableField {
-	title
-	text
-	datePublished
 }
 
 enum PostHasFilter {
@@ -494,8 +481,13 @@ input AuthorFilter {
 	not: AuthorFilter
 }
 
+input AuthorGroupByField {
+	name: Boolean
+	dob: Boolean
+}
+
 input AuthorGroupBySpec {
-	field: AuthorGroupableField!
+	field: AuthorGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -529,8 +521,14 @@ input PostFilter {
 	not: PostFilter
 }
 
+input PostGroupByField {
+	title: Boolean
+	text: Boolean
+	datePublished: Boolean
+}
+
 input PostGroupBySpec {
-	field: PostGroupableField!
+	field: PostGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

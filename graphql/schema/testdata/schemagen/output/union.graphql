@@ -278,6 +278,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -424,7 +425,7 @@ type CharacterAggregateResult {
 }
 
 type CharacterGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -469,8 +470,7 @@ type DroidAggregateResult {
 }
 
 type DroidGroupByResult {
-	name: String
-	primaryFunction: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -489,8 +489,7 @@ type HumanAggregateResult {
 }
 
 type HumanGroupByResult {
-	name: String
-	totalCredits: Int
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -507,7 +506,7 @@ type PlanetAggregateResult {
 }
 
 type PlanetGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -524,8 +523,7 @@ type StarshipAggregateResult {
 }
 
 type StarshipGroupByResult {
-	name: String
-	length: Float
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -564,10 +562,6 @@ type UpdateStarshipPayload {
 # Generated Enums
 #######################
 
-enum CharacterGroupableField {
-	name
-}
-
 enum CharacterHasFilter {
 	name
 	friends
@@ -584,11 +578,6 @@ enum CharacterTypename {
 	Human
 }
 
-enum DroidGroupableField {
-	name
-	primaryFunction
-}
-
 enum DroidHasFilter {
 	name
 	friends
@@ -600,11 +589,6 @@ enum DroidHasFilter {
 enum DroidOrderable {
 	name
 	primaryFunction
-}
-
-enum HumanGroupableField {
-	name
-	totalCredits
 }
 
 enum HumanHasFilter {
@@ -621,10 +605,6 @@ enum HumanOrderable {
 	totalCredits
 }
 
-enum PlanetGroupableField {
-	name
-}
-
 enum PlanetHasFilter {
 	name
 	residents
@@ -638,11 +618,6 @@ enum ResidentType {
 	Human
 	Droid
 	Starship
-}
-
-enum StarshipGroupableField {
-	name
-	length
 }
 
 enum StarshipHasFilter {
@@ -697,8 +672,12 @@ input CharacterFilter {
 	not: CharacterFilter
 }
 
+input CharacterGroupByField {
+	name: Boolean
+}
+
 input CharacterGroupBySpec {
-	field: CharacterGroupableField!
+	field: CharacterGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -730,8 +709,13 @@ input DroidFilter {
 	not: DroidFilter
 }
 
+input DroidGroupByField {
+	name: Boolean
+	primaryFunction: Boolean
+}
+
 input DroidGroupBySpec {
-	field: DroidGroupableField!
+	field: DroidGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -774,8 +758,13 @@ input HumanFilter {
 	not: HumanFilter
 }
 
+input HumanGroupByField {
+	name: Boolean
+	totalCredits: Boolean
+}
+
 input HumanGroupBySpec {
-	field: HumanGroupableField!
+	field: HumanGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -813,8 +802,12 @@ input PlanetFilter {
 	not: PlanetFilter
 }
 
+input PlanetGroupByField {
+	name: Boolean
+}
+
 input PlanetGroupBySpec {
-	field: PlanetGroupableField!
+	field: PlanetGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -858,8 +851,13 @@ input StarshipFilter {
 	not: StarshipFilter
 }
 
+input StarshipGroupByField {
+	name: Boolean
+	length: Boolean
+}
+
 input StarshipGroupBySpec {
-	field: StarshipGroupableField!
+	field: StarshipGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

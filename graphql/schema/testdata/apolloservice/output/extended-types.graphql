@@ -366,8 +366,7 @@ type AstronautAggregateResult {
 }
 
 type AstronautGroupByResult {
-	name: String
-	age: Int
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	idMin: ID
 	idMax: ID
@@ -397,6 +396,11 @@ type DeleteProductPayload {
 	numUids: Int
 }
 
+type GroupByKeyValue {
+	path: String!
+	value: String
+}
+
 type MissionAggregateResult {
 	count: Int
 	designationMin: String
@@ -408,9 +412,7 @@ type MissionAggregateResult {
 }
 
 type MissionGroupByResult {
-	designation: String
-	startDate: String
-	endDate: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	designationMin: String
 	designationMax: String
@@ -431,9 +433,7 @@ type ProductAggregateResult {
 }
 
 type ProductGroupByResult {
-	upc: String
-	inStock: Boolean
-	shippingEstimate: Float
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	upcMin: String
 	upcMax: String
@@ -461,11 +461,6 @@ type UpdateProductPayload {
 #######################
 # Generated Enums
 #######################
-
-enum AstronautGroupableField {
-	name
-	age
-}
 
 enum AstronautHasFilter {
 	name
@@ -499,12 +494,6 @@ enum DateTimeGranularity {
 	hour
 }
 
-enum MissionGroupableField {
-	designation
-	startDate
-	endDate
-}
-
 enum MissionHasFilter {
 	crew
 	designation
@@ -516,12 +505,6 @@ enum MissionOrderable {
 	designation
 	startDate
 	endDate
-}
-
-enum ProductGroupableField {
-	upc
-	inStock
-	shippingEstimate
 }
 
 enum ProductHasFilter {
@@ -567,8 +550,13 @@ input AstronautFilter {
 	not: AstronautFilter
 }
 
+input AstronautGroupByField {
+	name: Boolean
+	age: Boolean
+}
+
 input AstronautGroupBySpec {
-	field: AstronautGroupableField!
+	field: AstronautGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -611,8 +599,14 @@ input MissionFilter {
 	not: MissionFilter
 }
 
+input MissionGroupByField {
+	designation: Boolean
+	startDate: Boolean
+	endDate: Boolean
+}
+
 input MissionGroupBySpec {
-	field: MissionGroupableField!
+	field: MissionGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -646,8 +640,14 @@ input ProductFilter {
 	not: ProductFilter
 }
 
+input ProductGroupByField {
+	upc: Boolean
+	inStock: Boolean
+	shippingEstimate: Boolean
+}
+
 input ProductGroupBySpec {
-	field: ProductGroupableField!
+	field: ProductGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

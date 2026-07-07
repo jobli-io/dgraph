@@ -256,6 +256,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -399,9 +400,7 @@ type AnswerAggregateResult {
 }
 
 type AnswerGroupByResult {
-	text: String
-	datePublished: DateTime
-	markedUseful: Boolean
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	textMin: String
 	textMax: String
@@ -416,7 +415,7 @@ type AuthorAggregateResult {
 }
 
 type AuthorGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -455,8 +454,7 @@ type PostAggregateResult {
 }
 
 type PostGroupByResult {
-	text: String
-	datePublished: DateTime
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	textMin: String
 	textMax: String
@@ -473,9 +471,7 @@ type QuestionAggregateResult {
 }
 
 type QuestionGroupByResult {
-	text: String
-	datePublished: DateTime
-	answered: Boolean
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	textMin: String
 	textMax: String
@@ -507,12 +503,6 @@ type UpdateQuestionPayload {
 # Generated Enums
 #######################
 
-enum AnswerGroupableField {
-	text
-	datePublished
-	markedUseful
-}
-
 enum AnswerHasFilter {
 	text
 	datePublished
@@ -525,10 +515,6 @@ enum AnswerOrderable {
 	datePublished
 }
 
-enum AuthorGroupableField {
-	name
-}
-
 enum AuthorHasFilter {
 	name
 	questions
@@ -537,11 +523,6 @@ enum AuthorHasFilter {
 
 enum AuthorOrderable {
 	name
-}
-
-enum PostGroupableField {
-	text
-	datePublished
 }
 
 enum PostHasFilter {
@@ -558,12 +539,6 @@ enum PostOrderable {
 enum PostTypename {
 	Answer
 	Question
-}
-
-enum QuestionGroupableField {
-	text
-	datePublished
-	answered
 }
 
 enum QuestionHasFilter {
@@ -612,8 +587,15 @@ input AnswerFilter {
 	not: AnswerFilter
 }
 
+input AnswerGroupByField {
+	text: Boolean
+	datePublished: Boolean
+	author: AuthorGroupByField
+	markedUseful: Boolean
+}
+
 input AnswerGroupBySpec {
-	field: AnswerGroupableField!
+	field: AnswerGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -648,8 +630,12 @@ input AuthorFilter {
 	not: AuthorFilter
 }
 
+input AuthorGroupByField {
+	name: Boolean
+}
+
 input AuthorGroupBySpec {
-	field: AuthorGroupableField!
+	field: AuthorGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -684,8 +670,14 @@ input PostFilter {
 	not: PostFilter
 }
 
+input PostGroupByField {
+	text: Boolean
+	datePublished: Boolean
+	author: AuthorGroupByField
+}
+
 input PostGroupBySpec {
-	field: PostGroupableField!
+	field: PostGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -716,8 +708,15 @@ input QuestionFilter {
 	not: QuestionFilter
 }
 
+input QuestionGroupByField {
+	text: Boolean
+	datePublished: Boolean
+	author: AuthorGroupByField
+	answered: Boolean
+}
+
 input QuestionGroupBySpec {
-	field: QuestionGroupableField!
+	field: QuestionGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

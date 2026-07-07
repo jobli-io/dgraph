@@ -259,6 +259,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -424,26 +425,7 @@ type PostAggregateResult {
 }
 
 type PostGroupByResult {
-	title: String
-	titleByEverything: String
-	text: String
-	publishByYear: DateTime
-	publishByMonth: DateTime
-	publishByDay: DateTime
-	publishByHour: DateTime
-	publishTimestamp: Int64
-	numViewers: Int64
-	numLikes: Int
-	score: Float
-	isPublished: Boolean
-	postType: PostType
-	postTypeNonNull: PostType
-	postTypeTrigram: PostType
-	postTypeRegexp: PostType
-	postTypeHash: PostType
-	postTypeRegexpExact: PostType
-	postTypeHashRegexp: PostType
-	postTypeNone: PostType
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	titleMin: String
 	titleMax: String
@@ -485,29 +467,6 @@ type UpdatePostPayload {
 #######################
 # Generated Enums
 #######################
-
-enum PostGroupableField {
-	title
-	titleByEverything
-	text
-	publishByYear
-	publishByMonth
-	publishByDay
-	publishByHour
-	publishTimestamp
-	numViewers
-	numLikes
-	score
-	isPublished
-	postType
-	postTypeNonNull
-	postTypeTrigram
-	postTypeRegexp
-	postTypeHash
-	postTypeRegexpExact
-	postTypeHashRegexp
-	postTypeNone
-}
 
 enum PostHasFilter {
 	title
@@ -616,8 +575,31 @@ input PostFilter {
 	not: PostFilter
 }
 
+input PostGroupByField {
+	title: Boolean
+	titleByEverything: Boolean
+	text: Boolean
+	publishByYear: Boolean
+	publishByMonth: Boolean
+	publishByDay: Boolean
+	publishByHour: Boolean
+	publishTimestamp: Boolean
+	numViewers: Boolean
+	numLikes: Boolean
+	score: Boolean
+	isPublished: Boolean
+	postType: Boolean
+	postTypeNonNull: Boolean
+	postTypeTrigram: Boolean
+	postTypeRegexp: Boolean
+	postTypeHash: Boolean
+	postTypeRegexpExact: Boolean
+	postTypeHashRegexp: Boolean
+	postTypeNone: Boolean
+}
+
 input PostGroupBySpec {
-	field: PostGroupableField!
+	field: PostGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

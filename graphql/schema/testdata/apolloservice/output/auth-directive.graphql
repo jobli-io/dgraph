@@ -354,6 +354,11 @@ type DeleteUserPayload {
 	numUids: Int
 }
 
+type GroupByKeyValue {
+	path: String!
+	value: String
+}
+
 type TodoAggregateResult {
 	count: Int
 	titleMin: String
@@ -367,11 +372,7 @@ type TodoAggregateResult {
 }
 
 type TodoGroupByResult {
-	title: String
-	text: String
-	isPublic: Boolean
-	dateCompleted: String
-	somethingPrivate: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	titleMin: String
 	titleMax: String
@@ -400,7 +401,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	username: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	usernameMin: String
 	usernameMax: String
@@ -430,14 +431,6 @@ enum DateTimeGranularity {
 	hour
 }
 
-enum TodoGroupableField {
-	title
-	text
-	isPublic
-	dateCompleted
-	somethingPrivate
-}
-
 enum TodoHasFilter {
 	title
 	text
@@ -453,10 +446,6 @@ enum TodoOrderable {
 	text
 	dateCompleted
 	somethingPrivate
-}
-
-enum UserGroupableField {
-	username
 }
 
 enum UserHasFilter {
@@ -509,8 +498,17 @@ input TodoFilter {
 	not: TodoFilter
 }
 
+input TodoGroupByField {
+	title: Boolean
+	text: Boolean
+	isPublic: Boolean
+	dateCompleted: Boolean
+	owner: UserGroupByField
+	somethingPrivate: Boolean
+}
+
 input TodoGroupBySpec {
-	field: TodoGroupableField!
+	field: TodoGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -564,8 +562,12 @@ input UserFilter {
 	not: UserFilter
 }
 
+input UserGroupByField {
+	username: Boolean
+}
+
 input UserGroupBySpec {
-	field: UserGroupableField!
+	field: UserGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

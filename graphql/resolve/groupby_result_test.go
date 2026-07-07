@@ -33,7 +33,8 @@ func TestCompleteGroupByResult(t *testing.T) {
 					}
 				]
 			}`,
-			wantJSON: `{"groupByJobAd":[{"count":5,"status":"OPEN"},{"count":3,"status":"DRAFT"}]}`,
+			// Direct group-by fields are now emitted as groupKeys entries.
+			wantJSON: `{"groupByJobAd":[{"count":5,"groupKeys":[{"path":"status","value":"OPEN"}]},{"count":3,"groupKeys":[{"path":"status","value":"DRAFT"}]}]}`,
 		},
 		{
 			name:      "strips multi-segment prefix (e.g. Recordable.createdAt)",
@@ -47,7 +48,7 @@ func TestCompleteGroupByResult(t *testing.T) {
 					}
 				]
 			}`,
-			wantJSON: `{"groupByJobAd":[{"count":20,"createdAt":"2026-07-06T10:00:00Z"}]}`,
+			wantJSON: `{"groupByJobAd":[{"count":20,"groupKeys":[{"path":"createdAt","value":"2026-07-06T10:00:00Z"}]}]}`,
 		},
 		{
 			name:      "aggregate alias fields without dots pass through unchanged",
@@ -61,7 +62,23 @@ func TestCompleteGroupByResult(t *testing.T) {
 					}
 				]
 			}`,
-			wantJSON: `{"groupByNote":[{"count":7,"scoreAvg":42.5,"scoreMax":100,"tag":"bug"}]}`,
+			// "Note.tag" becomes a groupKeys entry; aggregates pass through.
+			wantJSON: `{"groupByNote":[{"count":7,"groupKeys":[{"path":"tag","value":"bug"}],"scoreAvg":42.5,"scoreMax":100}]}`,
+		},
+		{
+			name:      "nested val(__gby_N) key resolved via pathMap",
+			queryName: "groupByApplication",
+			raw: `{
+				"groupByApplication": [
+					{
+						"@groupby": [
+							{"val(__gby_0)": "Screened", "count": 5}
+						]
+					}
+				]
+			}`,
+			// pathMap[0] = "hasStatus.name"
+			wantJSON: `{"groupByApplication":[{"count":5,"groupKeys":[{"path":"hasStatus.name","value":"Screened"}]}]}`,
 		},
 		{
 			name:      "empty outer list returns empty array",
@@ -101,7 +118,14 @@ func TestCompleteGroupByResult(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := completeGroupByResult(tc.queryName, []byte(tc.raw))
+			// Build a pathMap for the val(__gby_N) test case.
+			var pathMap map[int]string
+			if tc.queryName == "groupByApplication" {
+				pathMap = map[int]string{0: "hasStatus.name"}
+			}
+
+			out, err := completeGroupByResult(tc.queryName, []byte(tc.raw), pathMap)
+
 			if tc.wantErr {
 				require.Error(t, err)
 				return

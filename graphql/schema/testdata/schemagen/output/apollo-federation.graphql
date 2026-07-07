@@ -264,6 +264,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -440,8 +441,7 @@ type CountryAggregateResult {
 }
 
 type CountryGroupByResult {
-	code: String
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	codeMin: String
 	codeMax: String
@@ -498,7 +498,7 @@ type ReviewsAggregateResult {
 }
 
 type ReviewsGroupByResult {
-	review: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	reviewMin: String
 	reviewMax: String
@@ -519,8 +519,7 @@ type StudentAggregateResult {
 }
 
 type StudentGroupByResult {
-	name: String
-	age: Int
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -571,8 +570,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	name: String
-	age: Int
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -585,11 +583,6 @@ type UserGroupByResult {
 #######################
 # Generated Enums
 #######################
-
-enum CountryGroupableField {
-	code
-	name
-}
 
 enum CountryHasFilter {
 	code
@@ -609,10 +602,6 @@ enum ProductOrderable {
 	id
 }
 
-enum ReviewsGroupableField {
-	review
-}
-
 enum ReviewsHasFilter {
 	review
 	user
@@ -626,22 +615,12 @@ enum SchoolHasFilter {
 	students
 }
 
-enum StudentGroupableField {
-	name
-	age
-}
-
 enum StudentHasFilter {
 	name
 	age
 }
 
 enum StudentOrderable {
-	name
-	age
-}
-
-enum UserGroupableField {
 	name
 	age
 }
@@ -699,8 +678,13 @@ input CountryFilter {
 	not: CountryFilter
 }
 
+input CountryGroupByField {
+	code: Boolean
+	name: Boolean
+}
+
 input CountryGroupBySpec {
-	field: CountryGroupableField!
+	field: CountryGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -752,8 +736,13 @@ input ReviewsFilter {
 	not: ReviewsFilter
 }
 
+input ReviewsGroupByField {
+	review: Boolean
+	user: UserGroupByField
+}
+
 input ReviewsGroupBySpec {
-	field: ReviewsGroupableField!
+	field: ReviewsGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -800,8 +789,13 @@ input StudentFilter {
 	not: StudentFilter
 }
 
+input StudentGroupByField {
+	name: Boolean
+	age: Boolean
+}
+
 input StudentGroupBySpec {
-	field: StudentGroupableField!
+	field: StudentGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -867,8 +861,12 @@ input UserFilter {
 	not: UserFilter
 }
 
+input UserGroupByField {
+	name: Boolean
+}
+
 input UserGroupBySpec {
-	field: UserGroupableField!
+	field: UserGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

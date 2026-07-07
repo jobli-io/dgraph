@@ -3218,7 +3218,7 @@ invalid_schemas:
       [
         {
           "message": Type Product; @remote directive cannot be defined with @key directive,
-          "locations": [{ "line": 229, "column": 12 }],
+          "locations": [{ "line": 230, "column": 12 }],
         },
       ]
 

@@ -246,6 +246,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -377,7 +378,7 @@ type CharacterAggregateResult {
 }
 
 type CharacterGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -410,8 +411,7 @@ type EmployeeAggregateResult {
 }
 
 type EmployeeGroupByResult {
-	employeeId: String
-	title: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	employeeIdMin: String
 	employeeIdMax: String
@@ -434,10 +434,7 @@ type HumanAggregateResult {
 }
 
 type HumanGroupByResult {
-	employeeId: String
-	title: String
-	name: String
-	totalCredits: Int
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	employeeIdMin: String
 	employeeIdMax: String
@@ -470,10 +467,6 @@ type UpdateHumanPayload {
 # Generated Enums
 #######################
 
-enum CharacterGroupableField {
-	name
-}
-
 enum CharacterHasFilter {
 	name
 	friends
@@ -485,11 +478,6 @@ enum CharacterOrderable {
 
 enum CharacterTypename {
 	Human
-}
-
-enum EmployeeGroupableField {
-	employeeId
-	title
 }
 
 enum EmployeeHasFilter {
@@ -504,13 +492,6 @@ enum EmployeeOrderable {
 
 enum EmployeeTypename {
 	Human
-}
-
-enum HumanGroupableField {
-	employeeId
-	title
-	name
-	totalCredits
 }
 
 enum HumanHasFilter {
@@ -550,8 +531,12 @@ input CharacterFilter {
 	not: CharacterFilter
 }
 
+input CharacterGroupByField {
+	name: Boolean
+}
+
 input CharacterGroupBySpec {
-	field: CharacterGroupableField!
+	field: CharacterGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -579,8 +564,13 @@ input EmployeeFilter {
 	not: EmployeeFilter
 }
 
+input EmployeeGroupByField {
+	employeeId: Boolean
+	title: Boolean
+}
+
 input EmployeeGroupBySpec {
-	field: EmployeeGroupableField!
+	field: EmployeeGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -605,8 +595,15 @@ input HumanFilter {
 	not: HumanFilter
 }
 
+input HumanGroupByField {
+	employeeId: Boolean
+	title: Boolean
+	name: Boolean
+	totalCredits: Boolean
+}
+
 input HumanGroupBySpec {
-	field: HumanGroupableField!
+	field: HumanGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

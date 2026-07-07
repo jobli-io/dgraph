@@ -228,6 +228,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -365,7 +366,7 @@ type PostAggregateResult {
 }
 
 type PostGroupByResult {
-	content: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	contentMin: String
 	contentMax: String
@@ -379,10 +380,6 @@ type UpdatePostPayload {
 #######################
 # Generated Enums
 #######################
-
-enum PostGroupableField {
-	content
-}
 
 enum PostHasFilter {
 	content
@@ -408,8 +405,12 @@ input PostFilter {
 	not: PostFilter
 }
 
+input PostGroupByField {
+	content: Boolean
+}
+
 input PostGroupBySpec {
-	field: PostGroupableField!
+	field: PostGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

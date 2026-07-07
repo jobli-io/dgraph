@@ -244,6 +244,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -387,7 +388,7 @@ type NodeAggregateResult {
 }
 
 type NodeGroupByResult {
-	f1: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	f1Min: String
 	f1Max: String
@@ -424,19 +425,7 @@ type PersonAggregateResult {
 }
 
 type PersonGroupByResult {
-	f1: String
-	f1Hi: String
-	f2: String
-	f3: String
-	name: String
-	nameHi: String
-	nameEn: String
-	nameHiEn: String
-	nameHi_En_Untag: String
-	name_Untag_AnyLang: String
-	address: String
-	addressHi: String
-	professionEn: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	f1Min: String
 	f1Max: String
@@ -480,10 +469,6 @@ type UpdatePersonPayload {
 # Generated Enums
 #######################
 
-enum NodeGroupableField {
-	f1
-}
-
 enum NodeHasFilter {
 	f1
 }
@@ -494,22 +479,6 @@ enum NodeOrderable {
 
 enum NodeTypename {
 	Person
-}
-
-enum PersonGroupableField {
-	f1
-	f1Hi
-	f2
-	f3
-	name
-	nameHi
-	nameEn
-	nameHiEn
-	nameHi_En_Untag
-	name_Untag_AnyLang
-	address
-	addressHi
-	professionEn
 }
 
 enum PersonHasFilter {
@@ -565,8 +534,12 @@ input NodeFilter {
 	not: NodeFilter
 }
 
+input NodeGroupByField {
+	f1: Boolean
+}
+
 input NodeGroupBySpec {
-	field: NodeGroupableField!
+	field: NodeGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -592,8 +565,24 @@ input PersonFilter {
 	not: PersonFilter
 }
 
+input PersonGroupByField {
+	f1: Boolean
+	f1Hi: Boolean
+	f2: Boolean
+	f3: Boolean
+	name: Boolean
+	nameHi: Boolean
+	nameEn: Boolean
+	nameHiEn: Boolean
+	nameHi_En_Untag: Boolean
+	name_Untag_AnyLang: Boolean
+	address: Boolean
+	addressHi: Boolean
+	professionEn: Boolean
+}
+
 input PersonGroupBySpec {
-	field: PersonGroupableField!
+	field: PersonGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

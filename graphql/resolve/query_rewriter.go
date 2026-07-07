@@ -383,14 +383,114 @@ func aggregateQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery 
 	return result
 }
 
-// groupByQuery rewrites a groupByXxx GraphQL query into a DQL @groupby query.
-// The generated DQL looks like:
+// resolveGroupByPath walks a parsed XxxGroupByField object value to find the selected leaf.
+// At each level exactly one key should be set (multiple are technically allowed by GraphQL
+// but the validator rejects them before execution reaches here).
 //
-//	# auth/filter var blocks (if any) …
-//	groupByNote(func: uid(<root>) OR func: type(Note)) @filter(...) @groupby(Note.status, Note.priority) {
+// Returns:
+//   - pathSegments: GraphQL field-name segments, e.g. ["hasStatus", "stage", "name"]
+//   - dgraphPreds: DQL predicate strings for each segment,
+//     e.g. ["Application.hasStatus", "ApplicationStatus.stage", "ApplicationStage.name"]
+//   - err: non-nil if the path is invalid (unknown field, empty object)
+func resolveGroupByPath(
+	fieldObj map[string]interface{},
+	typeDef schema.Type,
+) (pathSegments []string, dgraphPreds []string, err error) {
+	currentTypeObj := typeDef
+	current := fieldObj
+	for {
+		var chosenKey string
+		var chosenVal interface{}
+		for k, v := range current {
+			chosenKey = k
+			chosenVal = v
+			break // take the first (and only valid) key
+		}
+		if chosenKey == "" {
+			return nil, nil, errors.Errorf("groupBy field object is empty")
+		}
+
+		pathSegments = append(pathSegments, chosenKey)
+		dgPred := currentTypeObj.DgraphPredicate(chosenKey)
+		dgraphPreds = append(dgraphPreds, dgPred)
+
+		// Is the value a boolean? → this is the terminal leaf selector.
+		switch v := chosenVal.(type) {
+		case bool:
+			if !v {
+				return nil, nil, errors.Errorf("groupBy field %q selector must be true", chosenKey)
+			}
+			return pathSegments, dgraphPreds, nil
+		case map[string]interface{}:
+			// Navigate into the next type via FieldDefinition.Type().
+			fldDef := currentTypeObj.Field(chosenKey)
+			if fldDef == nil {
+				return nil, nil, errors.Errorf("groupBy: unknown field %q on type %s",
+					chosenKey, currentTypeObj.Name())
+			}
+			nextType := fldDef.Type()
+			if nextType == nil {
+				return nil, nil, errors.Errorf("groupBy: field %q has no resolvable type", chosenKey)
+			}
+			currentTypeObj = nextType
+			current = v
+		default:
+			return nil, nil, errors.Errorf("groupBy: unexpected value type for field %q", chosenKey)
+		}
+	}
+}
+
+// buildVarBlock builds the DQL var() GraphQuery block that extracts the nested leaf value
+// as a value variable.  The emitted DQL looks like:
+//
+//	var(func: uid(<rootVar>)) {
+//	  Application.hasStatus {
+//	    ApplicationStatus.stage {
+//	      __gby_0 as ApplicationStage.name
+//	    }
+//	  }
+//	}
+func buildVarBlock(rootVar string, nestedPath []string, leafPred string, varName string) *dql.GraphQuery {
+	// Build from the inside out.
+	innermost := &dql.GraphQuery{
+		Var:  varName,
+		Attr: leafPred,
+	}
+
+	current := innermost
+	for i := len(nestedPath) - 1; i >= 0; i-- {
+		wrapper := &dql.GraphQuery{
+			Attr:     nestedPath[i],
+			Children: []*dql.GraphQuery{current},
+		}
+		current = wrapper
+	}
+
+	return &dql.GraphQuery{
+		Attr:     "var",
+		Func:     &dql.Function{Name: "uid", Args: []dql.Arg{{Value: rootVar}}},
+		Children: []*dql.GraphQuery{current},
+	}
+}
+
+// groupByQuery rewrites a groupByXxx GraphQL query into a DQL @groupby query.
+//
+// For direct-field specs the generated DQL is:
+//
+//	groupByNote(func: uid(<root>)) @filter(...) @groupby(Note.status, Note.createdAt@month) {
 //	    count(uid)
 //	    titleMin: min(Note.title)
-//	    prioritySum: sum(Note.priority)
+//	}
+//
+// For nested-field specs (or a mix of direct + nested) value variables are used to pull
+// the leaf value back up to the root level, enabling all aggregates:
+//
+//	var(func: uid(<root>)) {
+//	    Application.hasStatus { __gby_1 as ApplicationStatus.name }
+//	}
+//	groupByApplication(func: uid(<root>)) @filter(...) @groupby(Application.createdAt@month, val(__gby_1)) {
+//	    count(uid)
+//	    ratingAvg: avg(Application.rating)
 //	}
 //
 // Key fields (the fields listed in the groupBy argument) are NOT added as DQL children;
@@ -417,27 +517,63 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 	mainQuery := dgQuery[0]
 	mainQuery.IsGroupby = true
 
-	// Parse the groupBy argument → GroupbyAttrs on the DQL query.
-	// groupedFields tracks which GraphQL field names are group-key fields so we can
-	// skip adding them as DQL children (they appear automatically in @groupby output).
+	// Determine the root variable name used in var() blocks (matches what auth set up).
+	rootVar := mainQuery.Func.Args[0].Value // e.g. "NoteRoot" or "0x1, 0x2, ..."
+
+	// Parse the groupBy argument.
+	// pathMap tracks spec index → dot-separated GraphQL path for nested specs,
+	// so completeGroupByResult can label groupKeys correctly.
 	groupByArg, _ := query.ArgValue("groupBy").([]interface{})
-	groupedFields := make(map[string]bool)
-	for _, spec := range groupByArg {
+	pathMap := make(map[int]string) // spec index → "hasStatus.name" etc.
+	groupedDirectFields := make(map[string]bool)
+
+	// varBlocks accumulates var() queries for nested specs; emitted before mainQuery.
+	var varBlocks []*dql.GraphQuery
+
+	for i, spec := range groupByArg {
 		specMap, _ := spec.(map[string]interface{})
-		fieldName, _ := specMap["field"].(string)
+		fieldObj, _ := specMap["field"].(map[string]interface{})
 		by, _ := specMap["by"].(string)
 		tz, _ := specMap["tz"].(string)
 
-		dgPred := mainType.DgraphPredicate(fieldName)
-		mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
-			Attr:          dgPred,
-			TokenizerName: by,
-			Timezone:      tz,
-		})
-		groupedFields[fieldName] = true
+		pathSegments, dgPreds, err := resolveGroupByPath(fieldObj, mainType)
+		if err != nil {
+			// Validation should have caught this; skip gracefully.
+			continue
+		}
+
+		if len(dgPreds) == 1 {
+			// Direct field — existing behaviour.
+			leafPred := dgPreds[0]
+			mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
+				Attr:          leafPred,
+				TokenizerName: by,
+				Timezone:      tz,
+			})
+			groupedDirectFields[pathSegments[0]] = true
+		} else {
+			// Nested path — emit a var() block and reference via val(__gby_N).
+			varName := fmt.Sprintf("__gby_%d", i)
+			leafPred := dgPreds[len(dgPreds)-1]
+			nestedPath := dgPreds[:len(dgPreds)-1]
+
+			// Build the var() traversal block.
+			varBlocks = append(varBlocks, buildVarBlock(rootVar, nestedPath, leafPred, varName))
+
+			mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
+				Attr:          leafPred,
+				NestedPath:    nestedPath,
+				VarName:       varName,
+				TokenizerName: by,
+				Timezone:      tz,
+			})
+			pathMap[i] = strings.Join(pathSegments, ".")
+		}
 	}
 
 	// Build DQL aggregate-function children from the GraphQL selection set.
+	// All aggregates are valid for both direct and nested specs because @groupby
+	// runs at root level in both cases.
 	isCountAdded := false
 	isAggAdded := make(map[string]bool)
 	for _, f := range query.SelectionSet() {
@@ -445,9 +581,13 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 		if f.Skip() || !f.Include() || fldName == schema.Typename {
 			continue
 		}
-		// Key fields appear in the DQL @groupby response as predicate-keyed objects;
-		// they must not be added as children of the DQL groupby block.
-		if groupedFields[fldName] {
+		// groupKeys is assembled in completeGroupByResult, not via DQL children.
+		if fldName == "groupKeys" {
+			continue
+		}
+		// Direct key fields appear in the DQL @groupby response automatically;
+		// they must not be added as DQL aggregate children.
+		if groupedDirectFields[fldName] {
 			continue
 		}
 		if fldName == "count" {
@@ -467,10 +607,9 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 		for _, fn := range []string{"Max", "Min", "Sum", "Avg"} {
 			if strings.HasSuffix(fldName, fn) {
 				if !isAggAdded[fldName] {
-					baseName := fldName[:len(fldName)-3]
+					baseName := fldName[:len(fldName)-len(fn)]
 					dgPred := mainType.DgraphPredicate(baseName)
 					mainQuery.Children = append(mainQuery.Children, &dql.GraphQuery{
-						// Use alias syntax for other aggregates — also do not use Var.
 						Alias: fldName,
 						Attr:  strings.ToLower(fn) + "(" + dgPred + ")",
 					})
@@ -481,11 +620,14 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 		}
 	}
 
-	// Emit in dependency order: auth/filter var blocks first (they define the root variable
-	// that mainQuery may reference via uid(XRoot)), then the @groupby query itself.
+	// Emit in dependency order:
+	//   1. auth/filter var blocks (define root variable)
+	//   2. nested-spec var() blocks (define __gby_N variables)
+	//   3. main @groupby query
 	authAndFilterQrys := dgQuery[1:]
-	result := make([]*dql.GraphQuery, 0, 1+len(authAndFilterQrys))
+	result := make([]*dql.GraphQuery, 0, len(authAndFilterQrys)+len(varBlocks)+1)
 	result = append(result, authAndFilterQrys...)
+	result = append(result, varBlocks...)
 	result = append(result, mainQuery)
 	return result
 }

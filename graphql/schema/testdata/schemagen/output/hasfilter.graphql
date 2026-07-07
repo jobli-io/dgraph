@@ -237,6 +237,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -373,7 +374,7 @@ type BAggregateResult {
 }
 
 type BGroupByResult {
-	name: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -408,7 +409,7 @@ type TAggregateResult {
 }
 
 type TGroupByResult {
-	text: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	textMin: String
 	textMax: String
@@ -428,10 +429,6 @@ type UpdateTPayload {
 # Generated Enums
 #######################
 
-enum BGroupableField {
-	name
-}
-
 enum BHasFilter {
 	name
 }
@@ -442,10 +439,6 @@ enum BOrderable {
 
 enum ITypename {
 	T
-}
-
-enum TGroupableField {
-	text
 }
 
 enum THasFilter {
@@ -475,8 +468,12 @@ input BFilter {
 	not: BFilter
 }
 
+input BGroupByField {
+	name: Boolean
+}
+
 input BGroupBySpec {
-	field: BGroupableField!
+	field: BGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -515,8 +512,12 @@ input TFilter {
 	not: TFilter
 }
 
+input TGroupByField {
+	text: Boolean
+}
+
 input TGroupBySpec {
-	field: TGroupableField!
+	field: TGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

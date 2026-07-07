@@ -247,6 +247,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -412,10 +413,7 @@ type ProductAggregateResult {
 }
 
 type ProductGroupByResult {
-	id: String
-	description: String
-	title: String
-	imageUrl: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	idMin: String
 	idMax: String
@@ -434,7 +432,7 @@ type PurchaseAggregateResult {
 }
 
 type PurchaseGroupByResult {
-	date: DateTime
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	dateMin: DateTime
 	dateMax: DateTime
@@ -462,7 +460,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	email: String
+	groupKeys: [GroupByKeyValue!]
 	count: Int
 	emailMin: String
 	emailMax: String
@@ -474,13 +472,6 @@ type UserGroupByResult {
 
 enum ProductEmbedding {
 	product_vector
-}
-
-enum ProductGroupableField {
-	id
-	description
-	title
-	imageUrl
 }
 
 enum ProductHasFilter {
@@ -499,10 +490,6 @@ enum ProductOrderable {
 	imageUrl
 }
 
-enum PurchaseGroupableField {
-	date
-}
-
 enum PurchaseHasFilter {
 	user
 	product
@@ -515,10 +502,6 @@ enum PurchaseOrderable {
 
 enum UserEmbedding {
 	user_vector
-}
-
-enum UserGroupableField {
-	email
 }
 
 enum UserHasFilter {
@@ -565,8 +548,15 @@ input ProductFilter {
 	not: ProductFilter
 }
 
+input ProductGroupByField {
+	id: Boolean
+	description: Boolean
+	title: Boolean
+	imageUrl: Boolean
+}
+
 input ProductGroupBySpec {
-	field: ProductGroupableField!
+	field: ProductGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -613,8 +603,14 @@ input PurchaseFilter {
 	not: PurchaseFilter
 }
 
+input PurchaseGroupByField {
+	user: UserGroupByField
+	product: ProductGroupByField
+	date: Boolean
+}
+
 input PurchaseGroupBySpec {
-	field: PurchaseGroupableField!
+	field: PurchaseGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }
@@ -664,8 +660,12 @@ input UserFilter {
 	not: UserFilter
 }
 
+input UserGroupByField {
+	email: Boolean
+}
+
 input UserGroupBySpec {
-	field: UserGroupableField!
+	field: UserGroupByField!
 	by: DateTimeGranularity
 	tz: String
 }

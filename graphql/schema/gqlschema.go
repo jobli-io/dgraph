@@ -327,6 +327,7 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum DateTimeGranularity { year month day hour }
+type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
@@ -1141,9 +1142,10 @@ func completeSchema(
 		addTypeOrderable(sch, defn, providesTypeMap)
 		addFieldFilters(sch, defn, providesTypeMap, apolloServiceQuery)
 		addAggregationResultType(sch, defn, providesTypeMap)
-		// groupByXxx query and supporting types (XxxGroupableField enum, XxxGroupBySpec input,
-		// XxxGroupByResult type). Generated for any type that has at least one groupable field.
-		addGroupableFieldEnum(sch, defn, providesTypeMap)
+		// groupByXxx query and supporting types (XxxGroupByField input, XxxGroupBySpec input,
+		// XxxGroupByResult type). Generated for any type that has at least one groupable field
+		// or a single-valued edge leading to one.
+		addGroupByFieldInput(sch, defn, providesTypeMap, make(map[string]bool))
 		addGroupBySpecInput(sch, defn)
 		addGroupByResultType(sch, defn, providesTypeMap)
 		// Don't expose queries for the @extends type to the gateway
@@ -2238,37 +2240,144 @@ func addAggregationResultType(schema *ast.Schema, defn *ast.Definition, provides
 	}
 }
 
-// addGroupableFieldEnum generates the XxxGroupableField enum listing every scalar/enum field
-// that can be used as a groupby key in a groupByXxx query.
-func addGroupableFieldEnum(schema *ast.Schema, defn *ast.Definition, providesTypeMap map[string]bool) {
-	enumName := defn.Name + "GroupableField"
-	enum := &ast.Definition{
-		Kind: ast.Enum,
-		Name: enumName,
+// typeHasGroupableDescendant returns true if defn or any type reachable from it through
+// single-valued object edges has at least one field that addGroupByFieldInput would expose
+// as a Boolean terminal selector. The exclusions here must exactly mirror those in
+// addGroupByFieldInput so the two functions never disagree.
+// visited prevents infinite loops on cyclic schemas.
+func typeHasGroupableDescendant(defn *ast.Definition, schema *ast.Schema, visited map[string]bool) bool {
+	if defn == nil || visited[defn.Name] {
+		return false
 	}
+	visited[defn.Name] = true
 	for _, fld := range defn.Fields {
-		if isGroupable(fld, schema, defn, providesTypeMap) {
-			enum.EnumValues = append(enum.EnumValues,
-				&ast.EnumValueDefinition{Name: fld.Name})
+		// Mirror addGroupByFieldInput exclusions exactly.
+		if fld.Name == "count" {
+			continue // reserved for the aggregate field in XxxGroupByResult
+		}
+		if hasCustomOrLambda(fld) {
+			continue
+		}
+		if fld.Type.NamedType == "" || fld.Type.NamedType == "ID" {
+			continue // list field or ID — skip
+		}
+		if groupableScalars[fld.Type.NamedType] {
+			return true
+		}
+		td := schema.Types[fld.Type.NamedType]
+		if td == nil {
+			continue
+		}
+		if td.Kind == ast.Enum {
+			return true
+		}
+		// Single-valued object edge — recurse (cap depth via visited).
+		if td.Kind == ast.Object {
+			if typeHasGroupableDescendant(td, schema, visited) {
+				return true
+			}
 		}
 	}
-	if len(enum.EnumValues) == 0 {
-		return
+	return false
+}
+
+// addGroupByFieldInput recursively generates the XxxGroupByField input type for defn.
+// The generated type has:
+//   - A Boolean field for each direct groupable scalar/enum (terminal selector, set to true).
+//   - A XxxGroupByField-typed field for each single-valued object edge whose target type
+//     has at least one groupable descendant (navigation step).
+//
+// generating tracks in-progress types to avoid infinite recursion on cyclic schemas.
+// GraphQL explicitly allows circular input types so the generated schema is valid.
+func addGroupByFieldInput(schema *ast.Schema, defn *ast.Definition, providesTypeMap map[string]bool, generating map[string]bool) {
+	typeName := defn.Name + "GroupByField"
+	if schema.Types[typeName] != nil || generating[typeName] {
+		return // already generated or generation in progress (cycle)
 	}
-	schema.Types[enumName] = enum
+	generating[typeName] = true
+	defer delete(generating, typeName)
+
+	var fields []*ast.FieldDefinition
+
+	for _, fld := range defn.Fields {
+		if fld.Name == "count" {
+			continue // reserved for the aggregate field in XxxGroupByResult
+		}
+		if hasCustomOrLambda(fld) {
+			continue
+		}
+		if externalAndNonKeyField(fld, defn, providesTypeMap) {
+			continue
+		}
+
+		if fld.Type.NamedType == "" {
+			continue // list field — skip
+		}
+
+		if fld.Type.NamedType == "ID" {
+			continue // ID fields are not useful as group keys
+		}
+
+		// Direct groupable scalar or enum → Boolean terminal.
+		if groupableScalars[fld.Type.NamedType] {
+			fields = append(fields, &ast.FieldDefinition{
+				Name: fld.Name,
+				Type: &ast.Type{NamedType: "Boolean"},
+			})
+			continue
+		}
+		td := schema.Types[fld.Type.NamedType]
+		if td == nil {
+			continue
+		}
+		if td.Kind == ast.Enum {
+			fields = append(fields, &ast.FieldDefinition{
+				Name: fld.Name,
+				Type: &ast.Type{NamedType: "Boolean"},
+			})
+			continue
+		}
+		// Single-valued object edge — recurse if the target has groupable descendants.
+		if td.Kind == ast.Object {
+			if typeHasGroupableDescendant(td, schema, map[string]bool{}) {
+				// Recurse: ensure the target's GroupByField type exists first.
+				addGroupByFieldInput(schema, td, providesTypeMap, generating)
+				// Only add the navigation field if recursion actually created the type.
+				// (typeHasGroupableDescendant can be optimistic; addGroupByFieldInput may
+				// still find 0 includable fields and create nothing.)
+				if schema.Types[td.Name+"GroupByField"] != nil {
+					fields = append(fields, &ast.FieldDefinition{
+						Name: fld.Name,
+						Type: &ast.Type{NamedType: td.Name + "GroupByField"},
+					})
+				}
+			}
+		}
+
+	}
+
+	if len(fields) == 0 {
+		return // nothing groupable reachable from this type
+	}
+
+	schema.Types[typeName] = &ast.Definition{
+		Kind:   ast.InputObject,
+		Name:   typeName,
+		Fields: fields,
+	}
 }
 
 // addGroupBySpecInput generates the XxxGroupBySpec input type:
 //
 //	input NoteGroupBySpec {
-//	    field: NoteGroupableField!
-//	    by:    DateTimeGranularity   # only valid on DateTime fields with @search(by: [...])
+//	    field: NoteGroupByField!     # typed object navigation — set one Boolean to true
+//	    by:    DateTimeGranularity   # only valid on DateTime leaf fields
 //	    tz:    String               # IANA timezone, only valid together with `by`
 //	}
 func addGroupBySpecInput(schema *ast.Schema, defn *ast.Definition) {
-	enumName := defn.Name + "GroupableField"
-	if schema.Types[enumName] == nil {
-		return // no groupable fields on this type
+	fieldInputName := defn.Name + "GroupByField"
+	if schema.Types[fieldInputName] == nil {
+		return // no groupable fields or edges on this type
 	}
 	inputName := defn.Name + "GroupBySpec"
 	schema.Types[inputName] = &ast.Definition{
@@ -2277,7 +2386,7 @@ func addGroupBySpecInput(schema *ast.Schema, defn *ast.Definition) {
 		Fields: []*ast.FieldDefinition{
 			{
 				Name: "field",
-				Type: &ast.Type{NamedType: enumName, NonNull: true},
+				Type: &ast.Type{NamedType: fieldInputName, NonNull: true},
 			},
 			{
 				Name: "by",
@@ -2292,35 +2401,34 @@ func addGroupBySpecInput(schema *ast.Schema, defn *ast.Definition) {
 }
 
 // addGroupByResultType generates the XxxGroupByResult type, which combines:
-//   - one nullable key field per groupable field (holds the bucket value; null if not grouped on)
+//   - groupKeys: [GroupByKeyValue!] — dynamic bucket key fields (path + string value)
 //   - count: Int
-//   - {field}Min / {field}Max for every orderable field
-//   - {field}Sum / {field}Avg for every summable field
+//   - {field}Min / {field}Max for every orderable field on the root type
+//   - {field}Sum / {field}Avg for every summable field on the root type
+//
+// Because groupBy now uses Dgraph value variables at the root level, all aggregates
+// are always computed over root-type UIDs regardless of whether the groupBy key is a
+// direct field or a nested path.
 func addGroupByResultType(schema *ast.Schema, defn *ast.Definition, providesTypeMap map[string]bool) {
-	enumName := defn.Name + "GroupableField"
-	if schema.Types[enumName] == nil {
-		return // no groupable fields, skip
+	fieldInputName := defn.Name + "GroupByField"
+	if schema.Types[fieldInputName] == nil {
+		return // no groupable fields or edges on this type
 	}
 	resultTypeName := defn.Name + "GroupByResult"
 	var fields []*ast.FieldDefinition
 
-	// Group key fields — one per groupable field, all nullable so that fields not in
-	// the groupBy argument are simply omitted (returned as null) in each result row.
-	// "count" is reserved for the aggregate field below; skip any user field with that name.
-	for _, fld := range defn.Fields {
-		if fld.Name == "count" {
-			continue // reserved for the aggregate
-		}
-		if !isGroupable(fld, schema, defn, providesTypeMap) {
-			continue
-		}
-		fields = append(fields, &ast.FieldDefinition{
-			Name: fld.Name,
-			Type: &ast.Type{NamedType: fld.Type.NamedType, NonNull: false},
-		})
-	}
+	// Dynamic group-key field. Instead of one named field per groupable field, we use a
+	// single groupKeys array. This supports direct fields, 1-hop, and N-hop nested paths
+	// without combinatorial schema explosion.
+	fields = append(fields, &ast.FieldDefinition{
+		Name: "groupKeys",
+		Type: &ast.Type{
+			Elem: &ast.Type{NamedType: "GroupByKeyValue", NonNull: true},
+		},
+	})
 
-	// Aggregate fields (mirrors addAggregationResultType).
+	// Aggregate fields — always present; meaningful for all spec types because @groupby
+	// runs at root level using val(__gby_N) value variables.
 	fields = append(fields, &ast.FieldDefinition{
 		Name: "count",
 		Type: &ast.Type{NamedType: "Int"},
