@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -278,20 +277,21 @@ func convertScalarToString(val interface{}) (string, error) {
 }
 
 // buildGroupByPathMap re-reads the groupBy argument from a GroupByQuery and returns
-// a map of spec-index → dot-separated GraphQL field path for nested specs.
-// Direct-field specs (where the field value walks to a boolean in one step) have a
-// path of length 1 and are NOT stored in the map (they appear with a type-prefixed
-// key in the @groupby DQL response and are handled by the existing type-prefix strip).
-func buildGroupByPathMap(query schema.Query) map[int]string {
-	pathMap := make(map[int]string)
+// a map of leaf-field-name → full dot-separated GraphQL field path for nested specs.
+// Direct-field specs (path length == 1) are NOT stored in the map — the type-prefix
+// strip already produces the correct leaf name for those.
+//
+// Example: {field: {hasStatus: {name: true}}} → {"name": "hasStatus.name"}
+func buildGroupByPathMap(query schema.Query) map[string]string {
+	pathMap := make(map[string]string)
 	groupByArg, _ := query.ArgValue("groupBy").([]interface{})
-	for i, spec := range groupByArg {
+	for _, spec := range groupByArg {
 		specMap, _ := spec.(map[string]interface{})
 		fieldObj, _ := specMap["field"].(map[string]interface{})
 		path := walkGroupByFieldPath(fieldObj)
 		if len(path) > 1 {
-			// Only nested specs land in pathMap; direct specs are len == 1.
-			pathMap[i] = strings.Join(path, ".")
+			// leaf name → full path, e.g. "name" → "hasStatus.name"
+			pathMap[path[len(path)-1]] = strings.Join(path, ".")
 		}
 	}
 	return pathMap
@@ -317,25 +317,27 @@ func walkGroupByFieldPath(obj map[string]interface{}) []string {
 // completeGroupByResult transforms the raw DQL @groupby response into the flat list
 // shape that GraphQL clients expect for XxxGroupByResult queries.
 //
-// DQL emits (direct field, before this change):
+// DQL emits (direct field):
 //
 //	{ "groupByNote": [ { "@groupby": [ {"Note.status":"ACTIVE","count":1,"titleMin":"X"} ] } ] }
 //
-// DQL emits (nested field via val variable):
+// DQL emits (nested field — main query runs on leaf UIDs):
 //
-//	{ "groupByApplication": [ { "@groupby": [ {"val(__gby_1)":"Screened","count":5,"ratingAvg":3.8} ] } ] }
+//	{ "groupByCompany": [ { "@groupby": [ {"StatusIfc.name":"Open","count":5} ] } ] }
 //
 // GraphQL output (both cases):
 //
-//	{ "groupByXxx": [ {"groupKeys":[{"path":"...","value":"..."}], "count":N, "ratingAvg":3.8} ] }
+//	{ "groupByXxx": [ {"groupKeys":[{"path":"...","value":"..."}], "count":N} ] }
 //
 // The transformation:
 //  1. Unwraps the outer [{ "@groupby": [...] }] envelope → flat [...].
 //  2. For each key in a group row:
-//     - "TypeName.fieldName" → strip type prefix, add to groupKeys as {path: fieldName, value: v}
-//     - "val(__gby_N)" → look up pathMap[N], add to groupKeys as {path: dotPath, value: v}
+//     - "TypeName.fieldName" → strip type prefix to get leafName.
+//     If pathMap[leafName] exists, use the full path; else use leafName.
+//     Adds to groupKeys as {path: ..., value: v}.
 //     - Anything else (count, ratingAvg, …) → pass through as a top-level field.
-func completeGroupByResult(queryName string, rawData []byte, pathMap map[int]string) ([]byte, error) {
+func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]string) ([]byte, error) {
+
 	// Unmarshal the top-level map, preserving numeric types as json.RawMessage.
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(rawData, &top); err != nil {
@@ -382,29 +384,17 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[int]str
 
 		for k, v := range grp {
 			if idx := strings.LastIndexByte(k, '.'); idx >= 0 {
-				// "TypeName.fieldName" → direct-field group key.
-				fieldName := k[idx+1:]
-				// Serialise the value as a string for groupKeys.
-				valStr, _ := json.Marshal(strings.Trim(string(v), "\""))
-				groupKeyEntries = append(groupKeyEntries, map[string]json.RawMessage{
-					"path":  json.RawMessage(`"` + fieldName + `"`),
-					"value": valStr,
-				})
-				continue
-			}
-			if strings.HasPrefix(k, "val(") && strings.HasSuffix(k, ")") {
-				// "val(__gby_N)" → nested-field group key.
-				// Extract N from "val(__gby_N)".
-				inner := k[4 : len(k)-1] // "__gby_N"
-				var specIdx int
-				fmt.Sscanf(inner, "__gby_%d", &specIdx)
-				dotPath, ok := pathMap[specIdx]
-				if !ok {
-					dotPath = inner // fallback: use the var name
+				// "TypeName.fieldName" → strip type prefix to get leafName.
+				leafName := k[idx+1:]
+				// For nested specs, pathMap maps leafName → full dot path.
+				// For direct specs, the leafName is already the correct path.
+				path := leafName
+				if fullPath, ok := pathMap[leafName]; ok {
+					path = fullPath
 				}
 				valStr, _ := json.Marshal(strings.Trim(string(v), "\""))
 				groupKeyEntries = append(groupKeyEntries, map[string]json.RawMessage{
-					"path":  json.RawMessage(`"` + dotPath + `"`),
+					"path":  json.RawMessage(`"` + path + `"`),
 					"value": valStr,
 				})
 				continue

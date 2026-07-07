@@ -293,7 +293,74 @@ The engine validates `groupByXxx` arguments at **request-parse time** (before DQ
 - **Sorting is not supported.** Buckets are returned in Dgraph's natural order. Client-side sorting
   is recommended for UI display.
 - **Pagination (`first`, `offset`) is not supported.** All buckets are returned.
-- **Nested groupBy** (grouping within a nested relationship) is not supported.
+- **Nested groupBy** (grouping within a nested relationship) is supported for single-valued edges
+  (see below). List edges cannot be used as intermediate navigation steps.
 - **Variable arguments:** When the `groupBy` list is provided as a GraphQL variable (e.g.
   `$spec: [NoteGroupBySpec!]!`), the `by`/`tz` constraints cannot be validated at parse time and are
   enforced only during query execution.
+
+---
+
+## Nested field groupBy
+
+You can group by a scalar field on a related type reachable via a single-valued edge using the
+`XxxGroupByField` input object notation. Set each intermediate edge to a nested object and the
+terminal scalar to `true`.
+
+### Example: group companies by their status name
+
+```graphql
+{
+  groupByCompany(groupBy: [{ field: { hasStatus: { name: true } } }]) {
+    count
+    groupKeys {
+      path # "hasStatus.name"
+      value # e.g. "Active"
+    }
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "groupByCompany": [
+    { "count": 12, "groupKeys": [{ "path": "hasStatus.name", "value": "Active" }] },
+    { "count": 3, "groupKeys": [{ "path": "hasStatus.name", "value": "Inactive" }] }
+  ]
+}
+```
+
+### How it works
+
+For nested specs the engine emits two DQL blocks:
+
+1. **Leaf-UID collection:** A `var()` block traverses the edge path from the authenticated root set
+   and collects the UIDs of the leaf-type nodes (e.g. status nodes).
+2. **Leaf-level `@groupby`:** The main `groupByXxx` query runs on those leaf UIDs and applies
+   `@groupby` directly on the leaf scalar predicate.
+
+The DQL emitted for the example above is roughly:
+
+```dql
+var(func: uid(CompanyRoot)) {
+  Company.hasStatus { __gby_0_leafUIDs as uid }
+}
+groupByCompany(func: uid(__gby_0_leafUIDs)) @groupby(StatusIfc.name) {
+  count(uid)
+}
+```
+
+> [!NOTE] Because `count(uid)` is applied to the leaf-type UIDs (e.g. status nodes), it counts the
+> number of distinct status nodes per name — which equals the number of companies sharing that
+> status when each company points to exactly one status node. If multiple companies share the same
+> status UID, the count correctly reflects the number of companies.
+
+> [!IMPORTANT] Only **one nested spec** is supported per query. Multiple nested specs in the same
+> `groupBy` list are not honoured — only the first one is used.
+
+> [!IMPORTANT] Aggregate functions (`xxxMin`, `xxxMax`, `xxxSum`, `xxxAvg`) are **not available**
+> for nested field groupBy because they reference predicates on the root type (e.g.
+> `Company.revenue`), but the main `@groupby` query runs on the leaf-type UIDs (status nodes), not
+> the root type nodes. Only `count` is available for nested specs.

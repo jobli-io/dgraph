@@ -66,20 +66,22 @@ func TestCompleteGroupByResult(t *testing.T) {
 			wantJSON: `{"groupByNote":[{"count":7,"groupKeys":[{"path":"tag","value":"bug"}],"scoreAvg":42.5,"scoreMax":100}]}`,
 		},
 		{
-			name:      "nested val(__gby_N) key resolved via pathMap",
+			name:      "nested spec resolved via pathMap (leaf-UID traversal)",
 			queryName: "groupByApplication",
 			raw: `{
 				"groupByApplication": [
 					{
 						"@groupby": [
-							{"val(__gby_0)": "Screened", "count": 5}
+							{"ApplicationStatus.name": "Screened", "count": 5}
 						]
 					}
 				]
 			}`,
-			// pathMap[0] = "hasStatus.name"
+			// DQL groups by the leaf scalar (ApplicationStatus.name).
+			// pathMap["name"] = "hasStatus.name" → full path used in groupKeys.
 			wantJSON: `{"groupByApplication":[{"count":5,"groupKeys":[{"path":"hasStatus.name","value":"Screened"}]}]}`,
 		},
+
 		{
 			name:      "empty outer list returns empty array",
 			queryName: "groupByJobAd",
@@ -118,10 +120,11 @@ func TestCompleteGroupByResult(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			// Build a pathMap for the val(__gby_N) test case.
-			var pathMap map[int]string
+			// Build a pathMap for the nested spec test case.
+			// The map is: leaf-field-name → full dot-separated GraphQL path.
+			var pathMap map[string]string
 			if tc.queryName == "groupByApplication" {
-				pathMap = map[int]string{0: "hasStatus.name"}
+				pathMap = map[string]string{"name": "hasStatus.name"}
 			}
 
 			out, err := completeGroupByResult(tc.queryName, []byte(tc.raw), pathMap)

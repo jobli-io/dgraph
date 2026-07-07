@@ -110,25 +110,15 @@ func writeQuery(b *strings.Builder, query *dql.GraphQuery, prefix string) {
 			if i > 0 {
 				x.Check2(b.WriteString(", "))
 			}
-			if len(attr.NestedPath) > 0 {
-				// Nested spec: the leaf value is extracted via a var() block.
-				// Reference it here as val(__gby_N).
-				x.Check2(b.WriteString("val(" + attr.VarName + ")"))
-			} else if attr.TokenizerName != "" {
+			if attr.TokenizerName != "" {
 				// Direct DateTime field with granularity bucketing.
-				// Emit: Pred@tokenizer[__TZ__Encoded]
-				// The IANA timezone name is appended with '__' replacing '/'
-				// because lexDirectiveOrLangList (dql/state.go) treats '.' as
-				// a token boundary but '_' is a valid lang/directive character.
-				// Example: "Australia/Sydney" → suffix "hour__Australia__Sydney",
-				// which the lexer reads as a single itemName token.
 				suffix := attr.TokenizerName
 				if attr.Timezone != "" {
 					suffix += "__" + strings.ReplaceAll(attr.Timezone, "/", "__")
 				}
 				x.Check2(b.WriteString(attr.Attr + "@" + suffix))
 			} else {
-				// Direct scalar/enum field — no tokenizer.
+				// Direct scalar/enum field (including nested-spec leaf scalars).
 				x.Check2(b.WriteString(attr.Attr))
 			}
 		}

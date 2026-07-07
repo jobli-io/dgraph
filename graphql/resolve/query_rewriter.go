@@ -440,27 +440,27 @@ func resolveGroupByPath(
 	}
 }
 
-// buildVarBlock builds the DQL var() GraphQuery block that extracts the nested leaf value
-// as a value variable.  The emitted DQL looks like:
+// buildLeafUIDVarBlock builds the DQL var() block that collects the leaf-type UIDs
+// by traversing the edge path from the root set. The emitted DQL looks like:
 //
-//	var(func: uid(<rootVar>)) {
-//	  Application.hasStatus {
-//	    ApplicationStatus.stage {
-//	      __gby_0 as ApplicationStage.name
-//	    }
+//	var(func: uid(CompanyRoot)) {
+//	  Company.hasStatus {
+//	    __gby_0_leafUIDs as uid
 //	  }
 //	}
-func buildVarBlock(rootVar string, nestedPath []string, leafPred string, varName string) *dql.GraphQuery {
+//
+// The variable __gby_0_leafUIDs then becomes the func: uid() argument of the main query.
+func buildLeafUIDVarBlock(rootVar string, edgePath []string, leafUIDVarName string) *dql.GraphQuery {
 	// Build from the inside out.
 	innermost := &dql.GraphQuery{
-		Var:  varName,
-		Attr: leafPred,
+		Var:  leafUIDVarName,
+		Attr: "uid",
 	}
 
 	current := innermost
-	for i := len(nestedPath) - 1; i >= 0; i-- {
+	for i := len(edgePath) - 1; i >= 0; i-- {
 		wrapper := &dql.GraphQuery{
-			Attr:     nestedPath[i],
+			Attr:     edgePath[i],
 			Children: []*dql.GraphQuery{current},
 		}
 		current = wrapper
@@ -552,21 +552,42 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 			})
 			groupedDirectFields[pathSegments[0]] = true
 		} else {
-			// Nested path — emit a var() block and reference via val(__gby_N).
-			varName := fmt.Sprintf("__gby_%d", i)
-			leafPred := dgPreds[len(dgPreds)-1]
-			nestedPath := dgPreds[:len(dgPreds)-1]
+			// Nested path — the correct DQL strategy is:
+			//   1. Collect the intermediate → leaf UIDs in a var() block.
+			//   2. Make the main @groupby query start from those leaf UIDs.
+			//   3. Apply @groupby on the direct leaf scalar predicate.
+			//
+			// Example (Company → hasStatus → name):
+			//   var(func: uid(CompanyRoot)) {
+			//     Company.hasStatus { __gby_0_leafUIDs as uid }
+			//   }
+			//   groupByCompany(func: uid(__gby_0_leafUIDs)) @groupby(StatusIfc.name) {
+			//     count(uid)
+			//   }
+			//
+			// Only one nested spec per query is supported; if multiple nested specs are
+			// supplied only the first is honoured (validation should enforce this).
+			if len(varBlocks) == 0 {
+				// edgePath is all DQL preds except the leaf scalar.
+				edgePath := dgPreds[:len(dgPreds)-1]
+				leafPred := dgPreds[len(dgPreds)-1]
+				leafUIDVarName := fmt.Sprintf("__gby_%d_leafUIDs", i)
 
-			// Build the var() traversal block.
-			varBlocks = append(varBlocks, buildVarBlock(rootVar, nestedPath, leafPred, varName))
+				varBlocks = append(varBlocks, buildLeafUIDVarBlock(rootVar, edgePath, leafUIDVarName))
 
-			mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
-				Attr:          leafPred,
-				NestedPath:    nestedPath,
-				VarName:       varName,
-				TokenizerName: by,
-				Timezone:      tz,
-			})
+				// Override the main query func to start from leaf UIDs.
+				mainQuery.Func = &dql.Function{
+					Name: "uid",
+					Args: []dql.Arg{{Value: leafUIDVarName}},
+				}
+
+				// Direct @groupby on the leaf scalar — valid DQL.
+				mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
+					Attr:          leafPred,
+					TokenizerName: by,
+					Timezone:      tz,
+				})
+			}
 			pathMap[i] = strings.Join(pathSegments, ".")
 		}
 	}
