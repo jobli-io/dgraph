@@ -401,7 +401,7 @@ type DirectorAggregateResult {
 }
 
 type DirectorGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -414,7 +414,7 @@ type MovieAggregateResult {
 }
 
 type MovieGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -431,7 +431,7 @@ type OscarMovieAggregateResult {
 }
 
 type OscarMovieGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

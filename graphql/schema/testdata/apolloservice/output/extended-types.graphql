@@ -366,7 +366,7 @@ type AstronautAggregateResult {
 }
 
 type AstronautGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	idMin: ID
 	idMax: ID
@@ -412,7 +412,7 @@ type MissionAggregateResult {
 }
 
 type MissionGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	designationMin: String
 	designationMax: String
@@ -433,7 +433,7 @@ type ProductAggregateResult {
 }
 
 type ProductGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	upcMin: String
 	upcMax: String

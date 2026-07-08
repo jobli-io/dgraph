@@ -383,7 +383,7 @@ type AuthorAggregateResult {
 }
 
 type AuthorGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -414,7 +414,7 @@ type GenreAggregateResult {
 }
 
 type GenreGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -427,7 +427,7 @@ type PostAggregateResult {
 }
 
 type PostGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	contentMin: String
 	contentMax: String

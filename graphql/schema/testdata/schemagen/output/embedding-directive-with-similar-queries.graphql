@@ -413,7 +413,7 @@ type ProductAggregateResult {
 }
 
 type ProductGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	idMin: String
 	idMax: String
@@ -432,7 +432,7 @@ type PurchaseAggregateResult {
 }
 
 type PurchaseGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	dateMin: DateTime
 	dateMax: DateTime
@@ -460,7 +460,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	emailMin: String
 	emailMax: String

@@ -393,14 +393,14 @@ type MovieDirectorAggregateResult {
 }
 
 type MovieDirectorGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
 }
 
 type MovieGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

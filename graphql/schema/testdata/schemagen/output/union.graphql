@@ -425,7 +425,7 @@ type CharacterAggregateResult {
 }
 
 type CharacterGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -470,7 +470,7 @@ type DroidAggregateResult {
 }
 
 type DroidGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -489,7 +489,7 @@ type HumanAggregateResult {
 }
 
 type HumanGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -506,7 +506,7 @@ type PlanetAggregateResult {
 }
 
 type PlanetGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -523,7 +523,7 @@ type StarshipAggregateResult {
 }
 
 type StarshipGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

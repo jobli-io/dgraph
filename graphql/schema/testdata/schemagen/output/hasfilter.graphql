@@ -374,7 +374,7 @@ type BAggregateResult {
 }
 
 type BGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -409,7 +409,7 @@ type TAggregateResult {
 }
 
 type TGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	textMin: String
 	textMax: String

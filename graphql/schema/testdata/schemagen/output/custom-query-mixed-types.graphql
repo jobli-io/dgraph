@@ -366,7 +366,7 @@ type CarAggregateResult {
 }
 
 type CarGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

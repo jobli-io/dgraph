@@ -344,7 +344,7 @@ type ProductAggregateResult {
 }
 
 type ProductGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	idMin: String
 	idMax: String

@@ -397,7 +397,7 @@ type TodoAggregateResult {
 }
 
 type TodoGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	titleMin: String
 	titleMax: String
@@ -426,7 +426,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	usernameMin: String
 	usernameMax: String

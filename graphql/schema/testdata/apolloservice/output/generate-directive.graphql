@@ -346,7 +346,7 @@ type CharacterAggregateResult {
 }
 
 type CharacterGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -380,7 +380,7 @@ type HumanAggregateResult {
 }
 
 type HumanGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -397,7 +397,7 @@ type PersonAggregateResult {
 }
 
 type PersonGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

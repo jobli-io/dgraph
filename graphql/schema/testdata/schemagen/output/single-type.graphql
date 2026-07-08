@@ -378,7 +378,7 @@ type MessageAggregateResult {
 }
 
 type MessageGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	contentMin: String
 	contentMax: String

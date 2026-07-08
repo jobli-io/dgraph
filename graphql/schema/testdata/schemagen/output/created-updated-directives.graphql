@@ -379,7 +379,7 @@ type BookingAggregateResult {
 }
 
 type BookingGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -402,7 +402,7 @@ type BookingXIDAggregateResult {
 }
 
 type BookingXIDGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	idMin: String
 	idMax: String

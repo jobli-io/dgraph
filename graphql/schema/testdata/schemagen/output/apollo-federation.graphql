@@ -441,7 +441,7 @@ type CountryAggregateResult {
 }
 
 type CountryGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	codeMin: String
 	codeMax: String
@@ -498,7 +498,7 @@ type ReviewsAggregateResult {
 }
 
 type ReviewsGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	reviewMin: String
 	reviewMax: String
@@ -519,7 +519,7 @@ type StudentAggregateResult {
 }
 
 type StudentGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -570,7 +570,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

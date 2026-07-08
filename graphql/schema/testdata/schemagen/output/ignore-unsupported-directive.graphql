@@ -380,7 +380,7 @@ type ProductAggregateResult {
 }
 
 type ProductGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	priceMin: Float
 	priceMax: Float

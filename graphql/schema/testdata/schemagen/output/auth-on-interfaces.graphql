@@ -383,7 +383,7 @@ type AuthorAggregateResult {
 }
 
 type AuthorGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -416,7 +416,7 @@ type PostAggregateResult {
 }
 
 type PostGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	textMin: String
 	textMax: String
@@ -433,7 +433,7 @@ type QuestionAggregateResult {
 }
 
 type QuestionGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	textMin: String
 	textMax: String

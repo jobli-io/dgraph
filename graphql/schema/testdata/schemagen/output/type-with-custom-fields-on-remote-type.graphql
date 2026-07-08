@@ -381,7 +381,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	ageMin: Int
 	ageMax: Int

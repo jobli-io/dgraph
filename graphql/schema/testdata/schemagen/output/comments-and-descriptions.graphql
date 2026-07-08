@@ -399,7 +399,7 @@ type IAggregateResult {
 }
 
 type IGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	sMin: String
 	sMax: String
@@ -416,7 +416,7 @@ type TAggregateResult {
 }
 
 type TGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	sMin: String
 	sMax: String

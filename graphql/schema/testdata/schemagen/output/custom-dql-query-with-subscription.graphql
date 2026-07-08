@@ -394,7 +394,7 @@ type TweetsAggregateResult {
 }
 
 type TweetsGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	textMin: String
 	textMax: String
@@ -423,7 +423,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	screenNameMin: String
 	screenNameMax: String

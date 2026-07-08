@@ -2423,7 +2423,8 @@ func addGroupByResultType(schema *ast.Schema, defn *ast.Definition, providesType
 	fields = append(fields, &ast.FieldDefinition{
 		Name: "groupKeys",
 		Type: &ast.Type{
-			Elem: &ast.Type{NamedType: "GroupByKeyValue", NonNull: true},
+			Elem:    &ast.Type{NamedType: "GroupByKeyValue", NonNull: true},
+			NonNull: true,
 		},
 	})
 

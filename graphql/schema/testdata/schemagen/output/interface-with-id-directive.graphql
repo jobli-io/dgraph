@@ -384,7 +384,7 @@ type BookAggregateResult {
 }
 
 type BookGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	refIDMin: String
 	refIDMax: String
@@ -427,7 +427,7 @@ type LibraryItemAggregateResult {
 }
 
 type LibraryItemGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	refIDMin: String
 	refIDMax: String

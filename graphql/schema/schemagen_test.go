@@ -81,6 +81,10 @@ func TestSchemaString(t *testing.T) {
 			_, err = FromString(newSchemaStr, x.RootNamespace)
 			require.NoError(t, err)
 			outputFileName := outputDir + testFile.Name()
+			if os.Getenv("UPDATE_SNAPSHOTS") == "true" {
+				err = os.WriteFile(outputFileName, []byte(newSchemaStr), 0644)
+				require.NoError(t, err)
+			}
 			str2, err := os.ReadFile(outputFileName)
 			require.NoError(t, err)
 			if diff := cmp.Diff(string(str2), newSchemaStr); diff != "" {
@@ -112,6 +116,10 @@ func TestApolloServiceQueryResult(t *testing.T) {
 			_, err = FromString(schHandler.GQLSchema(), x.RootNamespace)
 			require.NoError(t, err)
 			outputFileName := outputDir + testFile.Name()
+			if os.Getenv("UPDATE_SNAPSHOTS") == "true" {
+				err = os.WriteFile(outputFileName, []byte(apolloServiceResult), 0644)
+				require.NoError(t, err)
+			}
 			str2, err := os.ReadFile(outputFileName)
 			require.NoError(t, err)
 			if diff := cmp.Diff(string(str2), apolloServiceResult); diff != "" {

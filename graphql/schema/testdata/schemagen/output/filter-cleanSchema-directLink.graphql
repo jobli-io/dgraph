@@ -408,7 +408,7 @@ type XAggregateResult {
 }
 
 type XGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

@@ -394,7 +394,7 @@ type MessageAggregateResult {
 }
 
 type MessageGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	textMin: String
 	textMax: String
@@ -407,7 +407,7 @@ type QuestionAggregateResult {
 }
 
 type QuestionGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	textMin: String
 	textMax: String
@@ -435,7 +435,7 @@ type UserAggregateResult {
 }
 
 type UserGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

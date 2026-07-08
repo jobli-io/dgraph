@@ -366,7 +366,7 @@ type PostAggregateResult {
 }
 
 type PostGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	contentMin: String
 	contentMax: String

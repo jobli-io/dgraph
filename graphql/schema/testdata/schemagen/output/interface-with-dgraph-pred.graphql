@@ -384,7 +384,7 @@ type BusinessManAggregateResult {
 }
 
 type BusinessManGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -417,7 +417,7 @@ type ObjectAggregateResult {
 }
 
 type ObjectGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -430,7 +430,7 @@ type PersonAggregateResult {
 }
 
 type PersonGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

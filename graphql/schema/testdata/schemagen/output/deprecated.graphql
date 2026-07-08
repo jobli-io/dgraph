@@ -363,7 +363,7 @@ type AtypeAggregateResult {
 }
 
 type AtypeGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	iamDeprecatedMin: String
 	iamDeprecatedMax: String

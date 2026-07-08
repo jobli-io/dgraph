@@ -373,7 +373,7 @@ type HotelAggregateResult {
 }
 
 type HotelGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String

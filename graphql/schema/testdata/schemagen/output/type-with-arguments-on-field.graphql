@@ -364,7 +364,7 @@ type AbstractAggregateResult {
 }
 
 type AbstractGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
@@ -400,7 +400,7 @@ type MessageAggregateResult {
 }
 
 type MessageGroupByResult {
-	groupKeys: [GroupByKeyValue!]
+	groupKeys: [GroupByKeyValue!]!
 	count: Int
 	nameMin: String
 	nameMax: String
