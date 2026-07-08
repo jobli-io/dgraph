@@ -366,3 +366,8 @@ groupByCompany(func: uid(CompanyRoot)) @groupby(val(__gby_0)) {
 > list. You can group by multiple separate nested fields (e.g., both `hasPrimaryGroup.name` and
 > `createdBy.email`) in a single query. Each nested spec will generate its own auxiliary value
 > variable block.
+
+> [!NOTE] **Query-Order Preservation**: The `groupKeys` array returned to GraphQL clients preserves
+> the **exact original order** in which the fields are defined inside the GraphQL `groupBy` query
+> argument. This ensures that processing code on the client side has a 100% deterministic and
+> predictable key structure matching the query.
