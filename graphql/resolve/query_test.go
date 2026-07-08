@@ -156,3 +156,24 @@ func TestCustomHTTPQuery(t *testing.T) {
 		})
 	}
 }
+
+func TestQueryRewritingGroupByMultipleFieldsError(t *testing.T) {
+	gqlSchema := test.LoadSchemaFromFile(t, "schema.graphql")
+	testRewriter := NewQueryRewriter()
+
+	op, err := gqlSchema.Operation(&schema.Request{
+		Query: `query {
+			groupByPost(groupBy: [
+				{ field: { author: { name: true, dob: true } } }
+			]) {
+				count
+			}
+		}`,
+	})
+	require.NoError(t, err)
+	gqlQuery := test.GetQuery(t, op)
+
+	_, err = testRewriter.Rewrite(context.Background(), gqlQuery)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "groupBy field object must contain exactly one field, but found 2 fields: dob, name")
+}

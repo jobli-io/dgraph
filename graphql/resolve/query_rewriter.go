@@ -182,7 +182,7 @@ func (qr *queryRewriter) Rewrite(
 	case schema.AggregateQuery:
 		return aggregateQuery(gqlQuery, authRw), nil
 	case schema.GroupByQuery:
-		return groupByQuery(gqlQuery, authRw), nil
+		return groupByQuery(gqlQuery, authRw)
 	case schema.EntitiesQuery:
 		return entitiesQuery(gqlQuery, authRw)
 	default:
@@ -399,6 +399,15 @@ func resolveGroupByPath(
 	currentTypeObj := typeDef
 	current := fieldObj
 	for {
+		if len(current) > 1 {
+			var keys []string
+			for k := range current {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			return nil, nil, errors.Errorf("groupBy field object must contain exactly one field, but found %d fields: %s", len(current), strings.Join(keys, ", "))
+		}
+
 		var chosenKey string
 		var chosenVal interface{}
 		for k, v := range current {
@@ -541,13 +550,13 @@ func buildValueVarBlock(rootVar string, edgePath []string, leafPred string, varN
 // Key fields (the fields listed in the groupBy argument) are NOT added as DQL children;
 // they appear automatically as predicate-keyed entries inside the DQL @groupby JSON array.
 // Only aggregate functions (count, Min, Max, Sum, Avg) are added as children.
-func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
+func groupByQuery(query schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, error) {
 	// mainType is the concrete type being grouped (e.g. Note for groupByNote).
 	mainType := query.ConstructedFor()
 
 	dgQuery, rbac := addCommonRules(query, mainType, authRw)
 	if rbac == schema.Negative {
-		return dgQuery
+		return dgQuery, nil
 	}
 
 	// Add user filter.
@@ -583,8 +592,7 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 
 		pathSegments, dgPreds, err := resolveGroupByPath(fieldObj, mainType)
 		if err != nil {
-			// Validation should have caught this; skip gracefully.
-			continue
+			return nil, err
 		}
 
 		if len(dgPreds) == 1 {
@@ -687,7 +695,7 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 	result = append(result, authAndFilterQrys...)
 	result = append(result, varBlocks...)
 	result = append(result, mainQuery)
-	return result
+	return result, nil
 }
 
 func passwordQuery(m schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, error) {
