@@ -473,6 +473,51 @@ func buildLeafUIDVarBlock(rootVar string, edgePath []string, leafUIDVarName stri
 	}
 }
 
+// buildValueVarBlock builds the DQL var() block that collects the scalar leaf value
+// by traversing the edge path from the root set. In DQL, a value variable defined inside
+// a child block is mapped by child UIDs. To group parent nodes by this value, we must
+// aggregate it up to the root parent level using an aggregate variable assignment (e.g. max).
+//
+// The emitted DQL looks like:
+//
+//	var(func: uid(CompanyRoot)) {
+//	  Company.hasStatus {
+//	    __gby_0_c as StatusIfc.name
+//	  }
+//	  __gby_0 as max(val(__gby_0_c))
+//	}
+//
+// The parent-level variable __gby_0 is then used in @groupby(val(__gby_0)) in the main query.
+func buildValueVarBlock(rootVar string, edgePath []string, leafPred string, varName string) *dql.GraphQuery {
+	childVarName := varName + "_c"
+
+	// Build from the inside out.
+	innermost := &dql.GraphQuery{
+		Var:  childVarName,
+		Attr: leafPred,
+	}
+
+	current := innermost
+	for i := len(edgePath) - 1; i >= 0; i-- {
+		wrapper := &dql.GraphQuery{
+			Attr:     edgePath[i],
+			Children: []*dql.GraphQuery{current},
+		}
+		current = wrapper
+	}
+
+	parentAggregation := &dql.GraphQuery{
+		Var:  varName,
+		Attr: fmt.Sprintf("max(val(%s))", childVarName),
+	}
+
+	return &dql.GraphQuery{
+		Attr:     "var",
+		Func:     &dql.Function{Name: "uid", Args: []dql.Arg{{Value: rootVar}}},
+		Children: []*dql.GraphQuery{current, parentAggregation},
+	}
+}
+
 // groupByQuery rewrites a groupByXxx GraphQL query into a DQL @groupby query.
 //
 // For direct-field specs the generated DQL is:
@@ -553,15 +598,16 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 			groupedDirectFields[pathSegments[0]] = true
 		} else {
 			// Nested path — the correct DQL strategy is:
-			//   1. Collect the intermediate → leaf UIDs in a var() block.
-			//   2. Make the main @groupby query start from those leaf UIDs.
-			//   3. Apply @groupby on the direct leaf scalar predicate.
+			//   1. Collect the leaf scalar values mapped to root UIDs in a var() block.
+			//   2. Group by val(__gby_N) in the main query block (rooted at rootVar).
 			//
 			// Example (Company → hasStatus → name):
 			//   var(func: uid(CompanyRoot)) {
-			//     Company.hasStatus { __gby_0_leafUIDs as uid }
+			//     Company.hasStatus {
+			//       __gby_0 as StatusIfc.name
+			//     }
 			//   }
-			//   groupByCompany(func: uid(__gby_0_leafUIDs)) @groupby(StatusIfc.name) {
+			//   groupByCompany(func: uid(CompanyRoot)) @groupby(val(__gby_0)) {
 			//     count(uid)
 			//   }
 			//
@@ -571,19 +617,13 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 				// edgePath is all DQL preds except the leaf scalar.
 				edgePath := dgPreds[:len(dgPreds)-1]
 				leafPred := dgPreds[len(dgPreds)-1]
-				leafUIDVarName := fmt.Sprintf("__gby_%d_leafUIDs", i)
+				varName := fmt.Sprintf("__gby_%d", i)
 
-				varBlocks = append(varBlocks, buildLeafUIDVarBlock(rootVar, edgePath, leafUIDVarName))
+				varBlocks = append(varBlocks, buildValueVarBlock(rootVar, edgePath, leafPred, varName))
 
-				// Override the main query func to start from leaf UIDs.
-				mainQuery.Func = &dql.Function{
-					Name: "uid",
-					Args: []dql.Arg{{Value: leafUIDVarName}},
-				}
-
-				// Direct @groupby on the leaf scalar — valid DQL.
 				mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
-					Attr:          leafPred,
+					VarName:       varName,
+					IsValueVar:    true,
 					TokenizerName: by,
 					Timezone:      tz,
 				})

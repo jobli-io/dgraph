@@ -233,7 +233,7 @@ func floorToInterval(t time.Time, tokName string, tz string) (time.Time, error) 
 	}
 }
 
-func (sg *SubGraph) formResult(ul *pb.List) (*groupResults, error) {
+func (sg *SubGraph) formResult(ul *pb.List, doneVars map[string]varValue) (*groupResults, error) {
 	var dedupMap dedup
 	res := new(groupResults)
 
@@ -244,7 +244,32 @@ func (sg *SubGraph) formResult(ul *pb.List) (*groupResults, error) {
 
 		attr := child.Params.Alias
 		if attr == "" {
-			attr = child.Attr
+			if child.Params.Var != "" {
+				attr = "val(" + child.Params.Var + ")"
+			} else {
+				attr = child.Attr
+			}
+		}
+		if child.Params.Var != "" {
+			vMap, ok := doneVars[child.Params.Var]
+			if ok {
+				for _, srcUid := range ul.Uids {
+					val, ok := vMap.Vals[srcUid]
+					if !ok {
+						continue
+					}
+					// Apply DateTime timezone & granularity bucketing if requested
+					if child.Params.TokenizerName != "" && val.Tid == types.DateTimeID {
+						floor, ferr := floorToInterval(val.Value.(time.Time),
+							child.Params.TokenizerName, child.Params.Timezone)
+						if ferr == nil {
+							val = types.Val{Tid: types.DateTimeID, Value: floor}
+						}
+					}
+					dedupMap.addValue(attr, val, srcUid)
+				}
+			}
+			continue
 		}
 		if len(child.DestUIDs.GetUids()) > 0 {
 			// It's a UID node.
@@ -416,7 +441,7 @@ func (sg *SubGraph) processGroupBy(doneVars map[string]varValue, path []*SubGrap
 		// We need to process groupby for each list as grouping needs to happen for each path of the
 		// tree.
 
-		r, err := sg.formResult(ul)
+		r, err := sg.formResult(ul, doneVars)
 		if err != nil {
 			return err
 		}

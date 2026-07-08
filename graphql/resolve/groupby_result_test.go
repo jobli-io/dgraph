@@ -81,6 +81,20 @@ func TestCompleteGroupByResult(t *testing.T) {
 			// pathMap["name"] = "hasStatus.name" → full path used in groupKeys.
 			wantJSON: `{"groupByApplication":[{"count":5,"groupKeys":[{"path":"hasStatus.name","value":"Screened"}]}]}`,
 		},
+		{
+			name:      "nested spec resolved via pathMap (value-variable-based groupby)",
+			queryName: "groupByApplication",
+			raw: `{
+				"groupByApplication": [
+					{
+						"@groupby": [
+							{"val(__gby_0)": "Screened", "count": 5}
+						]
+					}
+				]
+			}`,
+			wantJSON: `{"groupByApplication":[{"count":5,"groupKeys":[{"path":"hasStatus.name","value":"Screened"}]}]}`,
+		},
 
 		{
 			name:      "empty outer list returns empty array",
@@ -124,7 +138,10 @@ func TestCompleteGroupByResult(t *testing.T) {
 			// The map is: leaf-field-name → full dot-separated GraphQL path.
 			var pathMap map[string]string
 			if tc.queryName == "groupByApplication" {
-				pathMap = map[string]string{"name": "hasStatus.name"}
+				pathMap = map[string]string{
+					"name":         "hasStatus.name",
+					"val(__gby_0)": "hasStatus.name",
+				}
 			}
 
 			out, err := completeGroupByResult(tc.queryName, []byte(tc.raw), pathMap)

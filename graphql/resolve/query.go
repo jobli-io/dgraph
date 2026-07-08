@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -285,13 +286,17 @@ func convertScalarToString(val interface{}) (string, error) {
 func buildGroupByPathMap(query schema.Query) map[string]string {
 	pathMap := make(map[string]string)
 	groupByArg, _ := query.ArgValue("groupBy").([]interface{})
-	for _, spec := range groupByArg {
+	for i, spec := range groupByArg {
 		specMap, _ := spec.(map[string]interface{})
 		fieldObj, _ := specMap["field"].(map[string]interface{})
 		path := walkGroupByFieldPath(fieldObj)
 		if len(path) > 1 {
-			// leaf name → full path, e.g. "name" → "hasStatus.name"
-			pathMap[path[len(path)-1]] = strings.Join(path, ".")
+			fullPath := strings.Join(path, ".")
+			// Map val(__gby_i) directly to full path
+			pathMap[fmt.Sprintf("val(__gby_%d)", i)] = fullPath
+			// Also map the leaf name and raw variable name as fallback
+			pathMap[path[len(path)-1]] = fullPath
+			pathMap[fmt.Sprintf("__gby_%d", i)] = fullPath
 		}
 	}
 	return pathMap
@@ -383,15 +388,28 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 		transformed := make(map[string]json.RawMessage, len(grp))
 
 		for k, v := range grp {
-			if idx := strings.LastIndexByte(k, '.'); idx >= 0 {
-				// "TypeName.fieldName" → strip type prefix to get leafName.
+			isGroupKey := false
+			var path string
+
+			if strings.HasPrefix(k, "val(") && strings.HasSuffix(k, ")") {
+				isGroupKey = true
+				path = k
+				if fullPath, ok := pathMap[k]; ok {
+					path = fullPath
+				}
+			} else if idx := strings.LastIndexByte(k, '.'); idx >= 0 {
+				isGroupKey = true
 				leafName := k[idx+1:]
-				// For nested specs, pathMap maps leafName → full dot path.
-				// For direct specs, the leafName is already the correct path.
-				path := leafName
+				path = leafName
 				if fullPath, ok := pathMap[leafName]; ok {
 					path = fullPath
 				}
+			} else if fullPath, ok := pathMap[k]; ok {
+				isGroupKey = true
+				path = fullPath
+			}
+
+			if isGroupKey {
 				valStr, _ := json.Marshal(strings.Trim(string(v), "\""))
 				groupKeyEntries = append(groupKeyEntries, map[string]json.RawMessage{
 					"path":  json.RawMessage(`"` + path + `"`),

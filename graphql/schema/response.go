@@ -82,8 +82,19 @@ func (r *Response) WithError(err error) {
 // If r.Data is empty before the call, then r.Data becomes {p}.
 // If r.Data contains data it always looks like {f,g,...}, and
 // adding to that results in {f,g,...,p}.
+//
+// NOTE: This function is invoked concurrently by parallel GraphQL field resolvers.
+// We must be extremely resilient to empty payloads (e.g. "{}" from filtered auth rules
+// or empty group-by blocks) which would otherwise cause leading/trailing commas
+// (e.g. "{,a:1}" or "{a:1,}") during slice-based string concatenation.
 func (r *Response) AddData(p []byte) {
 	if r == nil || r.dataIsNull || len(p) == 0 {
+		return
+	}
+
+	trimmedP := bytes.TrimSpace(p)
+	if len(trimmedP) <= 2 {
+		// p is empty or "{}" — ignore to prevent trailing commas in concatenated buffer
 		return
 	}
 
@@ -92,11 +103,25 @@ func (r *Response) AddData(p []byte) {
 		return
 	}
 
-	// The end of the buffer is always the closing `}`
-	r.Data.Truncate(r.Data.Len() - 1)
-	x.Check2(r.Data.WriteRune(','))
+	trimmedData := bytes.TrimSpace(r.Data.Bytes())
+	if len(trimmedData) <= 2 {
+		// Existing data is empty or "{}" — reset and overwrite completely to avoid leading commas
+		r.Data.Reset()
+		x.Check2(r.Data.Write(p))
+		return
+	}
 
-	x.Check2(r.Data.Write(p[1 : len(p)-1]))
+	// Truncate existing data at the last closing brace to avoid trailing whitespace or newline issues
+	dataBytes := r.Data.Bytes()
+	lastBraceIdx := bytes.LastIndexByte(dataBytes, '}')
+	if lastBraceIdx != -1 {
+		r.Data.Truncate(lastBraceIdx)
+	} else {
+		r.Data.Truncate(r.Data.Len() - 1)
+	}
+
+	x.Check2(r.Data.WriteRune(','))
+	x.Check2(r.Data.Write(trimmedP[1 : len(trimmedP)-1]))
 	x.Check2(r.Data.WriteRune('}'))
 }
 

@@ -3289,6 +3289,32 @@ func TestParseGroupbyWithMaxVar(t *testing.T) {
 	require.Equal(t, "a", res.Query[0].Children[0].Children[0].Var)
 }
 
+func TestParseGroupbyWithValueVar(t *testing.T) {
+	query := `
+	query {
+		me(func: uid(0x1)) {
+			myvar as name
+			friends @groupby(val(myvar)) {
+				a as count(uid)
+			}
+			hometown
+			age
+		}
+	}
+`
+	res, err := Parse(Request{Str: query})
+	require.NoError(t, err)
+	require.Equal(t, 4, len(res.Query[0].Children))
+	friendsBlock := res.Query[0].Children[1]
+	require.Equal(t, "friends", friendsBlock.Attr)
+	require.Equal(t, 1, len(friendsBlock.GroupbyAttrs))
+	attr := friendsBlock.GroupbyAttrs[0]
+	require.True(t, attr.IsValueVar)
+	require.Equal(t, "myvar", attr.VarName)
+	require.Equal(t, "", attr.Attr)
+	require.Equal(t, "a", friendsBlock.Children[0].Var)
+}
+
 func TestParseGroupby(t *testing.T) {
 	query := `
 	query {

@@ -29,6 +29,31 @@ func TestDataAndErrors(t *testing.T) {
 			errors:   nil,
 			expected: `{}`,
 		},
+		"add initial empty object": {
+			data:     []string{"{}"},
+			errors:   nil,
+			expected: `{}`,
+		},
+		"add empty to existing": {
+			data:     []string{`{"Some": "Data"}`, "{}"},
+			errors:   nil,
+			expected: `{"data": {"Some": "Data"}}`,
+		},
+		"add empty first then existing": {
+			data:     []string{"{}", `{"Some": "Data"}`},
+			errors:   nil,
+			expected: `{"data": {"Some": "Data"}}`,
+		},
+		"add spaces in payload": {
+			data:     []string{`  {"Some": "Data"}  `, `  {"And": "More"}  `},
+			errors:   nil,
+			expected: `{"data": {"Some": "Data", "And": "More"}}`,
+		},
+		"add empty with spaces": {
+			data:     []string{`{"Some": "Data"}`, `   {}   `},
+			errors:   nil,
+			expected: `{"data": {"Some": "Data"}}`,
+		},
 		"add initial": {
 			data:     []string{`{"Some": "Data"}`},
 			errors:   nil,

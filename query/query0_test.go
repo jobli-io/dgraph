@@ -1550,6 +1550,23 @@ func TestGroupByRoot(t *testing.T) {
 		js)
 }
 
+func TestGroupByValueVar(t *testing.T) {
+	query := `
+	{
+		me(func: uid(1, 23, 24, 25, 31)) {
+			v as age
+		}
+		groups(func: uid(1, 23, 24, 25, 31)) @groupby(val(v)) {
+			count(uid)
+		}
+	}
+	`
+	js := processQueryNoErr(t, query)
+	require.JSONEq(t,
+		`{"data": {"me":[{"age":38},{"age":15},{"age":15},{"age":17},{"age":19}], "groups":[{"@groupby":[{"val(v)":17,"count":1},{"val(v)":19,"count":1},{"val(v)":38,"count":1},{"val(v)":15,"count":2}]}]}}`,
+		js)
+}
+
 func TestGroupByRootEmpty(t *testing.T) {
 	// Predicate agent doesn't exist.
 	query := `

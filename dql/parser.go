@@ -100,9 +100,11 @@ type ShortestPathArgs struct {
 
 // GroupByAttr stores the arguments needed to process the @groupby directive.
 type GroupByAttr struct {
-	Attr  string
-	Alias string
-	Langs []string
+	Attr       string
+	Alias      string
+	Langs      []string
+	VarName    string
+	IsValueVar bool
 	// TokenizerName, if non-empty, is the name of a DateTime tokenizer ("year", "month",
 	// "day", "hour") to apply when bucketing DateTime values. The raw stored timestamp is
 	// floored to the requested granularity before being used as the group key.
@@ -842,6 +844,16 @@ func (gq *GraphQuery) collectVars(v *Vars) {
 // that aggregate-alias variables (e.g. the "count" in "count as count(uid)")
 // are not flagged as "defined but not used" by checkDependency.
 func (gq *GraphQuery) collectVarsInsideGroupBy(v *Vars) {
+	if gq.Var != "" {
+		v.Defines = append(v.Defines, gq.Var)
+		v.Needs = append(v.Needs, gq.Var)
+	}
+	if gq.FacetVar != nil {
+		for _, va := range gq.FacetVar {
+			v.Defines = append(v.Defines, va)
+			v.Needs = append(v.Needs, va)
+		}
+	}
 	// NeedsVar still applies (a child may reference outer variables in a filter).
 	for _, va := range gq.NeedsVar {
 		v.Needs = append(v.Needs, va.Name)
@@ -2362,6 +2374,32 @@ loop:
 				continue
 			}
 
+			var isValVar bool
+			var varName string
+			if strings.ToLower(val) == "val" {
+				peekIt, err := it.Peek(1)
+				if err == nil && peekIt[0].Typ == itemLeftRound {
+					it.Next() // consume itemLeftRound
+					it.Next() // move to variable name
+					varItem := it.Item()
+					if varItem.Typ != itemName {
+						return varItem.Errorf("Expected a variable name inside val() inside groupby")
+					}
+					varName = varItem.Val
+					it.Next() // consume varName
+					closeRound := it.Item()
+					if closeRound.Typ != itemRightRound {
+						return closeRound.Errorf("Expected a close parenthesis after val(%s)", varName)
+					}
+					isValVar = true
+
+					gq.NeedsVar = append(gq.NeedsVar, VarContext{
+						Name: varName,
+						Typ:  ValueVar,
+					})
+				}
+			}
+
 			var langs []string
 			var tokenizerName, timezone string
 			items, err := it.Peek(1)
@@ -2389,8 +2427,14 @@ loop:
 					}
 				}
 			}
+			var attrVal string
+			if !isValVar {
+				attrVal = val
+			}
 			attrLang := GroupByAttr{
-				Attr:          val,
+				Attr:          attrVal,
+				VarName:       varName,
+				IsValueVar:    isValVar,
 				Alias:         alias,
 				Langs:         langs,
 				TokenizerName: tokenizerName,

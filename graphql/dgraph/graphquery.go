@@ -110,7 +110,16 @@ func writeQuery(b *strings.Builder, query *dql.GraphQuery, prefix string) {
 			if i > 0 {
 				x.Check2(b.WriteString(", "))
 			}
-			if attr.TokenizerName != "" {
+			if attr.IsValueVar {
+				suffix := ""
+				if attr.TokenizerName != "" {
+					suffix = "@" + attr.TokenizerName
+					if attr.Timezone != "" {
+						suffix += "__" + strings.ReplaceAll(attr.Timezone, "/", "__")
+					}
+				}
+				x.Check2(b.WriteString("val(" + attr.VarName + ")" + suffix))
+			} else if attr.TokenizerName != "" {
 				// Direct DateTime field with granularity bucketing.
 				suffix := attr.TokenizerName
 				if attr.Timezone != "" {

@@ -2348,6 +2348,7 @@ func ProcessGraph(ctx context.Context, sg, parent *SubGraph, rch chan error) {
 					Langs:         it.Langs,
 					TokenizerName: it.TokenizerName,
 					Timezone:      it.Timezone,
+					Var:           it.VarName,
 				},
 			})
 		}

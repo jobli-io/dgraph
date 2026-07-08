@@ -334,33 +334,33 @@ terminal scalar to `true`.
 
 ### How it works
 
-For nested specs the engine emits two DQL blocks:
+For nested specs, the engine traverses the edge path from the root set and collects the leaf scalar
+values into a **value variable** inside an auxiliary `var()` block:
 
-1. **Leaf-UID collection:** A `var()` block traverses the edge path from the authenticated root set
-   and collects the UIDs of the leaf-type nodes (e.g. status nodes).
-2. **Leaf-level `@groupby`:** The main `groupByXxx` query runs on those leaf UIDs and applies
-   `@groupby` directly on the leaf scalar predicate.
+1. **Leaf-value collection:** A `var()` block traverses the edge path from the authenticated root
+   set, extracts the leaf scalar value as a child value variable (e.g.,
+   `__gby_0_c as StatusIfc.name`), and aggregates it up to the root level using a parent value
+   variable assignment (`__gby_0 as max(val(__gby_0_c))`).
+2. **Value-variable `@groupby`:** The main `groupByXxx` query runs on the root type UIDs
+   (`CompanyRoot`) and natively groups by the parent value variable using `@groupby(val(__gby_0))`.
 
-The DQL emitted for the example above is roughly:
+The DQL emitted for the example above is:
 
 ```dql
 var(func: uid(CompanyRoot)) {
-  Company.hasStatus { __gby_0_leafUIDs as uid }
+  Company.hasStatus {
+    __gby_0_c as StatusIfc.name
+  }
+  __gby_0 as max(val(__gby_0_c))
 }
-groupByCompany(func: uid(__gby_0_leafUIDs)) @groupby(StatusIfc.name) {
+groupByCompany(func: uid(CompanyRoot)) @groupby(val(__gby_0)) {
   count(uid)
 }
 ```
 
-> [!NOTE] Because `count(uid)` is applied to the leaf-type UIDs (e.g. status nodes), it counts the
-> number of distinct status nodes per name — which equals the number of companies sharing that
-> status when each company points to exactly one status node. If multiple companies share the same
-> status UID, the count correctly reflects the number of companies.
+> [!TIP] Because the main `groupByXxx` query remains rooted at the root type (e.g., `CompanyRoot`),
+> **all root-level aggregate fields (`avg`, `min`, `max`, `sum`, `count`) function natively and are
+> fully supported** for nested field groupBy!
 
 > [!IMPORTANT] Only **one nested spec** is supported per query. Multiple nested specs in the same
 > `groupBy` list are not honoured — only the first one is used.
-
-> [!IMPORTANT] Aggregate functions (`xxxMin`, `xxxMax`, `xxxSum`, `xxxAvg`) are **not available**
-> for nested field groupBy because they reference predicates on the root type (e.g.
-> `Company.revenue`), but the main `@groupby` query runs on the leaf-type UIDs (status nodes), not
-> the root type nodes. Only `count` is available for nested specs.
