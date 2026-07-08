@@ -362,5 +362,7 @@ groupByCompany(func: uid(CompanyRoot)) @groupby(val(__gby_0)) {
 > **all root-level aggregate fields (`avg`, `min`, `max`, `sum`, `count`) function natively and are
 > fully supported** for nested field groupBy!
 
-> [!IMPORTANT] Only **one nested spec** is supported per query. Multiple nested specs in the same
-> `groupBy` list are not honoured — only the first one is used.
+> [!IMPORTANT] **Multiple nested specs** are fully and concurrently supported in the same `groupBy`
+> list. You can group by multiple separate nested fields (e.g., both `hasPrimaryGroup.name` and
+> `createdBy.email`) in a single query. Each nested spec will generate its own auxiliary value
+> variable block.

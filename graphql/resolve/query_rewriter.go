@@ -611,23 +611,20 @@ func groupByQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery {
 			//     count(uid)
 			//   }
 			//
-			// Only one nested spec per query is supported; if multiple nested specs are
-			// supplied only the first is honoured (validation should enforce this).
-			if len(varBlocks) == 0 {
-				// edgePath is all DQL preds except the leaf scalar.
-				edgePath := dgPreds[:len(dgPreds)-1]
-				leafPred := dgPreds[len(dgPreds)-1]
-				varName := fmt.Sprintf("__gby_%d", i)
+			// Multiple nested specs are fully supported.
+			// Each nested spec is translated to its own auxiliary var() block and aggregated.
+			edgePath := dgPreds[:len(dgPreds)-1]
+			leafPred := dgPreds[len(dgPreds)-1]
+			varName := fmt.Sprintf("__gby_%d", i)
 
-				varBlocks = append(varBlocks, buildValueVarBlock(rootVar, edgePath, leafPred, varName))
+			varBlocks = append(varBlocks, buildValueVarBlock(rootVar, edgePath, leafPred, varName))
 
-				mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
-					VarName:       varName,
-					IsValueVar:    true,
-					TokenizerName: by,
-					Timezone:      tz,
-				})
-			}
+			mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
+				VarName:       varName,
+				IsValueVar:    true,
+				TokenizerName: by,
+				Timezone:      tz,
+			})
 			pathMap[i] = strings.Join(pathSegments, ".")
 		}
 	}

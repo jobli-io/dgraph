@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -422,6 +423,9 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 		}
 
 		if len(groupKeyEntries) > 0 {
+			sort.Slice(groupKeyEntries, func(i, j int) bool {
+				return string(groupKeyEntries[i]["path"]) < string(groupKeyEntries[j]["path"])
+			})
 			gkJSON, err := json.Marshal(groupKeyEntries)
 			if err != nil {
 				return rawData, err
