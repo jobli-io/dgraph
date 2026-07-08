@@ -93,8 +93,8 @@ func TestCompleteGroupByResult(t *testing.T) {
 					}
 				]
 			}`,
-			// Note: Because we added alphabetical sorting by path, hasPrimaryGroup.name comes after createdBy.email
-			wantJSON: `{"groupByCompany":[{"count":1,"groupKeys":[{"path":"createdBy.email","value":"test@gorillajobs.app"},{"path":"hasPrimaryGroup.name","value":"Co Auth Group A"}]}]}`,
+			// Note: It follows the exact same order as defined in the query (groupByArg list)
+			wantJSON: `{"groupByCompany":[{"count":1,"groupKeys":[{"path":"hasPrimaryGroup.name","value":"Co Auth Group A"},{"path":"createdBy.email","value":"test@gorillajobs.app"}]}]}`,
 		},
 		{
 			name:      "nested spec resolved via pathMap (value-variable-based groupby)",
@@ -159,8 +159,8 @@ func TestCompleteGroupByResult(t *testing.T) {
 				}
 			} else if tc.queryName == "groupByCompany" {
 				pathMap = map[string]string{
-					"val(__gby_0)": "hasPrimaryGroup.name",
-					"val(__gby_1)": "createdBy.email",
+					"val(__gby_0)": "0000:hasPrimaryGroup.name",
+					"val(__gby_1)": "0001:createdBy.email",
 				}
 			}
 

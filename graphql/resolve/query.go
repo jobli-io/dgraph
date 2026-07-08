@@ -279,11 +279,9 @@ func convertScalarToString(val interface{}) (string, error) {
 }
 
 // buildGroupByPathMap re-reads the groupBy argument from a GroupByQuery and returns
-// a map of leaf-field-name → full dot-separated GraphQL field path for nested specs.
-// Direct-field specs (path length == 1) are NOT stored in the map — the type-prefix
-// strip already produces the correct leaf name for those.
+// a map of leaf-field-name → full dot-separated GraphQL field path with the original index prefixed.
 //
-// Example: {field: {hasStatus: {name: true}}} → {"name": "hasStatus.name"}
+// Example: {field: {hasStatus: {name: true}}} → {"name": "0000:hasStatus.name"}
 func buildGroupByPathMap(query schema.Query) map[string]string {
 	pathMap := make(map[string]string)
 	groupByArg, _ := query.ArgValue("groupBy").([]interface{})
@@ -291,13 +289,19 @@ func buildGroupByPathMap(query schema.Query) map[string]string {
 		specMap, _ := spec.(map[string]interface{})
 		fieldObj, _ := specMap["field"].(map[string]interface{})
 		path := walkGroupByFieldPath(fieldObj)
-		if len(path) > 1 {
+		if len(path) > 0 {
 			fullPath := strings.Join(path, ".")
-			// Map val(__gby_i) directly to full path
-			pathMap[fmt.Sprintf("val(__gby_%d)", i)] = fullPath
-			// Also map the leaf name and raw variable name as fallback
-			pathMap[path[len(path)-1]] = fullPath
-			pathMap[fmt.Sprintf("__gby_%d", i)] = fullPath
+			valWithIndex := fmt.Sprintf("%04d:%s", i, fullPath)
+			if len(path) > 1 {
+				// Map val(__gby_i) directly to full path with index
+				pathMap[fmt.Sprintf("val(__gby_%d)", i)] = valWithIndex
+				// Also map the leaf name and raw variable name as fallback
+				pathMap[path[len(path)-1]] = valWithIndex
+				pathMap[fmt.Sprintf("__gby_%d", i)] = valWithIndex
+			} else {
+				// For direct fields, map the predicate name to full path with index
+				pathMap[path[0]] = valWithIndex
+			}
 		}
 	}
 	return pathMap
@@ -385,12 +389,17 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 	//   - Pass aggregate fields (count, ratingAvg, …) through unchanged.
 	result := make([]map[string]json.RawMessage, 0, len(groups))
 	for _, grp := range groups {
-		var groupKeyEntries []map[string]json.RawMessage
+		type groupKeyWithIndex struct {
+			index int
+			entry map[string]json.RawMessage
+		}
+		var groupKeyEntries []groupKeyWithIndex
 		transformed := make(map[string]json.RawMessage, len(grp))
 
 		for k, v := range grp {
 			isGroupKey := false
 			var path string
+			index := 9999 // Fallback to end if not specified
 
 			if strings.HasPrefix(k, "val(") && strings.HasSuffix(k, ")") {
 				isGroupKey = true
@@ -411,10 +420,20 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 			}
 
 			if isGroupKey {
+				if strings.Contains(path, ":") {
+					parts := strings.SplitN(path, ":", 2)
+					if idx, err := strconv.Atoi(parts[0]); err == nil {
+						index = idx
+						path = parts[1]
+					}
+				}
 				valStr, _ := json.Marshal(strings.Trim(string(v), "\""))
-				groupKeyEntries = append(groupKeyEntries, map[string]json.RawMessage{
-					"path":  json.RawMessage(`"` + path + `"`),
-					"value": valStr,
+				groupKeyEntries = append(groupKeyEntries, groupKeyWithIndex{
+					index: index,
+					entry: map[string]json.RawMessage{
+						"path":  json.RawMessage(`"` + path + `"`),
+						"value": valStr,
+					},
 				})
 				continue
 			}
@@ -424,9 +443,18 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 
 		if len(groupKeyEntries) > 0 {
 			sort.Slice(groupKeyEntries, func(i, j int) bool {
-				return string(groupKeyEntries[i]["path"]) < string(groupKeyEntries[j]["path"])
+				if groupKeyEntries[i].index != groupKeyEntries[j].index {
+					return groupKeyEntries[i].index < groupKeyEntries[j].index
+				}
+				return string(groupKeyEntries[i].entry["path"]) < string(groupKeyEntries[j].entry["path"])
 			})
-			gkJSON, err := json.Marshal(groupKeyEntries)
+
+			flatEntries := make([]map[string]json.RawMessage, 0, len(groupKeyEntries))
+			for _, item := range groupKeyEntries {
+				flatEntries = append(flatEntries, item.entry)
+			}
+
+			gkJSON, err := json.Marshal(flatEntries)
 			if err != nil {
 				return rawData, err
 			}
