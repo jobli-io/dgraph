@@ -155,7 +155,16 @@ func (qr *queryResolver) rewriteAndExecute(ctx context.Context, query schema.Que
 		// record spec-index → dot-separated GraphQL path so that completeGroupByResult
 		// can label val(__gby_N) keys in the DQL response.
 		pathMap := buildGroupByPathMap(query)
-		if transformed, transformErr := completeGroupByResult(query.ResponseName(), resolved.Data, pathMap); transformErr == nil {
+
+		groupKeysSelected := false
+		for _, f := range query.SelectionSet() {
+			if f.Name() == "groupKeys" {
+				groupKeysSelected = true
+				break
+			}
+		}
+
+		if transformed, transformErr := completeGroupByResult(query.ResponseName(), resolved.Data, pathMap, groupKeysSelected); transformErr == nil {
 			resolved.Data = transformed
 		}
 	}
@@ -346,7 +355,7 @@ func walkGroupByFieldPath(obj map[string]interface{}) []string {
 //     If pathMap[leafName] exists, use the full path; else use leafName.
 //     Adds to groupKeys as {path: ..., value: v}.
 //     - Anything else (count, ratingAvg, …) → pass through as a top-level field.
-func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]string) ([]byte, error) {
+func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]string, groupKeysSelected bool) ([]byte, error) {
 
 	// Unmarshal the top-level map, preserving numeric types as json.RawMessage.
 	var top map[string]json.RawMessage
@@ -441,17 +450,22 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 			transformed[k] = v
 		}
 
-		if len(groupKeyEntries) > 0 {
-			sort.Slice(groupKeyEntries, func(i, j int) bool {
-				if groupKeyEntries[i].index != groupKeyEntries[j].index {
-					return groupKeyEntries[i].index < groupKeyEntries[j].index
-				}
-				return string(groupKeyEntries[i].entry["path"]) < string(groupKeyEntries[j].entry["path"])
-			})
+		if groupKeysSelected {
+			var flatEntries []map[string]json.RawMessage
+			if len(groupKeyEntries) > 0 {
+				sort.Slice(groupKeyEntries, func(i, j int) bool {
+					if groupKeyEntries[i].index != groupKeyEntries[j].index {
+						return groupKeyEntries[i].index < groupKeyEntries[j].index
+					}
+					return string(groupKeyEntries[i].entry["path"]) < string(groupKeyEntries[j].entry["path"])
+				})
 
-			flatEntries := make([]map[string]json.RawMessage, 0, len(groupKeyEntries))
-			for _, item := range groupKeyEntries {
-				flatEntries = append(flatEntries, item.entry)
+				flatEntries = make([]map[string]json.RawMessage, 0, len(groupKeyEntries))
+				for _, item := range groupKeyEntries {
+					flatEntries = append(flatEntries, item.entry)
+				}
+			} else {
+				flatEntries = make([]map[string]json.RawMessage, 0)
 			}
 
 			gkJSON, err := json.Marshal(flatEntries)

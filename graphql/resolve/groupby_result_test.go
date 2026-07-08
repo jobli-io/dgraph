@@ -14,11 +14,12 @@ import (
 
 func TestCompleteGroupByResult(t *testing.T) {
 	tests := []struct {
-		name      string
-		queryName string
-		raw       string
-		wantJSON  string
-		wantErr   bool
+		name        string
+		queryName   string
+		raw         string
+		wantJSON    string
+		wantErr     bool
+		notSelected bool
 	}{
 		{
 			name:      "strips TypeName prefix from predicate keys",
@@ -140,10 +141,19 @@ func TestCompleteGroupByResult(t *testing.T) {
 			// Exact key ordering may vary, so we unmarshal to compare.
 		},
 		{
-			name:      "invalid JSON returns error",
+			name:      "omits groupKeys when not selected",
 			queryName: "groupByJobAd",
-			raw:       `not-json`,
-			wantErr:   true,
+			raw: `{
+				"groupByJobAd": [
+					{
+						"@groupby": [
+							{"JobAd.status": "OPEN", "count": 5}
+						]
+					}
+				]
+			}`,
+			wantJSON:    `{"groupByJobAd":[{"count":5}]}`,
+			notSelected: true,
 		},
 	}
 
@@ -164,7 +174,7 @@ func TestCompleteGroupByResult(t *testing.T) {
 				}
 			}
 
-			out, err := completeGroupByResult(tc.queryName, []byte(tc.raw), pathMap)
+			out, err := completeGroupByResult(tc.queryName, []byte(tc.raw), pathMap, !tc.notSelected)
 
 			if tc.wantErr {
 				require.Error(t, err)
