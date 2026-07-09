@@ -245,7 +245,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
-enum DateTimeGranularity { year month day hour }
+enum DateTimeGranularity { year month day week hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
@@ -638,12 +638,15 @@ type Query {
 	getMovie(id: ID!): Movie
 	queryMovie(filter: MovieFilter, order: MovieOrder, first: Int, offset: Int): [Movie]
 	aggregateMovie(filter: MovieFilter): MovieAggregateResult
+	groupByMovie(filter: MovieFilter, groupBy: [MovieGroupBySpec!]!): [MovieGroupByResult]
 	getOscarMovie(id: ID!): OscarMovie
 	queryOscarMovie(filter: OscarMovieFilter, order: OscarMovieOrder, first: Int, offset: Int): [OscarMovie]
 	aggregateOscarMovie(filter: OscarMovieFilter): OscarMovieAggregateResult
+	groupByOscarMovie(filter: OscarMovieFilter, groupBy: [OscarMovieGroupBySpec!]!): [OscarMovieGroupByResult]
 	getDirector(id: ID!): Director
 	queryDirector(filter: DirectorFilter, order: DirectorOrder, first: Int, offset: Int): [Director]
 	aggregateDirector(filter: DirectorFilter): DirectorAggregateResult
+	groupByDirector(filter: DirectorFilter, groupBy: [DirectorGroupBySpec!]!): [DirectorGroupByResult]
 }
 
 #######################

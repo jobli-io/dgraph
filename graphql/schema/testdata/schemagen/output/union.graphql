@@ -277,7 +277,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
-enum DateTimeGranularity { year month day hour }
+enum DateTimeGranularity { year month day week hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
@@ -917,18 +917,23 @@ type Query {
 	getCharacter(id: ID!): Character
 	queryCharacter(filter: CharacterFilter, order: CharacterOrder, first: Int, offset: Int): [Character]
 	aggregateCharacter(filter: CharacterFilter): CharacterAggregateResult
+	groupByCharacter(filter: CharacterFilter, groupBy: [CharacterGroupBySpec!]!): [CharacterGroupByResult]
 	getHuman(id: ID!): Human
 	queryHuman(filter: HumanFilter, order: HumanOrder, first: Int, offset: Int): [Human]
 	aggregateHuman(filter: HumanFilter): HumanAggregateResult
+	groupByHuman(filter: HumanFilter, groupBy: [HumanGroupBySpec!]!): [HumanGroupByResult]
 	getDroid(id: ID!): Droid
 	queryDroid(filter: DroidFilter, order: DroidOrder, first: Int, offset: Int): [Droid]
 	aggregateDroid(filter: DroidFilter): DroidAggregateResult
+	groupByDroid(filter: DroidFilter, groupBy: [DroidGroupBySpec!]!): [DroidGroupByResult]
 	getStarship(id: ID!): Starship
 	queryStarship(filter: StarshipFilter, order: StarshipOrder, first: Int, offset: Int): [Starship]
 	aggregateStarship(filter: StarshipFilter): StarshipAggregateResult
+	groupByStarship(filter: StarshipFilter, groupBy: [StarshipGroupBySpec!]!): [StarshipGroupByResult]
 	getPlanet(id: ID!): Planet
 	queryPlanet(filter: PlanetFilter, order: PlanetOrder, first: Int, offset: Int): [Planet]
 	aggregatePlanet(filter: PlanetFilter): PlanetAggregateResult
+	groupByPlanet(filter: PlanetFilter, groupBy: [PlanetGroupBySpec!]!): [PlanetGroupByResult]
 }
 
 #######################

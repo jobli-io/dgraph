@@ -387,6 +387,7 @@ enum DateTimeGranularity {
 	year
 	month
 	day
+	week
 	hour
 }
 

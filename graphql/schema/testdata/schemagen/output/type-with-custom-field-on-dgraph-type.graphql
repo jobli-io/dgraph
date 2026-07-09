@@ -235,7 +235,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
-enum DateTimeGranularity { year month day hour }
+enum DateTimeGranularity { year month day week hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
@@ -537,9 +537,11 @@ type Query {
 	getCar(id: ID!): Car
 	queryCar(filter: CarFilter, order: CarOrder, first: Int, offset: Int): [Car]
 	aggregateCar(filter: CarFilter): CarAggregateResult
+	groupByCar(filter: CarFilter, groupBy: [CarGroupBySpec!]!): [CarGroupByResult]
 	getUser(id: ID!): User
 	queryUser(filter: UserFilter, order: UserOrder, first: Int, offset: Int): [User]
 	aggregateUser(filter: UserFilter): UserAggregateResult
+	groupByUser(filter: UserFilter, groupBy: [UserGroupBySpec!]!): [UserGroupByResult]
 }
 
 #######################

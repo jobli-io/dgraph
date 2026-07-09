@@ -246,7 +246,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
-enum DateTimeGranularity { year month day hour }
+enum DateTimeGranularity { year month day week hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
@@ -710,13 +710,16 @@ type Query {
 	querySimilarProductByEmbedding(by: ProductEmbedding!, topK: Int!, vector: [Float!], text: String, distance: Float, filter: ProductFilter): [Product]
 	queryProduct(filter: ProductFilter, order: ProductOrder, first: Int, offset: Int): [Product]
 	aggregateProduct(filter: ProductFilter): ProductAggregateResult
+	groupByProduct(filter: ProductFilter, groupBy: [ProductGroupBySpec!]!): [ProductGroupByResult]
 	queryPurchase(filter: PurchaseFilter, order: PurchaseOrder, first: Int, offset: Int): [Purchase]
 	aggregatePurchase(filter: PurchaseFilter): PurchaseAggregateResult
+	groupByPurchase(filter: PurchaseFilter, groupBy: [PurchaseGroupBySpec!]!): [PurchaseGroupByResult]
 	getUser(email: String!): User
 	querySimilarUserById(email: String!, by: UserEmbedding!, topK: Int!, filter: UserFilter): [User]
 	querySimilarUserByEmbedding(by: UserEmbedding!, topK: Int!, vector: [Float!], text: String, distance: Float, filter: UserFilter): [User]
 	queryUser(filter: UserFilter, order: UserOrder, first: Int, offset: Int): [User]
 	aggregateUser(filter: UserFilter): UserAggregateResult
+	groupByUser(filter: UserFilter, groupBy: [UserGroupBySpec!]!): [UserGroupByResult]
 }
 
 #######################

@@ -452,6 +452,7 @@ enum DateTimeGranularity {
 	year
 	month
 	day
+	week
 	hour
 }
 
@@ -631,11 +632,14 @@ input UpdatePersonInput {
 type Query {
 	queryCharacter(filter: CharacterFilter, order: CharacterOrder, first: Int, offset: Int): [Character]
 	aggregateCharacter(filter: CharacterFilter): CharacterAggregateResult
+	groupByCharacter(filter: CharacterFilter, groupBy: [CharacterGroupBySpec!]!): [CharacterGroupByResult]
 	getHuman(id: ID!): Human
 	checkHumanPassword(id: ID!, password: String!): Human
 	queryHuman(filter: HumanFilter, order: HumanOrder, first: Int, offset: Int): [Human]
 	aggregateHuman(filter: HumanFilter): HumanAggregateResult
+	groupByHuman(filter: HumanFilter, groupBy: [HumanGroupBySpec!]!): [HumanGroupByResult]
 	queryPerson(filter: PersonFilter, order: PersonOrder, first: Int, offset: Int): [Person]
+	groupByPerson(filter: PersonFilter, groupBy: [PersonGroupBySpec!]!): [PersonGroupByResult]
 }
 
 #######################

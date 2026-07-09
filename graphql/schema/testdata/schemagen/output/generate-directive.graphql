@@ -243,7 +243,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
-enum DateTimeGranularity { year month day hour }
+enum DateTimeGranularity { year month day week hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
@@ -625,11 +625,14 @@ input UpdatePersonInput {
 type Query {
 	queryCharacter(filter: CharacterFilter, order: CharacterOrder, first: Int, offset: Int): [Character]
 	aggregateCharacter(filter: CharacterFilter): CharacterAggregateResult
+	groupByCharacter(filter: CharacterFilter, groupBy: [CharacterGroupBySpec!]!): [CharacterGroupByResult]
 	getHuman(id: ID!): Human
 	checkHumanPassword(id: ID!, password: String!): Human
 	queryHuman(filter: HumanFilter, order: HumanOrder, first: Int, offset: Int): [Human]
 	aggregateHuman(filter: HumanFilter): HumanAggregateResult
+	groupByHuman(filter: HumanFilter, groupBy: [HumanGroupBySpec!]!): [HumanGroupByResult]
 	queryPerson(filter: PersonFilter, order: PersonOrder, first: Int, offset: Int): [Person]
+	groupByPerson(filter: PersonFilter, groupBy: [PersonGroupBySpec!]!): [PersonGroupByResult]
 }
 
 #######################

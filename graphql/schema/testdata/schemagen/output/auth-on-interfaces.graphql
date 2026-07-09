@@ -245,7 +245,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
-enum DateTimeGranularity { year month day hour }
+enum DateTimeGranularity { year month day week hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
@@ -662,14 +662,17 @@ type Query {
 	getAuthor(id: ID!): Author
 	queryAuthor(filter: AuthorFilter, order: AuthorOrder, first: Int, offset: Int): [Author]
 	aggregateAuthor(filter: AuthorFilter): AuthorAggregateResult
+	groupByAuthor(filter: AuthorFilter, groupBy: [AuthorGroupBySpec!]!): [AuthorGroupByResult]
 	getPost(id: ID!): Post
 	checkPostPassword(id: ID!, pwd: String!): Post
 	queryPost(filter: PostFilter, order: PostOrder, first: Int, offset: Int): [Post]
 	aggregatePost(filter: PostFilter): PostAggregateResult
+	groupByPost(filter: PostFilter, groupBy: [PostGroupBySpec!]!): [PostGroupByResult]
 	getQuestion(id: ID!): Question
 	checkQuestionPassword(id: ID!, pwd: String!): Question
 	queryQuestion(filter: QuestionFilter, order: QuestionOrder, first: Int, offset: Int): [Question]
 	aggregateQuestion(filter: QuestionFilter): QuestionAggregateResult
+	groupByQuestion(filter: QuestionFilter, groupBy: [QuestionGroupBySpec!]!): [QuestionGroupByResult]
 }
 
 #######################

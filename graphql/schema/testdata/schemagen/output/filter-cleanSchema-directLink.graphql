@@ -242,7 +242,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
-enum DateTimeGranularity { year month day hour }
+enum DateTimeGranularity { year month day week hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
@@ -510,6 +510,7 @@ type Query {
 	getX(id: ID!): X
 	queryX(filter: XFilter, order: XOrder, first: Int, offset: Int): [X]
 	aggregateX(filter: XFilter): XAggregateResult
+	groupByX(filter: XFilter, groupBy: [XGroupBySpec!]!): [XGroupByResult]
 	queryY(filter: YFilter, first: Int, offset: Int): [Y]
 	aggregateY(filter: YFilter): YAggregateResult
 	queryZ(filter: ZFilter, first: Int, offset: Int): [Z]

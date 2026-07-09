@@ -237,7 +237,7 @@ input AuthVariable { key: String! value: [String!]! }
 directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
-enum DateTimeGranularity { year month day hour }
+enum DateTimeGranularity { year month day week hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean) on FIELD_DEFINITION
@@ -583,9 +583,11 @@ type Query {
 	getBooking(id: ID!): Booking
 	queryBooking(filter: BookingFilter, order: BookingOrder, first: Int, offset: Int): [Booking]
 	aggregateBooking(filter: BookingFilter): BookingAggregateResult
+	groupByBooking(filter: BookingFilter, groupBy: [BookingGroupBySpec!]!): [BookingGroupByResult]
 	getBookingXID(id: String!): BookingXID
 	queryBookingXID(filter: BookingXIDFilter, order: BookingXIDOrder, first: Int, offset: Int): [BookingXID]
 	aggregateBookingXID(filter: BookingXIDFilter): BookingXIDAggregateResult
+	groupByBookingXID(filter: BookingXIDFilter, groupBy: [BookingXIDGroupBySpec!]!): [BookingXIDGroupByResult]
 }
 
 #######################

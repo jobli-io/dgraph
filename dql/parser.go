@@ -2325,7 +2325,7 @@ loop:
 func isGroupByTokenizer(name string) bool {
 	part, _, _ := strings.Cut(name, "__")
 	switch part {
-	case "year", "month", "day", "hour":
+	case "year", "month", "day", "week", "hour":
 		return true
 	}
 	return false

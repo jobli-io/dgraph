@@ -224,12 +224,17 @@ func floorToInterval(t time.Time, tokName string, tz string) (time.Time, error) 
 		return time.Date(y, 1, 1, 0, 0, 0, 0, loc), nil
 	case "month":
 		return time.Date(y, m, 1, 0, 0, 0, 0, loc), nil
+	case "week":
+		daysToSubtract := int(tLocal.Weekday())
+		sunday := tLocal.AddDate(0, 0, -daysToSubtract)
+		sy, sm, sd := sunday.Date()
+		return time.Date(sy, sm, sd, 0, 0, 0, 0, loc), nil
 	case "day":
 		return time.Date(y, m, d, 0, 0, 0, 0, loc), nil
 	case "hour":
 		return time.Date(y, m, d, h, 0, 0, 0, loc), nil
 	default:
-		return time.Time{}, fmt.Errorf("floorToInterval: unknown tokenizer name %q; must be year, month, day, or hour", tokName)
+		return time.Time{}, fmt.Errorf("floorToInterval: unknown tokenizer name %q; must be year, month, week, day, or hour", tokName)
 	}
 }
 
