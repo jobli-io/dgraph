@@ -222,8 +222,27 @@ func floorToInterval(t time.Time, tokName string, tz string) (time.Time, error) 
 	switch tokName {
 	case "year":
 		return time.Date(y, 1, 1, 0, 0, 0, 0, loc), nil
+	case "quarter":
+		quarterMonth := ((int(m)-1)/3)*3 + 1
+		return time.Date(y, time.Month(quarterMonth), 1, 0, 0, 0, 0, loc), nil
 	case "month":
 		return time.Date(y, m, 1, 0, 0, 0, 0, loc), nil
+	case "fortnight":
+		// Anchor fortnight cycle on historical epoch Sunday: 1970-01-04
+		refSunday := time.Date(1970, 1, 4, 0, 0, 0, 0, time.UTC)
+		// Find the Sunday of the current week in local time
+		daysToSubtract := int(tLocal.Weekday())
+		sunday := tLocal.AddDate(0, 0, -daysToSubtract)
+		// Calculate difference in weeks, putting both in UTC to be DST-immune
+		sy, sm, sd := sunday.Date()
+		sundayUTC := time.Date(sy, sm, sd, 0, 0, 0, 0, time.UTC)
+		diffDays := int(sundayUTC.Sub(refSunday).Hours()) / 24
+		weeksSinceEpoch := diffDays / 7
+		// Group weeks into pairs of 2 (fortnight)
+		fortnightWeeks := (weeksSinceEpoch / 2) * 2
+		fortnightSunday := refSunday.AddDate(0, 0, fortnightWeeks*7)
+		fy, fm, fd := fortnightSunday.Date()
+		return time.Date(fy, fm, fd, 0, 0, 0, 0, loc), nil
 	case "week":
 		daysToSubtract := int(tLocal.Weekday())
 		sunday := tLocal.AddDate(0, 0, -daysToSubtract)
@@ -234,7 +253,7 @@ func floorToInterval(t time.Time, tokName string, tz string) (time.Time, error) 
 	case "hour":
 		return time.Date(y, m, d, h, 0, 0, 0, loc), nil
 	default:
-		return time.Time{}, fmt.Errorf("floorToInterval: unknown tokenizer name %q; must be year, month, week, day, or hour", tokName)
+		return time.Time{}, fmt.Errorf("floorToInterval: unknown tokenizer name %q; must be year, quarter, month, fortnight, week, day, or hour", tokName)
 	}
 }
 

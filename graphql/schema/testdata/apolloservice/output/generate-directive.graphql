@@ -450,9 +450,11 @@ enum CharacterTypename {
 
 enum DateTimeGranularity {
 	year
+	quarter
 	month
-	day
+	fortnight
 	week
+	day
 	hour
 }
 

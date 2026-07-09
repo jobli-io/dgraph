@@ -24,8 +24,10 @@ func TestFloorToInterval_UTC(t *testing.T) {
 	}{
 		{"hour", time.Date(2026, 7, 6, 14, 0, 0, 0, time.UTC)},
 		{"week", time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)},
+		{"fortnight", time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)},
 		{"day", time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC)},
 		{"month", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
+		{"quarter", time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
 		{"year", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
 	for _, tc := range tests {
@@ -53,10 +55,14 @@ func TestFloorToInterval_Timezone(t *testing.T) {
 		{"hour", time.Date(2026, 7, 7, 0, 0, 0, 0, sydLoc)},
 		// Week floor in Sydney (Tuesday July 7th floors to Sunday July 5th):
 		{"week", time.Date(2026, 7, 5, 0, 0, 0, 0, sydLoc)},
+		// Fortnight floor in Sydney:
+		{"fortnight", time.Date(2026, 7, 5, 0, 0, 0, 0, sydLoc)},
 		// Day floor in Sydney: 2026-07-07.
 		{"day", time.Date(2026, 7, 7, 0, 0, 0, 0, sydLoc)},
 		// Month floor in Sydney: 2026-07-01 (same month, July).
 		{"month", time.Date(2026, 7, 1, 0, 0, 0, 0, sydLoc)},
+		// Quarter floor in Sydney:
+		{"quarter", time.Date(2026, 7, 1, 0, 0, 0, 0, sydLoc)},
 		// Year floor in Sydney: 2026-01-01.
 		{"year", time.Date(2026, 1, 1, 0, 0, 0, 0, sydLoc)},
 	}
