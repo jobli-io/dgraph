@@ -156,15 +156,15 @@ func (qr *queryResolver) rewriteAndExecute(ctx context.Context, query schema.Que
 		// can label val(__gby_N) keys in the DQL response.
 		pathMap := buildGroupByPathMap(query)
 
-		groupKeysSelected := false
+		aliasMap := make(map[string]string)
 		for _, f := range query.SelectionSet() {
-			if f.Name() == "groupKeys" {
-				groupKeysSelected = true
-				break
+			if f.Skip() || !f.Include() {
+				continue
 			}
+			aliasMap[f.Name()] = f.ResponseName()
 		}
 
-		if transformed, transformErr := completeGroupByResult(query.ResponseName(), resolved.Data, pathMap, groupKeysSelected); transformErr == nil {
+		if transformed, transformErr := completeGroupByResult(query.Name(), query.ResponseName(), resolved.Data, pathMap, aliasMap); transformErr == nil {
 			resolved.Data = transformed
 		}
 	}
@@ -355,7 +355,13 @@ func walkGroupByFieldPath(obj map[string]interface{}) []string {
 //     If pathMap[leafName] exists, use the full path; else use leafName.
 //     Adds to groupKeys as {path: ..., value: v}.
 //     - Anything else (count, ratingAvg, …) → pass through as a top-level field.
-func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]string, groupKeysSelected bool) ([]byte, error) {
+func completeGroupByResult(
+	dqlKey string,
+	gqlKey string,
+	rawData []byte,
+	pathMap map[string]string,
+	aliasMap map[string]string,
+) ([]byte, error) {
 
 	// Unmarshal the top-level map, preserving numeric types as json.RawMessage.
 	var top map[string]json.RawMessage
@@ -363,10 +369,13 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 		return rawData, err
 	}
 
-	rawField, ok := top[queryName]
+	rawField, ok := top[dqlKey]
 	if !ok {
 		return rawData, nil
 	}
+
+	// Determine if groupKeys is selected in the GraphQL query.
+	gkAlias, groupKeysSelected := aliasMap["groupKeys"]
 
 	// The DQL groupby result is wrapped in an extra array+object layer:
 	// [ { "@groupby": [...] } ]
@@ -376,7 +385,10 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 	}
 
 	if len(outerList) == 0 {
-		top[queryName] = json.RawMessage("[]")
+		top[gqlKey] = json.RawMessage("[]")
+		if dqlKey != gqlKey {
+			delete(top, dqlKey)
+		}
 		return json.Marshal(top)
 	}
 
@@ -384,7 +396,10 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 	rawGroupBy, ok := outerList[0]["@groupby"]
 	if !ok {
 		// No @groupby key — return an empty list to avoid confusing the client.
-		top[queryName] = json.RawMessage("[]")
+		top[gqlKey] = json.RawMessage("[]")
+		if dqlKey != gqlKey {
+			delete(top, dqlKey)
+		}
 		return json.Marshal(top)
 	}
 
@@ -395,7 +410,7 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 
 	// For each group row, build the output object:
 	//   - Collect all group-key fields into a groupKeys JSON array.
-	//   - Pass aggregate fields (count, ratingAvg, …) through unchanged.
+	//   - Pass aggregate fields (count, ratingAvg, …) through unchanged or renamed via aliasMap.
 	result := make([]map[string]json.RawMessage, 0, len(groups))
 	for _, grp := range groups {
 		type groupKeyWithIndex struct {
@@ -446,8 +461,13 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 				})
 				continue
 			}
-			// Pass-through: count, ratingAvg, createdAtMin, etc.
-			transformed[k] = v
+
+			// Pass-through and rename based on alias mapping: count, ratingAvg, etc.
+			outKey := k
+			if alias, ok := aliasMap[k]; ok {
+				outKey = alias
+			}
+			transformed[outKey] = v
 		}
 
 		if groupKeysSelected {
@@ -472,7 +492,7 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 			if err != nil {
 				return rawData, err
 			}
-			transformed["groupKeys"] = gkJSON
+			transformed[gkAlias] = gkJSON
 		}
 		result = append(result, transformed)
 	}
@@ -481,6 +501,9 @@ func completeGroupByResult(queryName string, rawData []byte, pathMap map[string]
 	if err != nil {
 		return rawData, err
 	}
-	top[queryName] = transformedJSON
+	top[gqlKey] = transformedJSON
+	if dqlKey != gqlKey {
+		delete(top, dqlKey)
+	}
 	return json.Marshal(top)
 }

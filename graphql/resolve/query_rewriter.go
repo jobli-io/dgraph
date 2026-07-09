@@ -395,7 +395,7 @@ func aggregateQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery 
 func resolveGroupByPath(
 	fieldObj map[string]interface{},
 	typeDef schema.Type,
-) (pathSegments []string, dgraphPreds []string, err error) {
+) (pathSegments []string, dgraphPreds []string, traversedTypes []schema.Type, err error) {
 	currentTypeObj := typeDef
 	current := fieldObj
 	for {
@@ -405,7 +405,7 @@ func resolveGroupByPath(
 				keys = append(keys, k)
 			}
 			sort.Strings(keys)
-			return nil, nil, errors.Errorf("groupBy field object must contain exactly one field, but found %d fields: %s", len(current), strings.Join(keys, ", "))
+			return nil, nil, nil, errors.Errorf("groupBy field object must contain exactly one field, but found %d fields: %s", len(current), strings.Join(keys, ", "))
 		}
 
 		var chosenKey string
@@ -416,7 +416,7 @@ func resolveGroupByPath(
 			break // take the first (and only valid) key
 		}
 		if chosenKey == "" {
-			return nil, nil, errors.Errorf("groupBy field object is empty")
+			return nil, nil, nil, errors.Errorf("groupBy field object is empty")
 		}
 
 		pathSegments = append(pathSegments, chosenKey)
@@ -427,24 +427,25 @@ func resolveGroupByPath(
 		switch v := chosenVal.(type) {
 		case bool:
 			if !v {
-				return nil, nil, errors.Errorf("groupBy field %q selector must be true", chosenKey)
+				return nil, nil, nil, errors.Errorf("groupBy field %q selector must be true", chosenKey)
 			}
-			return pathSegments, dgraphPreds, nil
+			return pathSegments, dgraphPreds, traversedTypes, nil
 		case map[string]interface{}:
 			// Navigate into the next type via FieldDefinition.Type().
 			fldDef := currentTypeObj.Field(chosenKey)
 			if fldDef == nil {
-				return nil, nil, errors.Errorf("groupBy: unknown field %q on type %s",
+				return nil, nil, nil, errors.Errorf("groupBy: unknown field %q on type %s",
 					chosenKey, currentTypeObj.Name())
 			}
 			nextType := fldDef.Type()
 			if nextType == nil {
-				return nil, nil, errors.Errorf("groupBy: field %q has no resolvable type", chosenKey)
+				return nil, nil, nil, errors.Errorf("groupBy: field %q has no resolvable type", chosenKey)
 			}
 			currentTypeObj = nextType
 			current = v
+			traversedTypes = append(traversedTypes, currentTypeObj)
 		default:
-			return nil, nil, errors.Errorf("groupBy: unexpected value type for field %q", chosenKey)
+			return nil, nil, nil, errors.Errorf("groupBy: unexpected value type for field %q", chosenKey)
 		}
 	}
 }
@@ -497,33 +498,89 @@ func buildLeafUIDVarBlock(rootVar string, edgePath []string, leafUIDVarName stri
 //	}
 //
 // The parent-level variable __gby_0 is then used in @groupby(val(__gby_0)) in the main query.
-func buildValueVarBlock(rootVar string, edgePath []string, leafPred string, varName string) *dql.GraphQuery {
-	childVarName := varName + "_c"
+func buildValueVarBlock(
+	rootFunc *dql.Function,
+	edgePath []string,
+	edgeTypes []schema.Type,
+	leafPred string,
+	varName string,
+	auth *authRewriter,
+	nestedAuthQrys *[]*dql.GraphQuery,
+) *dql.GraphQuery {
+	childVar := varName + "_c"
 
 	// Build from the inside out.
 	innermost := &dql.GraphQuery{
-		Var:  childVarName,
+		Var:  childVar,
 		Attr: leafPred,
 	}
 
 	current := innermost
 	for i := len(edgePath) - 1; i >= 0; i-- {
+		var children []*dql.GraphQuery
+		children = append(children, current)
+
+		var nextChildVar string
+		if i < len(edgePath)-1 {
+			nextChildVar = fmt.Sprintf("%s_p%d", varName, i)
+			aggregator := &dql.GraphQuery{
+				Var:  nextChildVar,
+				Attr: fmt.Sprintf("max(val(%s))", childVar),
+			}
+			children = append(children, aggregator)
+		}
+
 		wrapper := &dql.GraphQuery{
 			Attr:     edgePath[i],
-			Children: []*dql.GraphQuery{current},
+			Children: children,
 		}
+
+		// 🔒 Apply Child Type Auth on this Edge!
+		if auth != nil && !auth.isWritingAuth && i < len(edgeTypes) {
+			edgeType := edgeTypes[i]
+			rbac := auth.evaluateStaticRules(edgeType)
+			if rbac == schema.Negative {
+				wrapper.Filter = &dql.FilterTree{
+					Func: &dql.Function{
+						Name: "uid",
+						UID:  []uint64{0},
+					},
+				}
+			} else if rbac == schema.Uncertain {
+				oldVarName := auth.varName
+				auth.varName = auth.varGen.Next(edgeType, "", "", auth.isWritingAuth)
+
+				oldCascadeAuthType := auth.cascadeAuthorityType
+				auth.cascadeAuthorityType = edgeType.Name()
+
+				authQrys, authFilter := auth.rewriteAuthQueries(edgeType)
+				if authFilter != nil {
+					wrapper.Filter = authFilter
+				}
+				if len(authQrys) > 0 {
+					*nestedAuthQrys = append(*nestedAuthQrys, authQrys...)
+				}
+
+				auth.cascadeAuthorityType = oldCascadeAuthType
+				auth.varName = oldVarName
+			}
+		}
+
 		current = wrapper
+		if i < len(edgePath)-1 {
+			childVar = nextChildVar
+		}
 	}
 
-	parentAggregation := &dql.GraphQuery{
+	finalAggregator := &dql.GraphQuery{
 		Var:  varName,
-		Attr: fmt.Sprintf("max(val(%s))", childVarName),
+		Attr: fmt.Sprintf("max(val(%s))", childVar),
 	}
 
 	return &dql.GraphQuery{
 		Attr:     "var",
-		Func:     &dql.Function{Name: "uid", Args: []dql.Arg{{Value: rootVar}}},
-		Children: []*dql.GraphQuery{current, parentAggregation},
+		Func:     rootFunc,
+		Children: []*dql.GraphQuery{current, finalAggregator},
 	}
 }
 
@@ -571,9 +628,6 @@ func groupByQuery(query schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, 
 	mainQuery := dgQuery[0]
 	mainQuery.IsGroupby = true
 
-	// Determine the root variable name used in var() blocks (matches what auth set up).
-	rootVar := mainQuery.Func.Args[0].Value // e.g. "NoteRoot" or "0x1, 0x2, ..."
-
 	// Parse the groupBy argument.
 	// pathMap tracks spec index → dot-separated GraphQL path for nested specs,
 	// so completeGroupByResult can label groupKeys correctly.
@@ -583,6 +637,7 @@ func groupByQuery(query schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, 
 
 	// varBlocks accumulates var() queries for nested specs; emitted before mainQuery.
 	var varBlocks []*dql.GraphQuery
+	var nestedAuthQrys []*dql.GraphQuery
 
 	for i, spec := range groupByArg {
 		specMap, _ := spec.(map[string]interface{})
@@ -590,7 +645,7 @@ func groupByQuery(query schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, 
 		by, _ := specMap["by"].(string)
 		tz, _ := specMap["tz"].(string)
 
-		pathSegments, dgPreds, err := resolveGroupByPath(fieldObj, mainType)
+		pathSegments, dgPreds, edgeTypes, err := resolveGroupByPath(fieldObj, mainType)
 		if err != nil {
 			return nil, err
 		}
@@ -625,7 +680,7 @@ func groupByQuery(query schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, 
 			leafPred := dgPreds[len(dgPreds)-1]
 			varName := fmt.Sprintf("__gby_%d", i)
 
-			varBlocks = append(varBlocks, buildValueVarBlock(rootVar, edgePath, leafPred, varName))
+			varBlocks = append(varBlocks, buildValueVarBlock(mainQuery.Func, edgePath, edgeTypes, leafPred, varName, authRw, &nestedAuthQrys))
 
 			mainQuery.GroupbyAttrs = append(mainQuery.GroupbyAttrs, dql.GroupByAttr{
 				VarName:       varName,
@@ -688,11 +743,13 @@ func groupByQuery(query schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, 
 
 	// Emit in dependency order:
 	//   1. auth/filter var blocks (define root variable)
-	//   2. nested-spec var() blocks (define __gby_N variables)
-	//   3. main @groupby query
+	//   2. nested-type auth queries
+	//   3. nested-spec var() blocks (define __gby_N variables)
+	//   4. main @groupby query
 	authAndFilterQrys := dgQuery[1:]
-	result := make([]*dql.GraphQuery, 0, len(authAndFilterQrys)+len(varBlocks)+1)
+	result := make([]*dql.GraphQuery, 0, len(authAndFilterQrys)+len(nestedAuthQrys)+len(varBlocks)+1)
 	result = append(result, authAndFilterQrys...)
+	result = append(result, nestedAuthQrys...)
 	result = append(result, varBlocks...)
 	result = append(result, mainQuery)
 	return result, nil
@@ -1798,14 +1855,15 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 	}
 
 	return (&authRewriter{
-		authVariables:   authRw.authVariables,
-		varGen:          authRw.varGen,
-		isWritingAuth:   true,
-		varName:         authRw.varName,
-		selector:        authRw.selector,
-		parentVarName:   authRw.parentVarName,
-		hasAuthRules:    authRw.hasAuthRules,
-		cascadeVarCache: authRw.cascadeVarCache,
+		authVariables:        authRw.authVariables,
+		varGen:               authRw.varGen,
+		isWritingAuth:        true,
+		varName:              authRw.varName,
+		selector:             authRw.selector,
+		parentVarName:        authRw.parentVarName,
+		hasAuthRules:         authRw.hasAuthRules,
+		cascadeVarCache:      authRw.cascadeVarCache,
+		cascadeAuthorityType: authRw.cascadeAuthorityType,
 	}).rewriteRuleNode(typ, authRw.selector(typ))
 }
 

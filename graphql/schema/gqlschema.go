@@ -2345,7 +2345,7 @@ func addGroupByFieldInput(schema *ast.Schema, defn *ast.Definition, providesType
 				// Only add the navigation field if recursion actually created the type.
 				// (typeHasGroupableDescendant can be optimistic; addGroupByFieldInput may
 				// still find 0 includable fields and create nothing.)
-				if schema.Types[td.Name+"GroupByField"] != nil {
+				if schema.Types[td.Name+"GroupByField"] != nil || generating[td.Name+"GroupByField"] {
 					fields = append(fields, &ast.FieldDefinition{
 						Name: fld.Name,
 						Type: &ast.Type{NamedType: td.Name + "GroupByField"},
@@ -2491,10 +2491,10 @@ func addGroupByQuery(schema *ast.Schema, defn *ast.Definition) {
 		},
 	})
 
-	if schema.Types["Query"] == nil {
+	if schema.Query == nil {
 		return
 	}
-	schema.Types["Query"].Fields = append(schema.Types["Query"].Fields, qry)
+	schema.Query.Fields = append(schema.Query.Fields, qry)
 }
 
 func addGetQuery(schema *ast.Schema, defn *ast.Definition,

@@ -174,7 +174,11 @@ func TestCompleteGroupByResult(t *testing.T) {
 				}
 			}
 
-			out, err := completeGroupByResult(tc.queryName, []byte(tc.raw), pathMap, !tc.notSelected)
+			aliasMap := make(map[string]string)
+			if !tc.notSelected {
+				aliasMap["groupKeys"] = "groupKeys"
+			}
+			out, err := completeGroupByResult(tc.queryName, tc.queryName, []byte(tc.raw), pathMap, aliasMap)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -198,4 +202,70 @@ func TestCompleteGroupByResult(t *testing.T) {
 			require.Equal(t, want, got)
 		})
 	}
+}
+
+func TestCompleteGroupByResultWithAliases(t *testing.T) {
+	rawDQLResponse := `{
+		"groupByCompany": [
+			{
+				"@groupby": [
+					{
+						"Company.status": "ACTIVE",
+						"count": 2784,
+						"createdAtMin": "2025-05-22T07:09:31Z"
+					}
+				]
+			}
+		],
+		"extensions": { "touched_uids": 1062675 }
+	}`
+
+	pathMap := map[string]string{
+		"status": "hasPrimaryGroup.inWorkspace.name",
+	}
+
+	aliasMap := map[string]string{
+		"groupKeys":    "gK",
+		"count":        "cnt",
+		"createdAtMin": "minCreated",
+	}
+
+	out, err := completeGroupByResult(
+		"groupByCompany", // DQL Key
+		"ws",             // GraphQL Response Alias
+		[]byte(rawDQLResponse),
+		pathMap,
+		aliasMap,
+	)
+	require.NoError(t, err)
+
+	// Unmarshal and assert on the structure.
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(out, &top))
+
+	// Ensure top-level alias "ws" is present and original "groupByCompany" is deleted.
+	require.Contains(t, top, "ws")
+	require.NotContains(t, top, "groupByCompany")
+	require.Contains(t, top, "extensions")
+
+	var wsList []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(top["ws"], &wsList))
+	require.Len(t, wsList, 1)
+
+	row := wsList[0]
+	// Assert inner aggregate aliases are respected:
+	require.Contains(t, row, "cnt")
+	require.Contains(t, row, "minCreated")
+	require.NotContains(t, row, "count")
+	require.NotContains(t, row, "createdAtMin")
+
+	// Assert custom groupKeys alias "gK" is respected:
+	require.Contains(t, row, "gK")
+	require.NotContains(t, row, "groupKeys")
+
+	var gKEntries []map[string]string
+	require.NoError(t, json.Unmarshal(row["gK"], &gKEntries))
+	require.Len(t, gKEntries, 1)
+	require.Equal(t, "hasPrimaryGroup.inWorkspace.name", gKEntries[0]["path"])
+	require.Equal(t, "ACTIVE", gKEntries[0]["value"])
 }
