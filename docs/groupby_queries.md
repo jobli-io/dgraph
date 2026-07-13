@@ -22,7 +22,10 @@ automatically generates:
 ```graphql
 enum DateTimeGranularity {
   year
+  quarter
   month
+  fortnight
+  week
   day
   hour
 }
@@ -163,12 +166,15 @@ The `by` argument floors timestamps to a coarser granularity so that all events 
 
 ### Available granularities
 
-| `by` value | Example bucket key     | Notes                             |
-| ---------- | ---------------------- | --------------------------------- |
-| `year`     | `2024-01-01T00:00:00Z` | Rolled to Jan 1 00:00 of the year |
-| `month`    | `2024-03-01T00:00:00Z` | Rolled to the 1st of the month    |
-| `day`      | `2024-03-15T00:00:00Z` | Rolled to midnight                |
-| `hour`     | `2024-03-15T09:00:00Z` | Rolled to the start of the hour   |
+| `by` value  | Example bucket key     | Notes                                   |
+| ----------- | ---------------------- | --------------------------------------- |
+| `year`      | `2024-01-01T00:00:00Z` | Rolled to Jan 1 00:00 of the year       |
+| `quarter`   | `2024-01-01T00:00:00Z` | Rolled to the start of the quarter      |
+| `month`     | `2024-03-01T00:00:00Z` | Rolled to the 1st of the month          |
+| `fortnight` | `2024-03-10T00:00:00Z` | Rolled to bi-weekly Sunday (anchor ref) |
+| `week`      | `2024-03-10T00:00:00Z` | Rolled to the Sunday of the week        |
+| `day`       | `2024-03-15T00:00:00Z` | Rolled to midnight                      |
+| `hour`      | `2024-03-15T09:00:00Z` | Rolled to the start of the hour         |
 
 > **Important:** `by` is **only valid for `DateTime` fields**. The request validator will reject
 > `by` on `String`, `Int`, `Float`, or `Boolean` fields with an error:
@@ -179,14 +185,18 @@ The `by` argument floors timestamps to a coarser granularity so that all events 
 
 ### `@search` index requirement
 
-To use `by`, the DateTime field **must** have the matching `@search` index in the schema:
+To use `by`, the DateTime field **must** have at least one matching standard `@search` index
+tokenizer in the schema:
 
-| `by` value | Required index         |
-| ---------- | ---------------------- |
-| `year`     | `@search(by: [year])`  |
-| `month`    | `@search(by: [month])` |
-| `day`      | `@search(by: [day])`   |
-| `hour`     | `@search(by: [hour])`  |
+| `by` value  | Required index tokenizer                                    |
+| ----------- | ----------------------------------------------------------- |
+| `year`      | `@search(by: [year])`                                       |
+| `quarter`   | Any standard DateTime tokenizer (e.g. `[month]` / `[year]`) |
+| `month`     | `@search(by: [month])`                                      |
+| `fortnight` | Any standard DateTime tokenizer (e.g. `[day]` / `[month]`)  |
+| `week`      | Any standard DateTime tokenizer (e.g. `[day]`)              |
+| `day`       | `@search(by: [day])`                                        |
+| `hour`      | `@search(by: [hour])`                                       |
 
 Example schema:
 
