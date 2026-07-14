@@ -51,7 +51,7 @@ type Workspace @auth(
 }
 
 interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth()
+  inWorkspace: Workspace @cascadeAuth(strategy: FORWARD)
 }
 
 type Group implements WorkspaceMember @auth(
@@ -69,7 +69,7 @@ type Group implements WorkspaceMember @auth(
 }
 
 interface GroupMember {
-  inGroup: Group @cascadeAuth()
+  inGroup: Group @cascadeAuth(strategy: FORWARD)
 }
 
 type Company implements GroupMember {
@@ -326,7 +326,7 @@ type Workspace @auth(
 }
 
 interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth()
+  inWorkspace: Workspace @cascadeAuth(strategy: FORWARD)
 }
 
 type Group implements WorkspaceMember
@@ -369,7 +369,7 @@ type Workspace @auth(
 }
 
 interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth()
+  inWorkspace: Workspace @cascadeAuth(strategy: FORWARD)
 }
 
 type Group implements WorkspaceMember
@@ -701,7 +701,7 @@ type Workspace @auth(
 }
 
 interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth()
+  inWorkspace: Workspace @cascadeAuth(strategy: FORWARD)
 }
 
 type Group implements WorkspaceMember @auth(
@@ -1167,7 +1167,7 @@ type Workspace @auth(
 }
 
 interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth(operations: [query])
+  inWorkspace: Workspace @cascadeAuth(operations: [query], strategy: FORWARD)
 }
 
 type Group implements WorkspaceMember @auth(
@@ -1254,7 +1254,7 @@ type Workspace @auth(
 }
 
 interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth(operations: [query, delete])
+  inWorkspace: Workspace @cascadeAuth(operations: [query, delete], strategy: FORWARD)
 }
 
 type Group implements WorkspaceMember @auth(
@@ -1450,7 +1450,7 @@ type Workspace @auth(
 }
 
 interface WorkspaceMember {
-  inWorkspace: Workspace @cascadeAuth()
+  inWorkspace: Workspace @cascadeAuth(strategy: FORWARD)
 }
 
 type Group implements WorkspaceMember @auth(
@@ -1468,7 +1468,7 @@ type Group implements WorkspaceMember @auth(
 }
 
 interface GroupMember {
-  inGroup: Group @cascadeAuth()
+  inGroup: Group @cascadeAuth(strategy: FORWARD)
 }
 
 type Company implements GroupMember {
@@ -1477,7 +1477,7 @@ type Company implements GroupMember {
 }
 
 interface CompanyMember {
-  inCompany: Company @cascadeAuth()
+  inCompany: Company @cascadeAuth(strategy: FORWARD)
 }
 
 type AdPostRecord implements CompanyMember {
@@ -1767,4 +1767,71 @@ func TestCascadeAuthDQL_InterfaceOrMerge_AuthorityHasDifferentQueriedType(t *tes
 	// IAMResource interface @auth rule), confirming the arm's content is correct.
 	require.Contains(t, actual, "IAMResource.clientId",
 		"IAM arm must include the IAMResource.clientId filter from the interface auth rule")
+}
+
+// TestCascadeAuthDQL_ReverseStrategy_ExplicitAndAuto
+//
+// Explicitly tests that the REVERSE strategy correctly produces a reverse-traversal
+// query block starting at the authorized parents and filters using a direct uid() filter,
+// completely bypassing full-type scans.
+func TestCascadeAuthDQL_ReverseStrategy_ExplicitAndAuto(t *testing.T) {
+	schemaStr := `
+	type User {
+	  email: String! @id
+	}
+
+	type Workspace @auth(
+	  query: { rule: """
+	    query($EMAIL: String!) {
+	      queryWorkspace {
+	        inUsers(filter: { email: { eq: $EMAIL } }) { __typename }
+	      }
+	    }
+	  """ }
+	) {
+	  name: String
+	  inUsers: [User]
+	  hasGroups: [Group] @hasInverse(field: inWorkspace)
+	}
+
+	interface WorkspaceMember {
+	  inWorkspace: Workspace @cascadeAuth(strategy: REVERSE)
+	}
+
+	type Group implements WorkspaceMember @auth(
+	  query: { rule: """
+	    query($EMAIL: String!) {
+	      queryGroup {
+		inUsers(filter: { email: { eq: $EMAIL } }) { __typename }
+	      }
+	    }
+	  """ }
+	) {
+	  name: String
+	  inUsers: [User]
+	}
+	`
+	gqlSchema, metaInfo := cascadeAuthSchemaAndMeta(t, schemaStr)
+
+	rewriteCascadeAuthDQL(t, gqlSchema, metaInfo,
+		map[string]interface{}{"EMAIL": "user@example.com"},
+		`query { queryGroup { name } }`,
+		`query {
+  queryGroup(func: uid(GroupRoot)) {
+    Group.name : Group.name
+    dgraph.uid : uid
+  }
+  GroupRoot as var(func: uid(Group_1)) @filter((uid(Group_Auth2) AND uid(Group_Auth4_uids)))
+  Group_1 as var(func: type(Group))
+  Group_Auth2 as var(func: uid(Group_1)) @cascade {
+    Group.inUsers : Group.inUsers @filter(eq(User.email, "user@example.com"))
+  }
+  Group_Auth3 as var(func: type(Workspace)) @cascade {
+    Workspace.inUsers : Workspace.inUsers @filter(eq(User.email, "user@example.com"))
+  }
+  var(func: uid(Group_Auth3)) {
+    Group_Auth4_uids as Workspace.hasGroups
+  }
+}`,
+	)
 }

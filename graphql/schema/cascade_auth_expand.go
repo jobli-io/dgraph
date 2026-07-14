@@ -662,9 +662,11 @@ func buildCascadeRule(
 	}
 
 	return &RuleNode{
-		CascadeWrapPred:  edge.dgraphPred,
-		CascadeWrapType:  edge.parentTypeName,
-		CascadeWrapInner: authorityFullAuth,
+		CascadeWrapPred:    edge.dgraphPred,
+		CascadeWrapType:    edge.parentTypeName,
+		CascadeWrapInner:   authorityFullAuth,
+		CascadeInversePred: edge.inverseDgraphPred,
+		CascadeWrapReverse: isReverseStrategy(edge),
 	}, nil
 }
 
@@ -1053,9 +1055,11 @@ func resubstituteRuleNode(rn *RuleNode, edge cascadeAuthIncomingEdge,
 			return nil, err
 		}
 		return &RuleNode{
-			CascadeWrapPred:  rn.CascadeWrapPred,
-			CascadeWrapType:  rn.CascadeWrapType,
-			CascadeWrapInner: newInner,
+			CascadeWrapPred:    rn.CascadeWrapPred,
+			CascadeWrapType:    rn.CascadeWrapType,
+			CascadeWrapInner:   newInner,
+			CascadeInversePred: rn.CascadeInversePred,
+			CascadeWrapReverse: rn.CascadeWrapReverse,
 		}, nil
 	}
 	if len(rn.Or) > 0 {
@@ -1382,9 +1386,11 @@ func interfaceImplementorAuthRules(
 		// var(func: type(AttachmentOwner)) which would match nothing in Dgraph
 		// since interface names are not stored as node types.
 		or = append(or, &RuleNode{
-			CascadeWrapPred:  cascadePred,
-			CascadeWrapType:  typ.Name,
-			CascadeWrapInner: authorityFullAuth,
+			CascadeWrapPred:    cascadePred,
+			CascadeWrapType:    typ.Name,
+			CascadeWrapInner:   authorityFullAuth,
+			CascadeInversePred: edge.inverseDgraphPred,
+			CascadeWrapReverse: isReverseStrategy(edge),
 		})
 	}
 	if len(or) == 0 {
@@ -1857,4 +1863,21 @@ func hasNewLeaves(biDirRule *RuleNode, inversePred string, seen map[string]bool)
 		}
 	}
 	return hasNew
+}
+
+// isReverseStrategy returns true if the edge configuration specifies REVERSE strategy,
+// or if AUTO is selected and the edge has a valid inverse traversal predicate.
+func isReverseStrategy(edge cascadeAuthIncomingEdge) bool {
+	switch edge.cfg.Strategy {
+	case "FORWARD":
+		return false
+	case "REVERSE":
+		return true
+	case "AUTO":
+		// Auto-inference: use REVERSE strategy if there is a valid inverse predicate
+		// for traverse-back (many-to-one upward relation index traversal).
+		return edge.inverseDgraphPred != ""
+	default:
+		return false
+	}
 }

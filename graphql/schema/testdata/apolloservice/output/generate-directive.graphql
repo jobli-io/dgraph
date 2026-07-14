@@ -429,6 +429,12 @@ enum CascadeAuthOperation {
 	delete
 }
 
+enum CascadeAuthStrategy {
+	FORWARD
+	REVERSE
+	AUTO
+}
+
 enum CascadeAuthVariableContext {
 	self
 	parent

@@ -77,6 +77,10 @@ type RuleNode struct {
 	// CascadeWrapInner is the authority type's full compiled auth rule tree
 	// (own @auth merged with its own cascade parents per its aggregation policy).
 	CascadeWrapInner *RuleNode
+	// CascadeWrapReverse, when true, instructs the DQL query rewriter to compile
+	// this CascadeWrap node using a REVERSE lookup strategy (traversing from the
+	// authority to the child) rather than a FORWARD lookup strategy.
+	CascadeWrapReverse bool
 	// CascadeInversePred is the Dgraph predicate that the uid_in filter traverses
 	// to scope the child type from the authority's side. On leaf cascade nodes this
 	// mirrors CascadeEdgePred; on bundle nodes CascadeBundlePred takes precedence.

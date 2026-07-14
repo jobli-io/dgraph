@@ -28,6 +28,9 @@ type queryRewriter struct{}
 type authRewriter struct {
 	authVariables map[string]interface{}
 	isWritingAuth bool
+	// forceForward instructs the compiler to dynamically override CascadeWrapReverse
+	// and force the FORWARD strategy (uid_in) for single-resource contexts (e.g. mutations, get).
+	forceForward bool
 	// `filterByUid` is used to when we have to rewrite top level query with uid function. The
 	// variable name is passed in `varName`. If true it will rewrite as following:
 	// queryType(uid(varName)) {
@@ -144,6 +147,7 @@ func (qr *queryRewriter) Rewrite(
 		selector:        getAuthSelector(gqlQuery.QueryType()),
 		parentVarName:   gqlQuery.ConstructedFor().Name() + "Root",
 		cascadeVarCache: make(map[*schema.RuleNode]string),
+		forceForward:    gqlQuery.QueryType() == schema.GetQuery || gqlQuery.QueryType() == schema.SimilarByIdQuery,
 	}
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
 	authRw.hasCascade = hasCascadeDirective(gqlQuery)
@@ -1392,12 +1396,14 @@ func addCommonRules(
 	ids := idFilter(extractQueryFilter(field), fieldType.IDField())
 
 	// Todo: Add more comments to this block.
-	if authRw != nil && (authRw.isWritingAuth || authRw.filterByUid) &&
+	// OPTIMIZATION: If we are a standard read query with a pre-computed Auth variable (varName != ""),
+	// rewrite the root query using the uid() function to completely bypass the O(N) full class scan.
+	if authRw != nil && (authRw.isWritingAuth || authRw.filterByUid || authRw.varName != "") &&
 		(authRw.varName != "" || authRw.parentVarName != "") && ids == nil {
 		authRw.addVariableUIDFunc(dgQuery)
 		// This is executed when querying while performing delete mutation request since
 		// in case of delete mutation we already have variable `MutationQueryVar` at root level.
-		if authRw.filterByUid {
+		if authRw.filterByUid || (!authRw.isWritingAuth && authRw.varName != "") {
 			// Since the variable is only added at the top level we reset the `authRW` variables.
 			authRw.varName = ""
 			authRw.filterByUid = false
@@ -1541,6 +1547,7 @@ func (authRw *authRewriter) addAuthQueries(
 				parentVarName:   authRw.parentVarName,
 				hasAuthRules:    authRw.hasAuthRules,
 				cascadeVarCache: authRw.cascadeVarCache,
+				forceForward:    authRw.forceForward,
 			}).rewriteAuthQueries(object)
 
 			// 1. If there is no Auth Query for the Given type then it means that
@@ -1864,6 +1871,7 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 		hasAuthRules:         authRw.hasAuthRules,
 		cascadeVarCache:      authRw.cascadeVarCache,
 		cascadeAuthorityType: authRw.cascadeAuthorityType,
+		forceForward:         authRw.forceForward,
 	}).rewriteRuleNode(typ, authRw.selector(typ))
 }
 
@@ -2122,6 +2130,33 @@ func (authRw *authRewriter) rewriteRuleNode(
 		// Cache check: reuse authority var if already generated in this request.
 		if authRw.cascadeVarCache != nil {
 			if cached, ok := authRw.cascadeVarCache[inner]; ok {
+				if rn.CascadeWrapReverse && !authRw.forceForward {
+					reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+					invPred := rn.CascadeInversePred
+					if invPred == "" {
+						invPred = "~" + rn.CascadeWrapPred
+					}
+					revQry := &dql.GraphQuery{
+						Var:  "",
+						Attr: "var",
+						Func: &dql.Function{
+							Name: "uid",
+							Args: []dql.Arg{{Value: cached}},
+						},
+						Children: []*dql.GraphQuery{
+							{
+								Attr: invPred,
+								Var:  reverseVar + "_uids",
+							},
+						},
+					}
+					return []*dql.GraphQuery{revQry}, &dql.FilterTree{
+						Func: &dql.Function{
+							Name: "uid",
+							Args: []dql.Arg{{Value: reverseVar + "_uids"}},
+						},
+					}
+				}
 				return nil, &dql.FilterTree{
 					Func: &dql.Function{
 						Name: "uid_in",
@@ -2157,6 +2192,34 @@ func (authRw *authRewriter) rewriteRuleNode(
 			}
 			if authRw.cascadeVarCache != nil {
 				authRw.cascadeVarCache[inner] = varName
+			}
+			if rn.CascadeWrapReverse && !authRw.forceForward {
+				reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+				invPred := rn.CascadeInversePred
+				if invPred == "" {
+					invPred = "~" + rn.CascadeWrapPred
+				}
+				revQry := &dql.GraphQuery{
+					Var:  "",
+					Attr: "var",
+					Func: &dql.Function{
+						Name: "uid",
+						Args: []dql.Arg{{Value: varName}},
+					},
+					Children: []*dql.GraphQuery{
+						{
+							Attr: invPred,
+							Var:  reverseVar + "_uids",
+						},
+					},
+				}
+				r1 = append(r1, revQry)
+				return r1, &dql.FilterTree{
+					Func: &dql.Function{
+						Name: "uid",
+						Args: []dql.Arg{{Value: reverseVar + "_uids"}},
+					},
+				}
 			}
 			return r1, &dql.FilterTree{
 				Func: &dql.Function{
@@ -2238,6 +2301,34 @@ func (authRw *authRewriter) rewriteRuleNode(
 				if authRw.cascadeVarCache != nil {
 					authRw.cascadeVarCache[inner] = varName
 				}
+				if rn.CascadeWrapReverse && !authRw.forceForward {
+					reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+					invPred := rn.CascadeInversePred
+					if invPred == "" {
+						invPred = "~" + rn.CascadeWrapPred
+					}
+					revQry := &dql.GraphQuery{
+						Var:  "",
+						Attr: "var",
+						Func: &dql.Function{
+							Name: "uid",
+							Args: []dql.Arg{{Value: varName}},
+						},
+						Children: []*dql.GraphQuery{
+							{
+								Attr: invPred,
+								Var:  reverseVar + "_uids",
+							},
+						},
+					}
+					r1 = append(r1, revQry)
+					return r1, &dql.FilterTree{
+						Func: &dql.Function{
+							Name: "uid",
+							Args: []dql.Arg{{Value: reverseVar + "_uids"}},
+						},
+					}
+				}
 				return r1, &dql.FilterTree{
 					Func: &dql.Function{
 						Name: "uid_in",
@@ -2284,6 +2375,34 @@ func (authRw *authRewriter) rewriteRuleNode(
 
 		// Place authBlock first so it is rendered before its support vars.
 		allQrys := append([]*dql.GraphQuery{authBlock}, innerQrys...)
+		if rn.CascadeWrapReverse && !authRw.forceForward {
+			reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+			invPred := rn.CascadeInversePred
+			if invPred == "" {
+				invPred = "~" + rn.CascadeWrapPred
+			}
+			revQry := &dql.GraphQuery{
+				Var:  "",
+				Attr: "var",
+				Func: &dql.Function{
+					Name: "uid",
+					Args: []dql.Arg{{Value: varName}},
+				},
+				Children: []*dql.GraphQuery{
+					{
+						Attr: invPred,
+						Var:  reverseVar + "_uids",
+					},
+				},
+			}
+			allQrys = append(allQrys, revQry)
+			return allQrys, &dql.FilterTree{
+				Func: &dql.Function{
+					Name: "uid",
+					Args: []dql.Arg{{Value: reverseVar + "_uids"}},
+				},
+			}
+		}
 		return allQrys, &dql.FilterTree{
 			Func: &dql.Function{
 				Name: "uid_in",
@@ -2432,6 +2551,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 				isWritingAuth:   true, // prevent recursive addAuthQueries wrapping
 				hasAuthRules:    authRw.hasAuthRules,
 				cascadeVarCache: authRw.cascadeVarCache, // share the cache
+				forceForward:    authRw.forceForward,
 			}
 			authSubVars, authFilter := cascadeAuthRw.rewriteAuthQueries(authorityType)
 			if authFilter != nil {
@@ -3440,6 +3560,7 @@ func buildFilter(typ schema.Type,
 							parentVarName:   qn + "Root",
 							isWritingAuth:   auth.isWritingAuth,
 							cascadeVarCache: auth.cascadeVarCache,
+							forceForward:    auth.forceForward,
 						}
 
 						rbac := wr.evaluateStaticRules(fd.Type())

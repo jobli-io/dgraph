@@ -850,6 +850,7 @@ func authorizeNewNodes(
 		varGen:        NewVariableGenerator(),
 		selector:      addAuthSelector,
 		hasAuthRules:  true,
+		forceForward:  true,
 	}
 
 	// Collect all the newly created nodes in type groups

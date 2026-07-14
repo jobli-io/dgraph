@@ -29,14 +29,11 @@ type CascadeAuthFieldConfig struct {
 	// or "propagate" (nearest ancestor with vars, starting from authority).
 	VariableContext string
 	// Depth limits cascade hops (-1 = unlimited).
-	Depth int
-	// InterfaceOnly, when true, causes buildCascadeRule to treat an interface
-	// authority as a single entity (func: type(InterfaceName)) rather than
-	// expanding to all implementing concrete types. Defaults to false (expand).
-	// In Dgraph, func: type(InterfaceName) matches all implementing nodes
-	// because interface names are stored in dgraph.type alongside the concrete
-	// type name.
+	Depth         int
 	InterfaceOnly bool
+	// Strategy defines whether the cascade-auth rule expansion should use a
+	// FORWARD or REVERSE lookup strategy (or AUTO to infer the best direction).
+	Strategy string
 }
 
 // CascadeAuthPolicyConfig holds the parsed @cascadeAuthPolicy directive for a type.
@@ -63,7 +60,7 @@ func (fd *fieldDefinition) CascadeAuthConfig() *CascadeAuthFieldConfig {
 	if dir == nil {
 		return nil
 	}
-	cfg := &CascadeAuthFieldConfig{Depth: -1}
+	cfg := &CascadeAuthFieldConfig{Depth: -1, Strategy: "AUTO"}
 	if v := dir.Arguments.ForName("operations"); v != nil {
 		cfg.OperationsProvided = true
 		for _, item := range v.Value.Children {
@@ -83,6 +80,9 @@ func (fd *fieldDefinition) CascadeAuthConfig() *CascadeAuthFieldConfig {
 	}
 	if v := dir.Arguments.ForName("interfaceOnly"); v != nil {
 		cfg.InterfaceOnly = v.Value.Raw == "true"
+	}
+	if v := dir.Arguments.ForName("strategy"); v != nil {
+		cfg.Strategy = v.Value.Raw
 	}
 	return cfg
 }

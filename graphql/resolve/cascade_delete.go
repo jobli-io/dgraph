@@ -212,6 +212,7 @@ func applyAuthMode(
 		selector:      deleteAuthSelector,
 		parentVarName: typ.Name() + "Root",
 		hasAuthRules:  true,
+		forceForward:  true,
 	}
 
 	// Static RBAC evaluation — no Dgraph query needed.

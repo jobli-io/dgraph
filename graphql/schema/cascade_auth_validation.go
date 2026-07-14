@@ -155,6 +155,16 @@ func cascadeAuthDirectiveValidation(sch *ast.Schema,
 		}
 	}
 
+	// Validate strategy: must be "FORWARD", "REVERSE", or "AUTO" if supplied.
+	if stArg := dir.Arguments.ForName("strategy"); stArg != nil && stArg.Value.Raw != "" {
+		st := stArg.Value.Raw
+		if st != "FORWARD" && st != "REVERSE" && st != "AUTO" {
+			return []*gqlerror.Error{gqlerror.ErrorPosf(dir.Position,
+				`Type %s; Field %s: @cascadeAuth strategy must be "FORWARD", "REVERSE", or "AUTO", got %q`,
+				typ.Name, field.Name, st)}
+		}
+	}
+
 	// Validate variableContext: must be "self", "parent", or "adaptive" if supplied.
 	if vcArg := dir.Arguments.ForName("variableContext"); vcArg != nil && vcArg.Value.Raw != "" {
 		vc := vcArg.Value.Raw

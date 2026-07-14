@@ -1,1 +1,0 @@
-{"ts":"2023-03-21T04:02:40.745Z","endpoint":"/removeNode","level":"AUDIT","user":"","namespace":0,"server":"zero1:5080","client":"192.168.128.1:52150","req_type":"Http","req_body":"","query_param":{"group":["1"],"id":["3"]},"status":"OK"}
