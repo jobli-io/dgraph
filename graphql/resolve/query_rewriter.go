@@ -895,6 +895,9 @@ func rewriteAsQueryByIds(
 		addUIDFunc(dgQuery[0], intersection(ids, uids))
 	}
 
+	oldVarName := authRw.varName
+	authRw.varName = "__ROOT_VAR_PLACEHOLDER__"
+
 	includedQueries := addArgumentsToField(dgQuery[0], field, authRw, queryName)
 	dgQuery = append(dgQuery, includedQueries...)
 
@@ -912,6 +915,17 @@ func rewriteAsQueryByIds(
 	addCascadeDirective(dgQuery[0], field)
 
 	dgQuery, authVarSubst := authRw.addAuthQueries(field.Type(), dgQuery, rbac)
+
+	generatedVarName := authRw.varName
+	authRw.varName = oldVarName
+
+	// Substitute the generated root variable name in place of the __ROOT_VAR_PLACEHOLDER__ placeholder.
+	// Since addAuthQueries has now run, it has generated a real, sequential variable name for the root.
+	if generatedVarName != "" && generatedVarName != "__ROOT_VAR_PLACEHOLDER__" {
+		placeholderSubst := map[string]string{"__ROOT_VAR_PLACEHOLDER__": generatedVarName}
+		applyAuthVarSubstToQueries(selectionAuth, placeholderSubst)
+		applyAuthVarSubstToQueries(dgQuery, placeholderSubst)
+	}
 
 	if len(selectionAuth) > 0 {
 		// Dedup field-level auth var blocks and propagate new substitutions
@@ -1422,6 +1436,9 @@ func rewriteAsQuery(field schema.Field, authRw *authRewriter, queryName string) 
 		return dgQuery
 	}
 
+	oldVarName := authRw.varName
+	authRw.varName = "__ROOT_VAR_PLACEHOLDER__"
+
 	varQry := addArgumentsToField(dgQuery[0], field, authRw, queryName)
 	dgQuery = append(dgQuery, varQry...)
 
@@ -1434,6 +1451,17 @@ func rewriteAsQuery(field schema.Field, authRw *authRewriter, queryName string) 
 	addCascadeDirective(dgQuery[0], field)
 
 	dgQuery, authVarSubst := authRw.addAuthQueries(field.Type(), dgQuery, rbac)
+
+	generatedVarName := authRw.varName
+	authRw.varName = oldVarName
+
+	// Substitute the generated root variable name in place of the __ROOT_VAR_PLACEHOLDER__ placeholder.
+	// Since addAuthQueries has now run, it has generated a real, sequential variable name for the root.
+	if generatedVarName != "" && generatedVarName != "__ROOT_VAR_PLACEHOLDER__" {
+		placeholderSubst := map[string]string{"__ROOT_VAR_PLACEHOLDER__": generatedVarName}
+		applyAuthVarSubstToQueries(selectionAuth, placeholderSubst)
+		applyAuthVarSubstToQueries(dgQuery, placeholderSubst)
+	}
 
 	if len(selectionAuth) > 0 {
 		// Dedup field-level auth var blocks (selectionAuth was never included in the
@@ -1481,7 +1509,9 @@ func (authRw *authRewriter) addAuthQueries(
 		return dgQuery, nil
 	}
 
-	authRw.varName = authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+	if authRw.varName == "" || authRw.varName == "__ROOT_VAR_PLACEHOLDER__" {
+		authRw.varName = authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
+	}
 
 	fldAuthQueries, filter := authRw.rewriteAuthQueries(typ)
 
@@ -2185,7 +2215,6 @@ func (authRw *authRewriter) rewriteRuleNode(
 		if authRw.forceForward && authRw.varName != "" {
 			groupSubsetVar := authRw.varGen.Next(typ, "subset", "", authRw.isWritingAuth)
 			subsetQry := &dql.GraphQuery{
-				Var:  groupSubsetVar,
 				Attr: "var",
 				Func: &dql.Function{
 					Name: "uid",
@@ -2193,6 +2222,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 				},
 				Children: []*dql.GraphQuery{{
 					Attr: rn.CascadeWrapPred,
+					Var:  groupSubsetVar,
 				}},
 			}
 			subsetQrys = append(subsetQrys, subsetQry)

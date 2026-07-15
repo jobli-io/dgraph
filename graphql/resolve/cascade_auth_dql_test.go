@@ -1835,3 +1835,38 @@ func TestCascadeAuthDQL_ReverseStrategy_ExplicitAndAuto(t *testing.T) {
 }`,
 	)
 }
+
+func TestCascadeAuthDQL_SelectionAuthBug(t *testing.T) {
+	schemaStr := `
+	type User {
+	  email: String! @id
+	}
+
+	type UpdateRecord @auth(
+	  query: { rule: """
+	    query($EMAIL: String!) {
+	      queryUpdateRecord {
+		updatedBy(filter: { email: { eq: $EMAIL } }) { __typename }
+	      }
+	    }
+	  """ }
+	) {
+	  id: ID!
+	  updatedBy: User
+	}
+
+	type Workspace {
+	  name: String @id
+	  hasUpdateRecord: [UpdateRecord]
+	}
+	`
+	gqlSchema, metaInfo := cascadeAuthSchemaAndMeta(t, schemaStr)
+
+	// Since Workspace has no auth, but hasUpdateRecord has auth,
+	// this will trigger selection auth.
+	rewriteCascadeAuthDQL(t, gqlSchema, metaInfo,
+		map[string]interface{}{"EMAIL": "user@example.com"},
+		`query { queryWorkspace { name hasUpdateRecord { id } } }`,
+		"", // we don't care about the exact DQL first, we just want to see if it parses/runs!
+	)
+}
