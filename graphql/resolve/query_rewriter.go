@@ -1755,6 +1755,19 @@ func (authRw *authRewriter) addVariableUIDFunc(q *dql.GraphQuery) {
 	}
 }
 
+func (authRw *authRewriter) getRootFunc(cascadeWrapType string) *dql.Function {
+	if authRw != nil && authRw.forceForward && authRw.varName != "" {
+		return &dql.Function{
+			Name: "uid",
+			Args: []dql.Arg{{Value: authRw.varName}},
+		}
+	}
+	return &dql.Function{
+		Name: "type",
+		Args: []dql.Arg{{Value: cascadeWrapType}},
+	}
+}
+
 // authQueriesReferenceVar reports whether any of the given DQL auth var blocks
 // use uid(varName) as their root traversal function.
 //
@@ -1962,10 +1975,7 @@ func (authRw *authRewriter) rewriteCascadeBundle(
 		r1 := []*dql.GraphQuery{{
 			Var:  varName,
 			Attr: "var",
-			Func: &dql.Function{
-				Name: "type",
-				Args: []dql.Arg{{Value: primaryLeaf.CascadeThroughType}},
-			},
+			Func: authRw.getRootFunc(primaryLeaf.CascadeThroughType),
 		}}
 		// Apply grandparent uid_in filters onto this through-node var.
 		for _, gpLeaf := range grandparentLeaves {
@@ -2019,10 +2029,7 @@ func (authRw *authRewriter) rewriteCascadeBundle(
 	r1 := rewriteAsQuery(qry, authRw, varName)
 	r1[0].Var = varName
 	r1[0].Attr = "var"
-	r1[0].Func = &dql.Function{
-		Name: "type",
-		Args: []dql.Arg{{Value: qry.Type().DgraphName()}},
-	}
+	r1[0].Func = authRw.getRootFunc(qry.Type().DgraphName())
 
 	// Apply grandparent uid_in filters ONTO the primary authority var's filter.
 	// Each grandparent leaf has CascadeEdgePred for a predicate on the AUTHORITY type
@@ -2171,6 +2178,27 @@ func (authRw *authRewriter) rewriteRuleNode(
 
 		varName := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
 
+		var subsetQrys []*dql.GraphQuery
+		innerAuthRw := *authRw
+		innerAuthRw.cascadeAuthorityType = rn.CascadeWrapType
+
+		if authRw.forceForward && authRw.varName != "" {
+			groupSubsetVar := authRw.varGen.Next(typ, "subset", "", authRw.isWritingAuth)
+			subsetQry := &dql.GraphQuery{
+				Var:  groupSubsetVar,
+				Attr: "var",
+				Func: &dql.Function{
+					Name: "uid",
+					Args: []dql.Arg{{Value: authRw.varName}},
+				},
+				Children: []*dql.GraphQuery{{
+					Attr: rn.CascadeWrapPred,
+				}},
+			}
+			subsetQrys = append(subsetQrys, subsetQry)
+			innerAuthRw.varName = groupSubsetVar
+		}
+
 		// ── Case A: simple Rule leaf (no CascadeWrapPred / CascadeEdgePred). ──
 		if inner.Rule != nil && inner.CascadeWrapPred == "" && inner.CascadeEdgePred == "" {
 			if inner.EvaluateStatic(authRw.authVariables) == schema.Negative {
@@ -2180,13 +2208,10 @@ func (authRw *authRewriter) rewriteRuleNode(
 			if qry == nil {
 				return nil, nil
 			}
-			r1 := rewriteAsQuery(qry, authRw, varName)
+			r1 := rewriteAsQuery(qry, &innerAuthRw, varName)
 			r1[0].Var = varName
 			r1[0].Attr = "var"
-			r1[0].Func = &dql.Function{
-				Name: "type",
-				Args: []dql.Arg{{Value: rn.CascadeWrapType}},
-			}
+			r1[0].Func = innerAuthRw.getRootFunc(rn.CascadeWrapType)
 			if len(r1[0].Cascade) == 0 {
 				r1[0].Cascade = append(r1[0].Cascade, "__all__")
 			}
@@ -2214,12 +2239,18 @@ func (authRw *authRewriter) rewriteRuleNode(
 					},
 				}
 				r1 = append(r1, revQry)
+				if len(subsetQrys) > 0 {
+					r1 = append(subsetQrys, r1...)
+				}
 				return r1, &dql.FilterTree{
 					Func: &dql.Function{
 						Name: "uid",
 						Args: []dql.Arg{{Value: reverseVar + "_uids"}},
 					},
 				}
+			}
+			if len(subsetQrys) > 0 {
+				r1 = append(subsetQrys, r1...)
 			}
 			return r1, &dql.FilterTree{
 				Func: &dql.Function{
@@ -2268,20 +2299,17 @@ func (authRw *authRewriter) rewriteRuleNode(
 					return nil, nil
 				}
 				// Build base var from the rule leaf.
-				r1 := rewriteAsQuery(qry, authRw, varName)
+				r1 := rewriteAsQuery(qry, &innerAuthRw, varName)
 				r1[0].Var = varName
 				r1[0].Attr = "var"
-				r1[0].Func = &dql.Function{
-					Name: "type",
-					Args: []dql.Arg{{Value: rn.CascadeWrapType}},
-				}
+				r1[0].Func = innerAuthRw.getRootFunc(rn.CascadeWrapType)
 
 				// Rewrite each CascadeWrap child and apply uid_in as @filter on r1[0].
 				for _, cwChild := range cascadeWrapChildren {
 					if cwChild.EvaluateStatic(authRw.authVariables) == schema.Negative {
 						continue
 					}
-					cwQrys, cwFilter := authRw.rewriteRuleNode(typ, cwChild)
+					cwQrys, cwFilter := innerAuthRw.rewriteRuleNode(typ, cwChild)
 					r1 = append(r1, cwQrys...)
 					if cwFilter != nil {
 						if r1[0].Filter == nil {
@@ -2322,12 +2350,18 @@ func (authRw *authRewriter) rewriteRuleNode(
 						},
 					}
 					r1 = append(r1, revQry)
+					if len(subsetQrys) > 0 {
+						r1 = append(subsetQrys, r1...)
+					}
 					return r1, &dql.FilterTree{
 						Func: &dql.Function{
 							Name: "uid",
 							Args: []dql.Arg{{Value: reverseVar + "_uids"}},
 						},
 					}
+				}
+				if len(subsetQrys) > 0 {
+					r1 = append(subsetQrys, r1...)
 				}
 				return r1, &dql.FilterTree{
 					Func: &dql.Function{
@@ -2350,8 +2384,6 @@ func (authRw *authRewriter) rewriteRuleNode(
 		// default var(func: uid(parentVarName)) = var(func: uid(JobAd_1)).
 		// Group UIDs and JobAd UIDs are disjoint, so the old code always produced zero
 		// results when the inner filter was used on var(func: type(Group)).
-		innerAuthRw := *authRw
-		innerAuthRw.cascadeAuthorityType = rn.CascadeWrapType
 		innerQrys, innerFilter := innerAuthRw.rewriteRuleNode(typ, inner)
 		if innerFilter == nil && len(innerQrys) == 0 {
 			return nil, nil
@@ -2359,12 +2391,9 @@ func (authRw *authRewriter) rewriteRuleNode(
 
 		// Build: varName as var(func: type(CascadeWrapType)) @filter(innerFilter) @cascade
 		authBlock := &dql.GraphQuery{
-			Var:  varName,
-			Attr: "var",
-			Func: &dql.Function{
-				Name: "type",
-				Args: []dql.Arg{{Value: rn.CascadeWrapType}},
-			},
+			Var:     varName,
+			Attr:    "var",
+			Func:    innerAuthRw.getRootFunc(rn.CascadeWrapType),
 			Filter:  innerFilter,
 			Cascade: []string{"__all__"},
 		}
@@ -2375,6 +2404,9 @@ func (authRw *authRewriter) rewriteRuleNode(
 
 		// Place authBlock first so it is rendered before its support vars.
 		allQrys := append([]*dql.GraphQuery{authBlock}, innerQrys...)
+		if len(subsetQrys) > 0 {
+			allQrys = append(subsetQrys, allQrys...)
+		}
 		if rn.CascadeWrapReverse && !authRw.forceForward {
 			reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
 			invPred := rn.CascadeInversePred
