@@ -25,6 +25,11 @@ import (
 
 type queryRewriter struct{}
 
+type cascadeCacheKey struct {
+	rn      *schema.RuleNode
+	typName string
+}
+
 type authRewriter struct {
 	authVariables map[string]interface{}
 	isWritingAuth bool
@@ -46,13 +51,12 @@ type authRewriter struct {
 	// `hasCascade` indicates if any of fields in the complete query hierarchy has cascade directive.
 	hasCascade bool
 	// `cascadeVarCache` deduplicates cascade authority vars within a single request.
-	// Key: *schema.RuleNode (pointer to the compiled cascade edge rule — same pointer
-	// means same compiled authority rule). Value: DQL var name of the already-generated
-	// cascade authority var block. On a cache hit, the cascade edge returns a uid_in
-	// filter referencing the existing var without emitting duplicate DQL blocks.
+	// Key: cascadeCacheKey (combining RuleNode pointer and type name to avoid cross-type collisions).
+	// Value: DQL var name of the already-generated cascade authority var block.
+	// On a cache hit, the cascade edge returns a uid_in filter referencing the existing var.
 	// Initialized once at the root Rewrite() call and shared (by reference) across all
 	// derived authRewriter instances within the same request.
-	cascadeVarCache map[*schema.RuleNode]string
+	cascadeVarCache map[cascadeCacheKey]string
 	// `mutVarCache` caches predicate → DQL variable name mappings used during mutation
 	// rewriting to avoid emitting duplicate auth var blocks within a single mutation pass.
 	// Distinct from cascadeVarCache: this is mutation-specific and uses a string key.
@@ -146,7 +150,7 @@ func (qr *queryRewriter) Rewrite(
 		varGen:          NewVariableGenerator(),
 		selector:        getAuthSelector(gqlQuery.QueryType()),
 		parentVarName:   gqlQuery.ConstructedFor().Name() + "Root",
-		cascadeVarCache: make(map[*schema.RuleNode]string),
+		cascadeVarCache: make(map[cascadeCacheKey]string),
 		forceForward:    gqlQuery.QueryType() == schema.GetQuery || gqlQuery.QueryType() == schema.SimilarByIdQuery,
 	}
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
@@ -1752,9 +1756,9 @@ func (authRw *authRewriter) addAuthQueries(
 		// selectionAuth call that hits a cached entry referencing the removed var
 		// (e.g. Workspace_Auth15) emits uid(Workspace_Auth15) in its filter with
 		// no corresponding definition block, causing "used but not defined".
-		for rn, varName := range authRw.cascadeVarCache {
+		for key, varName := range authRw.cascadeVarCache {
 			if canonical, ok := authVarSubst[varName]; ok {
-				authRw.cascadeVarCache[rn] = canonical
+				authRw.cascadeVarCache[key] = canonical
 			}
 		}
 	}
@@ -2026,7 +2030,7 @@ func (authRw *authRewriter) rewriteCascadeBundle(
 			}
 		}
 		if authRw.cascadeVarCache != nil {
-			authRw.cascadeVarCache[primaryLeaf] = varName
+			authRw.cascadeVarCache[cascadeCacheKey{rn: primaryLeaf, typName: typ.Name()}] = varName
 		}
 		return r1, &dql.FilterTree{
 			Func: &dql.Function{
@@ -2051,7 +2055,7 @@ func (authRw *authRewriter) rewriteCascadeBundle(
 	}
 
 	// Cache check — skip if already cached (fall through to generate fresh var).
-	if cached, ok := authRw.cascadeVarCache[primaryLeaf]; ok {
+	if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: primaryLeaf, typName: typ.Name()}]; ok {
 		_ = cached
 	}
 
@@ -2091,7 +2095,7 @@ func (authRw *authRewriter) rewriteCascadeBundle(
 	}
 
 	if authRw.cascadeVarCache != nil {
-		authRw.cascadeVarCache[primaryLeaf] = varName
+		authRw.cascadeVarCache[cascadeCacheKey{rn: primaryLeaf, typName: typ.Name()}] = varName
 	}
 
 	return r1, &dql.FilterTree{
@@ -2166,7 +2170,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 
 		// Cache check: reuse authority var if already generated in this request.
 		if authRw.cascadeVarCache != nil {
-			if cached, ok := authRw.cascadeVarCache[inner]; ok {
+			if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: rn.CascadeWrapType}]; ok {
 				if rn.CascadeWrapReverse && !authRw.forceForward {
 					reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
 					invPred := rn.CascadeInversePred
@@ -2246,7 +2250,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 				r1[0].Cascade = append(r1[0].Cascade, "__all__")
 			}
 			if authRw.cascadeVarCache != nil {
-				authRw.cascadeVarCache[inner] = varName
+				authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: rn.CascadeWrapType}] = varName
 			}
 			if rn.CascadeWrapReverse && !authRw.forceForward {
 				reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
@@ -2357,7 +2361,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 					r1[0].Cascade = append(r1[0].Cascade, "__all__")
 				}
 				if authRw.cascadeVarCache != nil {
-					authRw.cascadeVarCache[inner] = varName
+					authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: rn.CascadeWrapType}] = varName
 				}
 				if rn.CascadeWrapReverse && !authRw.forceForward {
 					reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
@@ -2429,7 +2433,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 		}
 
 		if authRw.cascadeVarCache != nil {
-			authRw.cascadeVarCache[inner] = varName
+			authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: rn.CascadeWrapType}] = varName
 		}
 
 		// Place authBlock first so it is rendered before its support vars.
@@ -2556,7 +2560,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 
 		// Cache hit: this exact cascade rule was already processed in this request.
 		// Reuse the previously generated cascade authority var — no new DQL blocks needed.
-		if cached, ok := authRw.cascadeVarCache[rn]; ok {
+		if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: rn, typName: typ.Name()}]; ok {
 			return nil, &dql.FilterTree{
 				Func: &dql.Function{
 					Name: "uid_in",
@@ -2636,7 +2640,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 		// Store in cache so subsequent calls for the same cascade edge rule
 		// reuse this var and skip redundant DQL block generation.
 		if authRw.cascadeVarCache != nil {
-			authRw.cascadeVarCache[rn] = varName
+			authRw.cascadeVarCache[cascadeCacheKey{rn: rn, typName: typ.Name()}] = varName
 		}
 
 		// The filter on the child is uid_in(pred, uid(AuthVar)) — not uid(AuthVar).
