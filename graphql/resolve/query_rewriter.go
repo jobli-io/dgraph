@@ -2169,8 +2169,12 @@ func (authRw *authRewriter) rewriteRuleNode(
 		inner := rn.CascadeWrapInner
 
 		// Cache check: reuse authority var if already generated in this request.
+		// Note: We use typ.Name() (the concrete parent type being authorized, e.g. User or NoteType)
+		// rather than rn.CascadeWrapType (the destination type, e.g. Workspace) to prevent
+		// interface cache collisions across sibling types implementing the same interface.
+		// Collisions would result in circular variable dependency cycles and runtime DQL execution failures.
 		if authRw.cascadeVarCache != nil {
-			if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: rn.CascadeWrapType}]; ok {
+			if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name()}]; ok {
 				if rn.CascadeWrapReverse && !authRw.forceForward {
 					reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
 					invPred := rn.CascadeInversePred
@@ -2250,7 +2254,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 				r1[0].Cascade = append(r1[0].Cascade, "__all__")
 			}
 			if authRw.cascadeVarCache != nil {
-				authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: rn.CascadeWrapType}] = varName
+				authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name()}] = varName
 			}
 			if rn.CascadeWrapReverse && !authRw.forceForward {
 				reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
@@ -2361,7 +2365,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 					r1[0].Cascade = append(r1[0].Cascade, "__all__")
 				}
 				if authRw.cascadeVarCache != nil {
-					authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: rn.CascadeWrapType}] = varName
+					authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name()}] = varName
 				}
 				if rn.CascadeWrapReverse && !authRw.forceForward {
 					reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
@@ -2433,7 +2437,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 		}
 
 		if authRw.cascadeVarCache != nil {
-			authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: rn.CascadeWrapType}] = varName
+			authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name()}] = varName
 		}
 
 		// Place authBlock first so it is rendered before its support vars.
