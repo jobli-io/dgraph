@@ -48,6 +48,7 @@ const (
 	cascadeAuthDirective       = "cascadeAuth"
 	cascadeAuthPolicyDirective = "cascadeAuthPolicy"
 	authVariablesDirective     = "authVariables"
+	bypassAuthDirective        = "bypassAuth"
 
 	generateDirective       = "generate"
 	generateQueryArg        = "query"
@@ -332,6 +333,8 @@ type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean, strategy: CascadeAuthStrategy) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
+directive @bypassAuth on FIELD_DEFINITION
+
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
 directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
@@ -677,14 +680,16 @@ var directiveValidators = map[string]directiveValidator{
 	cascadeAuthDirective:       cascadeAuthDirectiveValidation,
 	authVariablesDirective:     ValidatorNoOp,
 	cascadeAuthPolicyDirective: ValidatorNoOp,
-	lambdaOnMutateDirective:    ValidatorNoOp,
-	generateDirective:          ValidatorNoOp,
-	apolloKeyDirective:         ValidatorNoOp,
-	apolloExtendsDirective:     ValidatorNoOp,
-	apolloExternalDirective:    apolloExternalValidation,
-	apolloRequiresDirective:    apolloRequiresValidation,
-	apolloProvidesDirective:    apolloProvidesValidation,
-	remoteResponseDirective:    remoteResponseValidation,
+	bypassAuthDirective:        ValidatorNoOp,
+
+	lambdaOnMutateDirective: ValidatorNoOp,
+	generateDirective:       ValidatorNoOp,
+	apolloKeyDirective:      ValidatorNoOp,
+	apolloExtendsDirective:  ValidatorNoOp,
+	apolloExternalDirective: apolloExternalValidation,
+	apolloRequiresDirective: apolloRequiresValidation,
+	apolloProvidesDirective: apolloProvidesValidation,
+	remoteResponseDirective: remoteResponseValidation,
 }
 
 // directiveLocationMap stores the directives and their locations for the ones which can be

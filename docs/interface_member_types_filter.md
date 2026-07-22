@@ -235,12 +235,25 @@ queryManageable(filter: { memberTypes: [NonExistent] })
 
 ---
 
-## Auth interaction
+## Auth interaction & Optimization
 
-Auth rules are unaffected. When `memberTypes` restricts the query to a subset of implementors, the
-per-implementor auth var blocks for the non-selected types are still generated but produce empty
-result sets and are harmlessly OR-combined. The net effect is correct: only nodes of the requested
-types that also pass their auth rules are returned.
+When `memberTypes` restricts the query to a subset of implementors, the query rewriter automatically
+optimizes the generated authorization sub-queries using a **Drop-Scoping Optimization**:
+
+1. **Rule Suppression & Early Bypassing**: The `allowedTypesForEdge` mapping is populated in the
+   `authRewriter` under both the Dgraph predicate (e.g., `Note.forResource`) and the interface type
+   name (e.g., `NoteOwner`).
+2. **`CascadeWrap` and `CascadeEdge` Drop-Scoping**: During the rule tree traversal in
+   `rewriteRuleNode`, if the compiler encounters a `CascadeWrap` or a `CascadeEdge` node belonging
+   to a non-selected implementing type, it discards that entire compiled cascade branch by returning
+   `nil, nil`.
+3. **No Unused/Circular Blocks**: None of the per-implementor auth rules, variables, or dependency
+   tracking blocks (e.g., intermediate `Group`, `Workspace`, or `Billing` scopes) are generated for
+   the excluded implementing types.
+
+This highly optimizes the generated DQL statement, removing massive dependency-tracking clauses,
+preventing circular dependencies, and significantly reducing Dgraph's execution overhead. Only nodes
+of the requested types that also pass their auth rules are compiled, authorized, and returned.
 
 ---
 

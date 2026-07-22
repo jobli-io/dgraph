@@ -26,8 +26,9 @@ import (
 type queryRewriter struct{}
 
 type cascadeCacheKey struct {
-	rn      *schema.RuleNode
-	typName string
+	rn            *schema.RuleNode
+	typName       string
+	parentVarName string
 }
 
 type authRewriter struct {
@@ -77,6 +78,10 @@ type authRewriter struct {
 	// This field is reset to the new CascadeWrapType each time a nested CascadeWrap is
 	// entered, ensuring each level of the cascade chain uses the correct Dgraph type.
 	cascadeAuthorityType string
+	// `allowedTypesForEdge` maps a Dgraph predicate to the list of allowed implementing type names
+	// defined by query-time memberTypes filters. When set, any CascadeWrap nodes for implementing
+	// types that are NOT in this list can be dropped entirely during query rewrite.
+	allowedTypesForEdge map[string][]string
 }
 
 // The struct is used as a return type for buildCommonAuthQueries function.
@@ -146,12 +151,13 @@ func (qr *queryRewriter) Rewrite(
 	}
 
 	authRw := &authRewriter{
-		authVariables:   customClaims.AuthVariables,
-		varGen:          NewVariableGenerator(),
-		selector:        getAuthSelector(gqlQuery.QueryType()),
-		parentVarName:   gqlQuery.ConstructedFor().Name() + "Root",
-		cascadeVarCache: make(map[cascadeCacheKey]string),
-		forceForward:    gqlQuery.QueryType() == schema.GetQuery || gqlQuery.QueryType() == schema.SimilarByIdQuery,
+		authVariables:       customClaims.AuthVariables,
+		varGen:              NewVariableGenerator(),
+		selector:            getAuthSelector(gqlQuery.QueryType()),
+		parentVarName:       gqlQuery.ConstructedFor().Name() + "Root",
+		cascadeVarCache:     make(map[cascadeCacheKey]string),
+		forceForward:        gqlQuery.QueryType() == schema.GetQuery || gqlQuery.QueryType() == schema.SimilarByIdQuery,
+		allowedTypesForEdge: make(map[string][]string),
 	}
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
 	authRw.hasCascade = hasCascadeDirective(gqlQuery)
@@ -1526,7 +1532,23 @@ func (authRw *authRewriter) addAuthQueries(
 	if typ.IsInterface() {
 		// First we fetch the list of Implementing types here
 		implementingTypes := make([]schema.Type, 0)
-		implementingTypes = append(implementingTypes, typ.ImplementingTypes()...)
+		for _, object := range typ.ImplementingTypes() {
+			if authRw.allowedTypesForEdge != nil {
+				if allowed, exists := authRw.allowedTypesForEdge[typ.Name()]; exists {
+					isAllowed := false
+					for _, a := range allowed {
+						if a == object.Name() {
+							isAllowed = true
+							break
+						}
+					}
+					if !isAllowed {
+						continue
+					}
+				}
+			}
+			implementingTypes = append(implementingTypes, object)
+		}
 
 		var qrys []*dql.GraphQuery
 		var filts []*dql.FilterTree
@@ -1574,14 +1596,15 @@ func (authRw *authRewriter) addAuthQueries(
 
 			// Form Auth Queries for the given object
 			objAuthQueries, objfilter := (&authRewriter{
-				authVariables:   authRw.authVariables,
-				varGen:          authRw.varGen,
-				varName:         queryVar,
-				selector:        authRw.selector,
-				parentVarName:   authRw.parentVarName,
-				hasAuthRules:    authRw.hasAuthRules,
-				cascadeVarCache: authRw.cascadeVarCache,
-				forceForward:    authRw.forceForward,
+				authVariables:       authRw.authVariables,
+				varGen:              authRw.varGen,
+				varName:             queryVar,
+				selector:            authRw.selector,
+				parentVarName:       authRw.parentVarName,
+				hasAuthRules:        authRw.hasAuthRules,
+				cascadeVarCache:     authRw.cascadeVarCache,
+				forceForward:        authRw.forceForward,
+				allowedTypesForEdge: authRw.allowedTypesForEdge,
 			}).rewriteAuthQueries(object)
 
 			// 1. If there is no Auth Query for the Given type then it means that
@@ -1919,6 +1942,7 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 		cascadeVarCache:      authRw.cascadeVarCache,
 		cascadeAuthorityType: authRw.cascadeAuthorityType,
 		forceForward:         authRw.forceForward,
+		allowedTypesForEdge:  authRw.allowedTypesForEdge,
 	}).rewriteRuleNode(typ, authRw.selector(typ))
 }
 
@@ -2030,7 +2054,7 @@ func (authRw *authRewriter) rewriteCascadeBundle(
 			}
 		}
 		if authRw.cascadeVarCache != nil {
-			authRw.cascadeVarCache[cascadeCacheKey{rn: primaryLeaf, typName: typ.Name()}] = varName
+			authRw.cascadeVarCache[cascadeCacheKey{rn: primaryLeaf, typName: typ.Name(), parentVarName: authRw.parentVarName}] = varName
 		}
 		return r1, &dql.FilterTree{
 			Func: &dql.Function{
@@ -2055,7 +2079,7 @@ func (authRw *authRewriter) rewriteCascadeBundle(
 	}
 
 	// Cache check — skip if already cached (fall through to generate fresh var).
-	if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: primaryLeaf, typName: typ.Name()}]; ok {
+	if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: primaryLeaf, typName: typ.Name(), parentVarName: authRw.parentVarName}]; ok {
 		_ = cached
 	}
 
@@ -2095,7 +2119,7 @@ func (authRw *authRewriter) rewriteCascadeBundle(
 	}
 
 	if authRw.cascadeVarCache != nil {
-		authRw.cascadeVarCache[cascadeCacheKey{rn: primaryLeaf, typName: typ.Name()}] = varName
+		authRw.cascadeVarCache[cascadeCacheKey{rn: primaryLeaf, typName: typ.Name(), parentVarName: authRw.parentVarName}] = varName
 	}
 
 	return r1, &dql.FilterTree{
@@ -2159,6 +2183,28 @@ func (authRw *authRewriter) rewriteRuleNode(
 		// Each nested CascadeWrap resets cascadeAuthorityType to its own CascadeWrapType so
 		// that plain Rule-leaf nodes inside the authority's OR/AND tree produce
 		// var(func: type(Group)) rather than the incorrect var(func: uid(JobAd_1)).
+		// Interface Member Types Optimization:
+		// If we are traversing a cascade authority wrap, check if the parent interface-typed edge
+		// was filtered by a memberTypes/type filter. If `allowedTypesForEdge` is specified for this
+		// predicate (e.g. "Note.forResource"), and the concrete target type of this wrap (e.g. "Candidate")
+		// is NOT in the allowed list, then we discard this entire compiled cascade authority branch.
+		// Returning `nil, nil` prevents generating any of this concrete type's nested auth rules, variables,
+		// and dependencies, highly optimizing the final DQL statement.
+		if authRw.allowedTypesForEdge != nil && rn.CascadeWrapPred != "" {
+			if allowed, exists := authRw.allowedTypesForEdge[rn.CascadeWrapPred]; exists {
+				isAllowed := false
+				for _, a := range allowed {
+					if a == rn.CascadeWrapType {
+						isAllowed = true
+						break
+					}
+				}
+				if !isAllowed {
+					return nil, nil
+				}
+			}
+		}
+
 		if rn.EvaluateStatic(authRw.authVariables) == schema.Negative {
 			return nil, nil
 		}
@@ -2174,7 +2220,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 		// interface cache collisions across sibling types implementing the same interface.
 		// Collisions would result in circular variable dependency cycles and runtime DQL execution failures.
 		if authRw.cascadeVarCache != nil {
-			if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name()}]; ok {
+			if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name(), parentVarName: authRw.parentVarName}]; ok {
 				if rn.CascadeWrapReverse && !authRw.forceForward {
 					reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
 					invPred := rn.CascadeInversePred
@@ -2254,7 +2300,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 				r1[0].Cascade = append(r1[0].Cascade, "__all__")
 			}
 			if authRw.cascadeVarCache != nil {
-				authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name()}] = varName
+				authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name(), parentVarName: authRw.parentVarName}] = varName
 			}
 			if rn.CascadeWrapReverse && !authRw.forceForward {
 				reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
@@ -2365,7 +2411,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 					r1[0].Cascade = append(r1[0].Cascade, "__all__")
 				}
 				if authRw.cascadeVarCache != nil {
-					authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name()}] = varName
+					authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name(), parentVarName: authRw.parentVarName}] = varName
 				}
 				if rn.CascadeWrapReverse && !authRw.forceForward {
 					reverseVar := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
@@ -2437,7 +2483,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 		}
 
 		if authRw.cascadeVarCache != nil {
-			authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name()}] = varName
+			authRw.cascadeVarCache[cascadeCacheKey{rn: inner, typName: typ.Name(), parentVarName: authRw.parentVarName}] = varName
 		}
 
 		// Place authBlock first so it is rendered before its support vars.
@@ -2520,8 +2566,43 @@ func (authRw *authRewriter) rewriteRuleNode(
 		if orStatic == schema.Positive {
 			return nil, nil
 		}
-		qrys, filts := nodeList(typ, rn.Or)
+
+		var filteredOr []*schema.RuleNode
+		for _, child := range rn.Or {
+			pred := child.CascadeWrapPred
+			if pred == "" {
+				pred = child.CascadeEdgePred
+			}
+			if pred != "" && authRw.allowedTypesForEdge != nil {
+				if allowed, exists := authRw.allowedTypesForEdge[pred]; exists {
+					concreteType := child.CascadeWrapType
+					if concreteType == "" {
+						concreteType = child.CascadeEdgePredTypeFilter
+					}
+					if concreteType != "" {
+						isAllowed := false
+						for _, a := range allowed {
+							if a == concreteType {
+								isAllowed = true
+								break
+							}
+						}
+						if !isAllowed {
+							continue
+						}
+					}
+				}
+			}
+			filteredOr = append(filteredOr, child)
+		}
+
+		qrys, filts := nodeList(typ, filteredOr)
 		if len(filts) == 0 {
+			if len(rn.Or) > 0 && len(filteredOr) == 0 {
+				return qrys, &dql.FilterTree{
+					Func: &dql.Function{Name: "uid", UID: []uint64{0}},
+				}
+			}
 			return qrys, nil
 		}
 		if len(filts) == 1 {
@@ -2551,6 +2632,30 @@ func (authRw *authRewriter) rewriteRuleNode(
 		//     Workspace.inUsers @filter(eq(User.email, "u@example.com"))
 		//   }
 		//   @filter( uid_in(WorkspaceMember.inWorkspace, uid(Group_Auth3)) )
+		// Interface Member Types Optimization:
+		// If we are traversing a cascade edge leaf (e.g. "WorkspaceMember.inWorkspace"), and the parent edge
+		// was filtered by a memberTypes/type filter, check if the concrete target type being filtered for this
+		// edge leaf matches the allowed list. If it is NOT in the allowed list, then we discard this compiled
+		// cascade branch. Returning `nil, nil` early completely avoids generating unnecessary sub-auth trees
+		// for excluded types.
+		if authRw.allowedTypesForEdge != nil && rn.CascadeEdgePred != "" {
+			if allowed, exists := authRw.allowedTypesForEdge[rn.CascadeEdgePred]; exists {
+				concreteType := rn.CascadeEdgePredTypeFilter
+				if concreteType != "" {
+					isAllowed := false
+					for _, a := range allowed {
+						if a == concreteType {
+							isAllowed = true
+							break
+						}
+					}
+					if !isAllowed {
+						return nil, nil
+					}
+				}
+			}
+		}
+
 		if rn.EvaluateStatic(authRw.authVariables) == schema.Negative {
 			return nil, nil
 		}
@@ -2564,7 +2669,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 
 		// Cache hit: this exact cascade rule was already processed in this request.
 		// Reuse the previously generated cascade authority var — no new DQL blocks needed.
-		if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: rn, typName: typ.Name()}]; ok {
+		if cached, ok := authRw.cascadeVarCache[cascadeCacheKey{rn: rn, typName: typ.Name(), parentVarName: authRw.parentVarName}]; ok {
 			return nil, &dql.FilterTree{
 				Func: &dql.Function{
 					Name: "uid_in",
@@ -2613,15 +2718,16 @@ func (authRw *authRewriter) rewriteRuleNode(
 		if qry != nil {
 			authorityType := qry.Type()
 			cascadeAuthRw := &authRewriter{
-				authVariables:   authRw.authVariables,
-				varGen:          authRw.varGen,
-				selector:        queryAuthSelector, // always query-auth for cascade authority
-				varName:         varName,
-				parentVarName:   varName,
-				isWritingAuth:   true, // prevent recursive addAuthQueries wrapping
-				hasAuthRules:    authRw.hasAuthRules,
-				cascadeVarCache: authRw.cascadeVarCache, // share the cache
-				forceForward:    authRw.forceForward,
+				authVariables:       authRw.authVariables,
+				varGen:              authRw.varGen,
+				selector:            queryAuthSelector, // always query-auth for cascade authority
+				varName:             varName,
+				parentVarName:       varName,
+				isWritingAuth:       true, // prevent recursive addAuthQueries wrapping
+				hasAuthRules:        authRw.hasAuthRules,
+				cascadeVarCache:     authRw.cascadeVarCache, // share the cache
+				forceForward:        authRw.forceForward,
+				allowedTypesForEdge: authRw.allowedTypesForEdge,
 			}
 			authSubVars, authFilter := cascadeAuthRw.rewriteAuthQueries(authorityType)
 			if authFilter != nil {
@@ -2644,7 +2750,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 		// Store in cache so subsequent calls for the same cascade edge rule
 		// reuse this var and skip redundant DQL block generation.
 		if authRw.cascadeVarCache != nil {
-			authRw.cascadeVarCache[cascadeCacheKey{rn: rn, typName: typ.Name()}] = varName
+			authRw.cascadeVarCache[cascadeCacheKey{rn: rn, typName: typ.Name(), parentVarName: authRw.parentVarName}] = varName
 		}
 
 		// The filter on the child is uid_in(pred, uid(AuthVar)) — not uid(AuthVar).
@@ -3070,6 +3176,9 @@ func addSelectionSetFrom(
 		addPagination(child, f)
 		addCascadeDirective(child, f)
 		rbac := auth.evaluateStaticRules(f.Type())
+		if f.BypassAuth() {
+			rbac = schema.Positive
+		}
 
 		// Since the recursion processes the query in bottom up way, we store the state of the so
 		// that we can restore it later.
@@ -3322,19 +3431,34 @@ func addFilter(q *dql.GraphQuery,
 		if typ.IsInterface() {
 			if mt, ok := filter["memberTypes"]; ok {
 				delete(filter, "memberTypes")
-				if names, ok := mt.([]interface{}); ok && q.Func != nil && q.Func.Name == "type" {
-					if len(names) == 0 {
-						// empty list → match nothing
-						q.Func = &dql.Function{Name: "uid", UID: []uint64{0}}
-					} else {
-						args := make([]dql.Arg, 0, len(names))
-						for _, n := range names {
-							if s, ok := n.(string); ok && s != "" {
-								args = append(args, dql.Arg{Value: s})
-							}
+				if names, ok := mt.([]interface{}); ok {
+					var allowed []string
+					for _, n := range names {
+						if s, ok := n.(string); ok && s != "" {
+							allowed = append(allowed, s)
 						}
-						if len(args) > 0 {
-							q.Func.Args = args
+					}
+					if len(allowed) > 0 {
+						if auth.allowedTypesForEdge == nil {
+							auth.allowedTypesForEdge = make(map[string][]string)
+						}
+						auth.allowedTypesForEdge[typ.Name()] = allowed
+					}
+
+					if q.Func != nil && q.Func.Name == "type" {
+						if len(names) == 0 {
+							// empty list → match nothing
+							q.Func = &dql.Function{Name: "uid", UID: []uint64{0}}
+						} else {
+							args := make([]dql.Arg, 0, len(names))
+							for _, n := range names {
+								if s, ok := n.(string); ok && s != "" {
+									args = append(args, dql.Arg{Value: s})
+								}
+							}
+							if len(args) > 0 {
+								q.Func.Args = args
+							}
 						}
 					}
 				}
@@ -3571,6 +3695,24 @@ func buildFilter(typ schema.Type,
 						if mt, ok := nestedFilter["memberTypes"]; ok {
 							delete(nestedFilter, "memberTypes")
 							if names, ok := mt.([]interface{}); ok {
+								var allowed []string
+								for _, n := range names {
+									if s, ok := n.(string); ok && s != "" {
+										allowed = append(allowed, s)
+									}
+								}
+								if len(allowed) > 0 {
+									if auth.allowedTypesForEdge == nil {
+										auth.allowedTypesForEdge = make(map[string][]string)
+									}
+									// Interface Member Types Optimization:
+									// Populate both keys:
+									// 1. fd.DgraphPredicate() (e.g. "Note.forResource") — used by CascadeWrap and CascadeEdge checks inside the rules.
+									// 2. fd.Type().Name() (e.g. "NoteOwner") — used by the sub-rewriter when calling addAuthQueries on the interface itself.
+									auth.allowedTypesForEdge[fd.DgraphPredicate()] = allowed
+									auth.allowedTypesForEdge[fd.Type().Name()] = allowed
+								}
+
 								if len(names) == 0 {
 									nestedDenyAll = true
 								} else {
@@ -3624,13 +3766,14 @@ func buildFilter(typ schema.Type,
 
 					if !auth.isWritingAuth {
 						wr := &authRewriter{
-							authVariables:   auth.authVariables,
-							varGen:          auth.varGen,
-							selector:        auth.selector,
-							parentVarName:   qn + "Root",
-							isWritingAuth:   auth.isWritingAuth,
-							cascadeVarCache: auth.cascadeVarCache,
-							forceForward:    auth.forceForward,
+							authVariables:       auth.authVariables,
+							varGen:              auth.varGen,
+							selector:            auth.selector,
+							parentVarName:       qn + "Root",
+							isWritingAuth:       auth.isWritingAuth,
+							cascadeVarCache:     auth.cascadeVarCache,
+							forceForward:        auth.forceForward,
+							allowedTypesForEdge: auth.allowedTypesForEdge,
 						}
 
 						rbac := wr.evaluateStaticRules(fd.Type())

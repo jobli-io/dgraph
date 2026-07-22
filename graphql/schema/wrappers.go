@@ -223,6 +223,7 @@ type Field interface {
 	CompleteAlias(buf *bytes.Buffer)
 	// GetAuthMeta returns the Dgraph.Authorization meta information stored in schema
 	GetAuthMeta() *authorization.AuthMeta
+	BypassAuth() bool
 }
 
 // A Mutation is a field (from the schema's Mutation type) from an Operation
@@ -1193,6 +1194,13 @@ func (f *field) GetAuthMeta() *authorization.AuthMeta {
 	return f.op.inSchema.meta.authMeta
 }
 
+func (f *field) BypassAuth() bool {
+	if f.field == nil || f.field.Definition == nil {
+		return false
+	}
+	return f.field.Definition.Directives.ForName(bypassAuthDirective) != nil
+}
+
 func (f *field) Arguments() map[string]interface{} {
 	if f.arguments == nil {
 		// Compute and cache the map first time this function is called for a field.
@@ -1752,6 +1760,10 @@ func (q *query) CompleteAlias(buf *bytes.Buffer) {
 
 func (q *query) GetAuthMeta() *authorization.AuthMeta {
 	return (*field)(q).GetAuthMeta()
+}
+
+func (q *query) BypassAuth() bool {
+	return (*field)(q).BypassAuth()
 }
 
 func (q *query) RepresentationsArg() (*EntityRepresentations, error) {
@@ -2339,6 +2351,10 @@ func (m *mutation) CompleteAlias(buf *bytes.Buffer) {
 
 func (m *mutation) GetAuthMeta() *authorization.AuthMeta {
 	return (*field)(m).GetAuthMeta()
+}
+
+func (m *mutation) BypassAuth() bool {
+	return (*field)(m).BypassAuth()
 }
 
 func (t *astType) AuthRules() *TypeAuth {
