@@ -4575,10 +4575,15 @@ func applyQueryPlanInversion(queries []*dql.GraphQuery) {
 //
 // This replaces a slow table scan with an O(1) index lookup.
 func optimizeBlock(q *dql.GraphQuery) {
-	// We only optimize blocks that start with a root 'type(T)' function having exactly 1 argument (the type name).
-	if q.Func != nil && q.Func.Name == "type" && len(q.Func.Args) == 1 {
-		typeName := q.Func.Args[0].Value
-		if typeName == "" {
+	// We optimize blocks that start with a root 'type(T)' function having at least 1 argument.
+	if q.Func != nil && q.Func.Name == "type" && len(q.Func.Args) >= 1 {
+		var typeNames []string
+		for _, arg := range q.Func.Args {
+			if arg.Value != "" {
+				typeNames = append(typeNames, arg.Value)
+			}
+		}
+		if len(typeNames) == 0 {
 			return
 		}
 
@@ -4601,11 +4606,29 @@ func optimizeBlock(q *dql.GraphQuery) {
 			}
 
 			// Move the type constraint to the filter tree.
-			typeFilter := &dql.FilterTree{
-				Func: &dql.Function{
-					Name: "type",
-					Args: []dql.Arg{{Value: typeName}},
-				},
+			var typeFilter *dql.FilterTree
+			if len(typeNames) == 1 {
+				typeFilter = &dql.FilterTree{
+					Func: &dql.Function{
+						Name: "type",
+						Args: []dql.Arg{{Value: typeNames[0]}},
+					},
+				}
+			} else {
+				// Build an OR of type filters, e.g. type(Company) OR type(Contact)
+				var children []*dql.FilterTree
+				for _, tName := range typeNames {
+					children = append(children, &dql.FilterTree{
+						Func: &dql.Function{
+							Name: "type",
+							Args: []dql.Arg{{Value: tName}},
+						},
+					})
+				}
+				typeFilter = &dql.FilterTree{
+					Op:    "or",
+					Child: children,
+				}
 			}
 
 			// Merge the updated filter (with the UID constraint removed) with our new type filter.

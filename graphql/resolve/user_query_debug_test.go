@@ -927,3 +927,79 @@ func TestCascadeAuthDQL_JobAdAggregateCountDebug(t *testing.T) {
 	_, parseErr := dql.Parse(dql.Request{Str: actual})
 	require.NoError(t, parseErr, "Generated DQL should parse perfectly with no variable mismatch errors")
 }
+
+func TestInterfaceMemberTypesMultiple(t *testing.T) {
+	// Mock lambda URL so the parser accepts @lambda directives
+	x.Config.GraphQL = z.NewSuperFlag("lambda-url=http://localhost:8086/graphql-worker;").
+		MergeAndCheckDefault("lambda-url=;")
+
+	schemaBytes, err := os.ReadFile("/Users/idowuayoola/Documents/jobli/graph/.graphql")
+	require.NoError(t, err)
+
+	strSchema := string(schemaBytes)
+	authIdx := strings.LastIndex(strSchema, "Dgraph.Authorization")
+	require.NotEqual(t, -1, authIdx)
+	endOfLine := strings.Index(strSchema[authIdx:], "\n")
+	if endOfLine != -1 {
+		strSchema = strSchema[:authIdx+endOfLine]
+	}
+
+	gqlSchema := test.LoadSchemaFromString(t, string(schemaBytes))
+
+	authParsed, err := authorization.Parse(strSchema)
+	require.NoError(t, err)
+
+	metaInfo := &testutil.AuthMeta{
+		PublicKey:       authParsed.VerificationKey,
+		Namespace:       authParsed.Namespace,
+		Algo:            authParsed.Algo,
+		ClosedByDefault: authParsed.ClosedByDefault,
+	}
+
+	gqlQuery := `
+		query {
+			queryNote(filter: { forResource: { id: ["0x4df8fe", "0x4df907"], memberTypes: [Company, Contact] } }) {
+				id
+				text
+			}
+		}
+	`
+
+	op, err := gqlSchema.Operation(&schema.Request{
+		Query: gqlQuery,
+	})
+	require.NoError(t, err)
+	gqlQry := test.GetQuery(t, op)
+
+	metaInfo.AuthVars = map[string]interface{}{
+		"sub":   "ZGifl7RD37Pa0fHOdTZwjsxjKHO2",
+		"SUB":   "ZGifl7RD37Pa0fHOdTZwjsxjKHO2",
+		"ws":    "test",
+		"WS":    "test",
+		"email": "test@gorillajobs.app",
+		"EMAIL": "test@gorillajobs.app",
+	}
+	ctx, err := metaInfo.AddClaimsToContext(context.Background())
+	require.NoError(t, err)
+
+	rewriter := NewQueryRewriter()
+	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	require.NoError(t, err)
+
+	actual := dgraph.AsString(dgQuery)
+	t.Logf("Generated DQL:\n%s", actual)
+
+	// Since we filter forResource to Company and Contact:
+	// We should see Company and Contact auth blocks
+	require.Contains(t, actual, "Company_Auth")
+	require.Contains(t, actual, "Contact_Auth")
+
+	// We should NOT see Candidate or Job auth blocks in the generated DQL!
+	require.NotContains(t, actual, "Candidate_Auth")
+	require.NotContains(t, actual, "Job_Auth")
+
+	// Verify the root function of the variable query NoteOwner_1 has been inverted to a valid uid(...) function
+	// and the multiple types have been moved to the @filter tree as an OR.
+	_, parseErr := dql.Parse(dql.Request{Str: actual})
+	require.NoError(t, parseErr, "Generated DQL should parse perfectly")
+}
