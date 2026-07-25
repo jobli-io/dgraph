@@ -10,12 +10,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
@@ -285,6 +287,82 @@ func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err = edgraph.ProcessPersistedQuery(ctx, gqlReq); err != nil {
 		WriteErrorResponse(w, r, err)
 		return
+	}
+
+	acceptHeader := r.Header.Get("Accept")
+	isSSE := strings.Contains(acceptHeader, "text/event-stream")
+	isMultipart := strings.Contains(acceptHeader, "multipart/mixed")
+
+	if isSSE || isMultipart {
+		gh.pollerMux.RLock()
+		poller := gh.poller[ns]
+		gh.pollerMux.RUnlock()
+
+		if poller == nil {
+			WriteErrorResponse(w, r, errors.New("subscription engine not initialized for namespace"))
+			return
+		}
+
+		subResp, err := poller.AddSubscriber(gqlReq)
+		if err != nil {
+			WriteErrorResponse(w, r, err)
+			return
+		}
+
+		if isSSE {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.Header().Set("Transfer-Encoding", "chunked")
+			w.Header().Set("X-Accel-Buffering", "no")
+		} else {
+			w.Header().Set("Content-Type", `multipart/mixed; boundary="-"`)
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.Header().Set("Transfer-Encoding", "chunked")
+			w.Header().Set("X-Accel-Buffering", "no")
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			WriteErrorResponse(w, r, errors.New("streaming not supported by client/server"))
+			return
+		}
+		flusher.Flush()
+
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				poller.TerminateSubscription(subResp.BucketID, subResp.SubscriptionID)
+				return
+			case <-ticker.C:
+				// Periodic Heartbeat to keep intermediate proxies (GCLB / Tyk) warm
+				if isSSE {
+					_, _ = fmt.Fprintf(w, ": keepalive\n\n")
+				} else {
+					_, _ = fmt.Fprintf(w, "\r\n")
+				}
+				flusher.Flush()
+			case data, ok := <-subResp.UpdateCh:
+				if !ok {
+					return
+				}
+				jsonData, err := json.Marshal(data)
+				if err != nil {
+					continue
+				}
+
+				if isSSE {
+					_, _ = fmt.Fprintf(w, "data: %s\n\n", string(jsonData))
+				} else {
+					_, _ = fmt.Fprintf(w, "\r\n---\r\nContent-Type: application/json\r\n\r\n%s\r\n", string(jsonData))
+				}
+				flusher.Flush()
+			}
+		}
 	}
 
 	res = resolver.Resolve(ctx, gqlReq)

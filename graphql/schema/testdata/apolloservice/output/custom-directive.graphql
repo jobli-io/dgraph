@@ -222,7 +222,7 @@ input GenerateMutationParams {
 }
 
 directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
-directive @search(by: [String!]) on FIELD_DEFINITION
+directive @search(by: [String!], strategy: LookupStrategy = DYNAMIC) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
@@ -399,6 +399,12 @@ enum DateTimeGranularity {
 	hour
 }
 
+enum LookupStrategy {
+	FORWARD
+	REVERSE
+	DYNAMIC
+}
+
 #######################
 # Generated Inputs
 #######################
@@ -413,6 +419,7 @@ input AuthVariable {
 }
 
 input CarFilter {
+	_metadata: FilterMetadata
 	id: [ID!]
 	has: [CarHasFilter]
 	and: [CarFilter]
@@ -443,6 +450,10 @@ input CarPatch {
 input CarRef {
 	id: ID
 	name: String
+}
+
+input FilterMetadata {
+	lookup: LookupStrategy
 }
 
 input InterfaceMergePolicy {

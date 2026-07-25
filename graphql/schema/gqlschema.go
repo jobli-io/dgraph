@@ -316,7 +316,7 @@ input GenerateMutationParams {
 `
 	directiveDefs = `
 directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
-directive @search(by: [String!]) on FIELD_DEFINITION
+directive @search(by: [String!], strategy: LookupStrategy = DYNAMIC) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
@@ -328,6 +328,8 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum CascadeAuthStrategy { FORWARD REVERSE AUTO }
+enum LookupStrategy { FORWARD REVERSE DYNAMIC }
+input FilterMetadata { lookup: LookupStrategy }
 enum DateTimeGranularity { year quarter month fortnight week day hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
@@ -374,7 +376,7 @@ directive @generate(
 	// So, such directives have to be missed too.
 	apolloSupportedDirectiveDefs = `
 directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
-directive @search(by: [String!]) on FIELD_DEFINITION
+directive @search(by: [String!], strategy: LookupStrategy = DYNAMIC) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
@@ -1728,6 +1730,13 @@ func addFilterType(schema *ast.Schema, defn *ast.Definition, providesTypeMap map
 			})
 		}
 	}
+
+	// Inject the dynamic metadata filter field to allow customizing lookup strategy:
+	// _metadata: FilterMetadata
+	filter.Fields = append(filter.Fields, &ast.FieldDefinition{
+		Name: "_metadata",
+		Type: &ast.Type{NamedType: "FilterMetadata"},
+	})
 
 	for _, fld := range defn.Fields {
 		// Ignore Fields with @external directives also excluding those which are present

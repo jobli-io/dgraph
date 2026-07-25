@@ -266,7 +266,7 @@ input GenerateMutationParams {
 }
 
 directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
-directive @search(by: [String!]) on FIELD_DEFINITION
+directive @search(by: [String!], strategy: LookupStrategy = DYNAMIC) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
@@ -278,11 +278,15 @@ directive @authVariables(vars: [AuthVariable!]!) on OBJECT | INTERFACE
 enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum CascadeAuthStrategy { FORWARD REVERSE AUTO }
+enum LookupStrategy { FORWARD REVERSE DYNAMIC }
+input FilterMetadata { lookup: LookupStrategy }
 enum DateTimeGranularity { year quarter month fortnight week day hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
 directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean, strategy: CascadeAuthStrategy) on FIELD_DEFINITION
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
+directive @bypassAuth on FIELD_DEFINITION
+
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
 directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
@@ -664,6 +668,7 @@ input AddStarshipInput {
 
 input CharacterFilter {
 	memberTypes: [CharacterTypename]
+	_metadata: FilterMetadata
 	id: [ID!]
 	name: StringExactFilter
 	appearsIn: Episode_hash
@@ -701,6 +706,7 @@ input CharacterRef {
 }
 
 input DroidFilter {
+	_metadata: FilterMetadata
 	id: [ID!]
 	name: StringExactFilter
 	appearsIn: Episode_hash
@@ -750,6 +756,7 @@ input Episode_hash {
 }
 
 input HumanFilter {
+	_metadata: FilterMetadata
 	id: [ID!]
 	name: StringExactFilter
 	appearsIn: Episode_hash
@@ -796,6 +803,7 @@ input HumanRef {
 }
 
 input PlanetFilter {
+	_metadata: FilterMetadata
 	id: [ID!]
 	has: [PlanetHasFilter]
 	and: [PlanetFilter]
@@ -844,6 +852,7 @@ input ResidentRef {
 }
 
 input StarshipFilter {
+	_metadata: FilterMetadata
 	id: [ID!]
 	name: StringTermFilter
 	has: [StarshipHasFilter]

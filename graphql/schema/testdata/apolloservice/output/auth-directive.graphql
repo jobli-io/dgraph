@@ -230,7 +230,7 @@ input GenerateMutationParams {
 }
 
 directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
-directive @search(by: [String!]) on FIELD_DEFINITION
+directive @search(by: [String!], strategy: LookupStrategy = DYNAMIC) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
@@ -440,6 +440,12 @@ enum DateTimeGranularity {
 	hour
 }
 
+enum LookupStrategy {
+	FORWARD
+	REVERSE
+	DYNAMIC
+}
+
 enum TodoHasFilter {
 	title
 	text
@@ -491,6 +497,10 @@ input AuthVariable {
 	value: [String!]!
 }
 
+input FilterMetadata {
+	lookup: LookupStrategy
+}
+
 input InterfaceMergePolicy {
 	interface: String!
 	merge: String!
@@ -498,6 +508,7 @@ input InterfaceMergePolicy {
 }
 
 input TodoFilter {
+	_metadata: FilterMetadata
 	id: [ID!]
 	isPublic: Boolean
 	dateCompleted: StringTermFilter
@@ -564,6 +575,7 @@ input UpdateUserInput {
 }
 
 input UserFilter {
+	_metadata: FilterMetadata
 	username: StringHashFilter
 	has: [UserHasFilter]
 	and: [UserFilter]

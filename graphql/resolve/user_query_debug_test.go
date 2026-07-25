@@ -685,3 +685,245 @@ func TestInterfaceMemberTypesFilterAuthOptimization(t *testing.T) {
 	_, parseErr := dql.Parse(dql.Request{Str: actual})
 	require.NoError(t, parseErr, "DQL should parse perfectly")
 }
+
+func TestFilterLookupStrategy(t *testing.T) {
+	schemaStr := `
+		type Company {
+			id: ID!
+			name: String! @search(by: [exact])
+			hasContact: [Contact!] @search(strategy: DYNAMIC) @hasInverse(field: forCompany)
+			forcedForwardContact: [Contact!] @search(strategy: FORWARD) @hasInverse(field: forCompanyForward)
+			forcedReverseContact: [Contact!] @search(strategy: REVERSE) @hasInverse(field: forCompanyReverse)
+		}
+
+		type Contact {
+			id: ID!
+			city: String! @search(by: [exact])
+			forCompany: Company
+			forCompanyForward: Company
+			forCompanyReverse: Company
+		}
+	`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	// Case 1: Static strategy = FORWARD (should use uid_in)
+	gqlQuery1 := `
+		query {
+			queryCompany(filter: { forcedForwardContact: { city: { eq: "Sydney" } } }) {
+				id
+				name
+			}
+		}
+	`
+	op1, err := gqlSchema.Operation(&schema.Request{Query: gqlQuery1})
+	require.NoError(t, err)
+	dgQry1, err := NewQueryRewriter().Rewrite(context.Background(), test.GetQuery(t, op1))
+	require.NoError(t, err)
+	actual1 := dgraph.AsString(dgQry1)
+	t.Logf("Query 1 DQL:\n%s", actual1)
+	// Must contain uid_in
+	require.Contains(t, actual1, "uid_in(Company.forcedForwardContact")
+
+	// Case 2: Static strategy = REVERSE (should use nested var query with inverse predicate)
+	gqlQuery2 := `
+		query {
+			queryCompany(filter: { forcedReverseContact: { city: { eq: "Sydney" } } }) {
+				id
+				name
+			}
+		}
+	`
+	op2, err := gqlSchema.Operation(&schema.Request{Query: gqlQuery2})
+	require.NoError(t, err)
+	dgQry2, err := NewQueryRewriter().Rewrite(context.Background(), test.GetQuery(t, op2))
+	require.NoError(t, err)
+	actual2 := dgraph.AsString(dgQry2)
+	t.Logf("Query 2 DQL:\n%s", actual2)
+	// Must contain inverse field traversal
+	require.Contains(t, actual2, "Contact.forCompanyReverse")
+	require.NotContains(t, actual2, "uid_in(Company.forcedReverseContact")
+
+	// Case 3: Query-time override in _metadata
+	gqlQuery3 := `
+		query {
+			queryCompany(filter: { hasContact: { city: { eq: "Sydney" }, _metadata: { lookup: FORWARD } } }) {
+				id
+				name
+			}
+		}
+	`
+	op3, err := gqlSchema.Operation(&schema.Request{Query: gqlQuery3})
+	require.NoError(t, err)
+	dgQry3, err := NewQueryRewriter().Rewrite(context.Background(), test.GetQuery(t, op3))
+	require.NoError(t, err)
+	actual3 := dgraph.AsString(dgQry3)
+	t.Logf("Query 3 DQL:\n%s", actual3)
+	// Query-time FORWARD override should force uid_in
+	require.Contains(t, actual3, "uid_in(Company.hasContact")
+}
+
+func TestForwardStrategyVariableUnification(t *testing.T) {
+	// Mock lambda URL so the parser accepts @lambda directives
+	x.Config.GraphQL = z.NewSuperFlag("lambda-url=http://localhost:8086/graphql-worker;").
+		MergeAndCheckDefault("lambda-url=;")
+
+	schemaBytes, err := os.ReadFile("/Users/idowuayoola/Documents/jobli/graph/.graphql")
+	require.NoError(t, err)
+
+	strSchema := string(schemaBytes)
+	authIdx := strings.LastIndex(strSchema, "Dgraph.Authorization")
+	require.NotEqual(t, -1, authIdx)
+	endOfLine := strings.Index(strSchema[authIdx:], "\n")
+	if endOfLine != -1 {
+		strSchema = strSchema[:authIdx+endOfLine]
+	}
+
+	gqlSchema := test.LoadSchemaFromString(t, string(schemaBytes))
+
+	authParsed, err := authorization.Parse(strSchema)
+	require.NoError(t, err)
+
+	metaInfo := &testutil.AuthMeta{
+		PublicKey:       authParsed.VerificationKey,
+		Namespace:       authParsed.Namespace,
+		Algo:            authParsed.Algo,
+		ClosedByDefault: authParsed.ClosedByDefault,
+	}
+
+	gqlQuery := `
+		query GetJobAd($id: ID!) {
+			getJobAd(id: $id) {
+				id
+				hasApplicationAggregate(
+					filter: {
+						_metadata: { lookup: FORWARD }
+						deleted: false
+						and: [
+							{ or: [{ deleted: false }, { not: { has: deleted } }] }
+							{
+								hasStatus: {
+									not: { name: { eq: "Draft" } }
+								}
+							}
+							{
+								hasCandidate: {
+									_metadata: { lookup: FORWARD }
+									or: [{ deleted: false }, { not: { has: deleted } }]
+								}
+							}
+						]
+					}
+				) {
+					count
+				}
+			}
+		}
+	`
+
+	op, err := gqlSchema.Operation(&schema.Request{
+		Query:     gqlQuery,
+		Variables: map[string]interface{}{"id": "0x123"},
+	})
+	require.NoError(t, err)
+
+	metaInfo.AuthVars = map[string]interface{}{
+		"sub":   "ZGifl7RD37Pa0fHOdTZwjsxjKHO2",
+		"SUB":   "ZGifl7RD37Pa0fHOdTZwjsxjKHO2",
+		"ws":    "test",
+		"WS":    "test",
+		"email": "test@gorillajobs.app",
+		"EMAIL": "test@gorillajobs.app",
+	}
+	ctx, err := metaInfo.AddClaimsToContext(context.Background())
+	require.NoError(t, err)
+
+	dgQry, err := NewQueryRewriter().Rewrite(ctx, test.GetQuery(t, op))
+	require.NoError(t, err)
+
+	actual := dgraph.AsString(dgQry)
+	t.Logf("Generated DQL:\n%s", actual)
+
+	// Verify both nested variables are defined and used identically, preventing variable mismatch errors
+	_, parseErr := dql.Parse(dql.Request{Str: actual})
+	require.NoError(t, parseErr, "Generated DQL should parse perfectly with no variable mismatch errors")
+}
+
+func TestCascadeAuthDQL_JobAdAggregateCountDebug(t *testing.T) {
+	// Mock lambda URL so the parser accepts @lambda directives
+	x.Config.GraphQL = z.NewSuperFlag("lambda-url=http://localhost:8086/graphql-worker;").
+		MergeAndCheckDefault("lambda-url=;")
+
+	schemaBytes, err := os.ReadFile("/Users/idowuayoola/Documents/jobli/graph/.graphql")
+	require.NoError(t, err)
+
+	strSchema := string(schemaBytes)
+
+	// Clean strSchema so that Dgraph.Authorization is at the very end
+	authIdx := strings.LastIndex(strSchema, "Dgraph.Authorization")
+	require.NotEqual(t, -1, authIdx)
+	endOfLine := strings.Index(strSchema[authIdx:], "\n")
+	if endOfLine != -1 {
+		strSchema = strSchema[:authIdx+endOfLine]
+	}
+
+	gqlSchema := test.LoadSchemaFromString(t, string(schemaBytes))
+
+	authParsed, err := authorization.Parse(strSchema)
+	require.NoError(t, err)
+
+	metaInfo := &testutil.AuthMeta{
+		PublicKey:       authParsed.VerificationKey,
+		Namespace:       authParsed.Namespace,
+		Algo:            authParsed.Algo,
+		ClosedByDefault: authParsed.ClosedByDefault,
+	}
+
+	gqlQuery := `
+		query GetJobAd($id: ID!) {
+			data: getJobAd(id: $id) {
+				id
+				hasApplicationAggregate(
+					filter: {
+						_metadata: { lookup: REVERSE }
+						deleted: false
+						hasCandidate: { _metadata: { lookup: REVERSE }, deleted: false }
+						hasStatus: {
+							_metadata: { lookup: REVERSE }
+							not: { _metadata: { lookup: REVERSE }, name: { eq: "Draft" } }
+						}
+					}
+				) {
+					count
+					__typename
+				}
+			}
+		}
+	`
+
+	op, err := gqlSchema.Operation(&schema.Request{
+		Query:     gqlQuery,
+		Variables: map[string]interface{}{"id": "0x123"},
+	})
+	require.NoError(t, err)
+
+	metaInfo.AuthVars = map[string]interface{}{
+		"sub":   "e8CLjFdOVJeCYirbV5SDQ6yfUg03",
+		"SUB":   "e8CLjFdOVJeCYirbV5SDQ6yfUg03",
+		"ws":    "test",
+		"WS":    "test",
+		"email": "test@gorillajobs.app",
+		"EMAIL": "test@gorillajobs.app",
+	}
+	ctx, err := metaInfo.AddClaimsToContext(context.Background())
+	require.NoError(t, err)
+
+	dgQry, err := NewQueryRewriter().Rewrite(ctx, test.GetQuery(t, op))
+	require.NoError(t, err)
+
+	actual := dgraph.AsString(dgQry)
+	t.Logf("Generated DQL:\n%s", actual)
+
+	// Verify both nested variables are defined and used identically, preventing variable mismatch errors
+	_, parseErr := dql.Parse(dql.Request{Str: actual})
+	require.NoError(t, parseErr, "Generated DQL should parse perfectly with no variable mismatch errors")
+}

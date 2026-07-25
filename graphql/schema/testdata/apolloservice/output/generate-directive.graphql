@@ -232,7 +232,7 @@ input GenerateMutationParams {
 }
 
 directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
-directive @search(by: [String!]) on FIELD_DEFINITION
+directive @search(by: [String!], strategy: LookupStrategy = DYNAMIC) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
@@ -475,6 +475,12 @@ enum HumanOrderable {
 	totalCredits
 }
 
+enum LookupStrategy {
+	FORWARD
+	REVERSE
+	DYNAMIC
+}
+
 enum PersonHasFilter {
 	name
 }
@@ -501,6 +507,7 @@ input AuthVariable {
 
 input CharacterFilter {
 	memberTypes: [CharacterTypename]
+	_metadata: FilterMetadata
 	id: [ID!]
 	name: StringExactFilter
 	has: [CharacterHasFilter]
@@ -535,7 +542,12 @@ input CharacterRef {
 	id: ID!
 }
 
+input FilterMetadata {
+	lookup: LookupStrategy
+}
+
 input HumanFilter {
+	_metadata: FilterMetadata
 	id: [ID!]
 	name: StringExactFilter
 	has: [HumanHasFilter]
@@ -583,6 +595,7 @@ input InterfaceMergePolicy {
 }
 
 input PersonFilter {
+	_metadata: FilterMetadata
 	id: [ID!]
 	has: [PersonHasFilter]
 	and: [PersonFilter]

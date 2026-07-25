@@ -1258,7 +1258,7 @@
       UserRoot as var(func: uid(User_4))
       User_4 as var(func: type(User))
       var(func: uid(UserRoot)) {
-        TicketAggregateResult_2 as User.tickets @filter(anyofterms(Ticket.title, "graphql"))
+        TicketAggregateResult_2 as User.tickets @filter((anyofterms(Ticket.title, "graphql") AND uid_in(Ticket.onColumn, uid(UserRoot))))
       }
       Ticket_Auth3 as var(func: uid(TicketAggregateResult_2)) @cascade {
         Ticket.onColumn : Ticket.onColumn {
@@ -1314,7 +1314,7 @@
       UserRoot as var(func: uid(User_10))
       User_10 as var(func: type(User))
       var(func: uid(UserRoot)) {
-        TicketAggregateResult_2 as User.tickets @filter(anyofterms(Ticket.title, "graphql"))
+        TicketAggregateResult_2 as User.tickets @filter((anyofterms(Ticket.title, "graphql") AND uid_in(Ticket.onColumn, uid(UserRoot))))
       }
       Ticket_Auth3 as var(func: uid(TicketAggregateResult_2)) @cascade {
         Ticket.onColumn : Ticket.onColumn {
@@ -1327,7 +1327,7 @@
       }
       TicketAggregateResult_1 as var(func: uid(TicketAggregateResult_2)) @filter(uid(Ticket_Auth3))
       var(func: uid(UserRoot)) {
-        IssueAggregateResult_5 as User.issues
+        IssueAggregateResult_5 as User.issues @filter(uid_in(~User.issues, uid(UserRoot)))
       }
       Issue_Auth6 as var(func: uid(IssueAggregateResult_5)) @cascade {
         Issue.owner : Issue.owner @filter(eq(User.username, "user1"))
@@ -1375,7 +1375,7 @@
       UserRoot as var(func: uid(User_4))
       User_4 as var(func: type(User))
       var(func: uid(UserRoot)) {
-        IssueAggregateResult_2 as User.issues
+        IssueAggregateResult_2 as User.issues @filter(uid_in(~User.issues, uid(UserRoot)))
       }
       Issue_Auth3 as var(func: uid(IssueAggregateResult_2)) @cascade {
         Issue.owner : Issue.owner @filter(eq(User.username, "user1"))
@@ -2173,7 +2173,7 @@
         queryNested_X_y as Nested_Z.x
       }
       Nested_XRoot as var(func: uid(Nested_X_3)) @filter(uid(Nested_X_Auth4))
-      Nested_X_3 as var(func: type(Nested_X)) @filter((uid(queryNested_X_y)))
+      Nested_X_3 as var(func: uid(queryNested_X_y)) @filter(type(Nested_X))
       Nested_X_Auth4 as var(func: uid(Nested_X_3)) @filter((uid(Nested_X_Auth4_y))) @cascade
       var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "y")) {
         Nested_X_Auth4_y as Nested_Z.x
@@ -2202,7 +2202,7 @@
       }
       queryNested_X_y as var()
       Nested_XRoot as var(func: uid(Nested_X_3)) @filter(uid(Nested_X_Auth4))
-      Nested_X_3 as var(func: type(Nested_X)) @filter((uid(queryNested_X_y)))
+      Nested_X_3 as var(func: uid(queryNested_X_y)) @filter(type(Nested_X))
       Nested_X_Auth4 as var(func: uid(Nested_X_3)) @filter((uid(Nested_X_Auth4_y))) @cascade
       var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "y")) {
         Nested_X_Auth4_y as Nested_Z.x
@@ -2231,15 +2231,13 @@
       }
       Nested_Y_1 as var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "-"))
       queryNested_X_yRoot as var(func: uid(Nested_Y_1)) @filter(uid(Nested_Y_Auth2))
-      Nested_Y_Auth2 as var(func: uid(Nested_Y_1)) @filter((uid(Nested_Y_Auth2_x))) @cascade
-      var(func: type(Nested_X)) @filter(eq(Nested_X.b, true)) {
-        Nested_Y_Auth2_x as Nested_X.y
-      }
+      Nested_Y_Auth2 as var(func: uid(Nested_Y_1)) @filter((uid_in(Nested_Z.x, uid(Nested_Y_Auth2_x)))) @cascade
+      Nested_Y_Auth2_x as var(func: type(Nested_X)) @filter(eq(Nested_X.b, true))
       var(func: uid(queryNested_X_yRoot)) {
         queryNested_X_y as Nested_Z.x
       }
       Nested_XRoot as var(func: uid(Nested_X_6)) @filter(uid(Nested_X_Auth7))
-      Nested_X_6 as var(func: type(Nested_X)) @filter((uid(queryNested_X_y)))
+      Nested_X_6 as var(func: uid(queryNested_X_y)) @filter(type(Nested_X))
       Nested_X_Auth7 as var(func: uid(Nested_X_6)) @filter((uid(Nested_X_Auth7_y))) @cascade
       var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "y")) {
         Nested_X_Auth7_y as Nested_Z.x
@@ -2247,9 +2245,7 @@
       var(func: uid(Nested_XRoot)) {
         Nested_Y_4 as Nested_X.y
       }
-      Nested_Y_Auth5 as var(func: uid(Nested_Y_4)) @filter((uid(Nested_Y_Auth5_x))) @cascade
-      var(func: type(Nested_X)) @filter(eq(Nested_X.b, true)) {
-        Nested_Y_Auth5_x as Nested_X.y
-      }
+      Nested_Y_Auth5 as var(func: uid(Nested_Y_4)) @filter((uid_in(Nested_Z.x, uid(Nested_Y_Auth5_x)))) @cascade
+      Nested_Y_Auth5_x as var(func: type(Nested_X)) @filter(eq(Nested_X.b, true))
       Nested_Y_3 as var(func: uid(Nested_Y_4)) @filter(uid(Nested_Y_Auth5))
     }

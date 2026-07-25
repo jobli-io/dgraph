@@ -82,6 +82,10 @@ type authRewriter struct {
 	// defined by query-time memberTypes filters. When set, any CascadeWrap nodes for implementing
 	// types that are NOT in this list can be dropped entirely during query rewrite.
 	allowedTypesForEdge map[string][]string
+	// parentRelationVar and parentRelationPred are used to limit the root type scan
+	// of nested auth queries to only the actual related nodes, eliminating global type scans.
+	parentRelationVar  string
+	parentRelationPred string
 }
 
 // The struct is used as a return type for buildCommonAuthQueries function.
@@ -162,46 +166,47 @@ func (qr *queryRewriter) Rewrite(
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
 	authRw.hasCascade = hasCascadeDirective(gqlQuery)
 
+	var dgQuery []*dql.GraphQuery
 	switch gqlQuery.QueryType() {
 	case schema.GetQuery:
-
-		// TODO: The only error that can occur in query rewriting is if an ID argument
-		// can't be parsed as a uid: e.g. the query was something like:
-		//
-		// getT(id: "HI") { ... }
-		//
-		// But that's not a rewriting error!  It should be caught by validation
-		// way up when the query first comes in.  All other possible problems with
-		// the query are caught by validation.
-		// ATM, I'm not sure how to hook into the GraphQL validator to get that to happen
 		xid, uid, err := gqlQuery.IDArgValue()
 		if err != nil {
 			return nil, err
 		}
-
-		dgQuery := rewriteAsGet(gqlQuery, uid, xid, authRw)
-		return dgQuery, nil
+		dgQuery = rewriteAsGet(gqlQuery, uid, xid, authRw)
 	case schema.SimilarByIdQuery:
 		xid, uid, err := gqlQuery.IDArgValue()
 		if err != nil {
 			return nil, err
 		}
-		return rewriteAsSimilarByIdQuery(gqlQuery, uid, xid, authRw), nil
+		dgQuery = rewriteAsSimilarByIdQuery(gqlQuery, uid, xid, authRw)
 	case schema.SimilarByEmbeddingQuery:
-		return rewriteAsSimilarByEmbeddingQuery(gqlQuery, authRw), nil
+		dgQuery = rewriteAsSimilarByEmbeddingQuery(gqlQuery, authRw)
 	case schema.FilterQuery:
-		return rewriteAsQuery(gqlQuery, authRw, gqlQuery.Alias()), nil
+		dgQuery = rewriteAsQuery(gqlQuery, authRw, gqlQuery.Alias())
 	case schema.PasswordQuery:
-		return passwordQuery(gqlQuery, authRw)
+		dgQuery, err = passwordQuery(gqlQuery, authRw)
+		if err != nil {
+			return nil, err
+		}
 	case schema.AggregateQuery:
-		return aggregateQuery(gqlQuery, authRw), nil
+		dgQuery = aggregateQuery(gqlQuery, authRw)
 	case schema.GroupByQuery:
-		return groupByQuery(gqlQuery, authRw)
+		dgQuery, err = groupByQuery(gqlQuery, authRw)
+		if err != nil {
+			return nil, err
+		}
 	case schema.EntitiesQuery:
-		return entitiesQuery(gqlQuery, authRw)
+		dgQuery, err = entitiesQuery(gqlQuery, authRw)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, errors.Errorf("unimplemented query type %s", gqlQuery.QueryType())
 	}
+
+	applyQueryPlanInversion(dgQuery)
+	return dgQuery, nil
 }
 
 // entitiesQuery rewrites the Apollo `_entities` Query which is sent from the Apollo gateway to a DQL query.
@@ -1585,13 +1590,30 @@ func (authRw *authRewriter) addAuthQueries(
 			// auth blocks are rooted at uid(queryVar), so emitting the root
 			// type-scan var unconditionally would create a phantom variable.
 			queryVar := authRw.varGen.Next(object, "", "", authRw.isWritingAuth)
-			varQry := &dql.GraphQuery{
-				Attr: "var",
-				Var:  queryVar,
-				Func: &dql.Function{
-					Name: "type",
-					Args: []dql.Arg{{Value: object.Name()}},
-				},
+			var varQry *dql.GraphQuery
+			if authRw.parentRelationVar != "" && authRw.parentRelationPred != "" {
+				varQry = &dql.GraphQuery{
+					Attr: "var",
+					Func: &dql.Function{
+						Name: "uid",
+						Args: []dql.Arg{{Value: authRw.parentRelationVar}},
+					},
+					Children: []*dql.GraphQuery{
+						{
+							Attr: authRw.parentRelationPred,
+							Var:  queryVar,
+						},
+					},
+				}
+			} else {
+				varQry = &dql.GraphQuery{
+					Attr: "var",
+					Var:  queryVar,
+					Func: &dql.Function{
+						Name: "type",
+						Args: []dql.Arg{{Value: object.Name()}},
+					},
+				}
 			}
 
 			// Form Auth Queries for the given object
@@ -1601,6 +1623,8 @@ func (authRw *authRewriter) addAuthQueries(
 				varName:             queryVar,
 				selector:            authRw.selector,
 				parentVarName:       authRw.parentVarName,
+				parentRelationVar:   authRw.parentRelationVar,
+				parentRelationPred:  authRw.parentRelationPred,
 				hasAuthRules:        authRw.hasAuthRules,
 				cascadeVarCache:     authRw.cascadeVarCache,
 				forceForward:        authRw.forceForward,
@@ -1938,6 +1962,8 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 		varName:              authRw.varName,
 		selector:             authRw.selector,
 		parentVarName:        authRw.parentVarName,
+		parentRelationVar:    authRw.parentRelationVar,
+		parentRelationPred:   authRw.parentRelationPred,
 		hasAuthRules:         authRw.hasAuthRules,
 		cascadeVarCache:      authRw.cascadeVarCache,
 		cascadeAuthorityType: authRw.cascadeAuthorityType,
@@ -2723,6 +2749,8 @@ func (authRw *authRewriter) rewriteRuleNode(
 				selector:            queryAuthSelector, // always query-auth for cascade authority
 				varName:             varName,
 				parentVarName:       varName,
+				parentRelationVar:   authRw.parentRelationVar,
+				parentRelationPred:  authRw.parentRelationPred,
 				isWritingAuth:       true, // prevent recursive addAuthQueries wrapping
 				hasAuthRules:        authRw.hasAuthRules,
 				cascadeVarCache:     authRw.cascadeVarCache, // share the cache
@@ -2937,6 +2965,52 @@ func buildAggregateFields(
 	fieldFilter, _ := f.ArgValue("filter").(map[string]interface{})
 	_, varQry := addFilter(mainField, constructedForType, fieldFilter, auth, f.Alias())
 
+	// Automatically restrict the aggregate scope to the parent selection variable
+	// if we are in a nested relationship query context (auth != nil && auth.parentVarName != "").
+	// This bounds global type scans under security rules to the specific parent resource context.
+	var parentFilter *dql.FilterTree
+	if auth != nil && auth.hasAuthRules && auth.parentVarName != "" && auth.parentVarName != "__ROOT_VAR_PLACEHOLDER__" {
+		inversePredicate := ""
+		if strings.HasPrefix(constructedForDgraphPredicate, "~") {
+			inversePredicate = strings.TrimPrefix(constructedForDgraphPredicate, "~")
+		} else {
+			// Clean Schema-Driven Inverse Resolution:
+			// If the parent relation has a defined inverse relationship (e.g. @hasInverse),
+			// we must use the actual forward predicate of the inverse field, which is 100% correct,
+			// more performant, and does not require any reverse index.
+			var invField schema.FieldDefinition
+			parentFieldName := f.Name()
+			if f.IsAggregateField() && strings.HasSuffix(parentFieldName, "Aggregate") {
+				parentFieldName = parentFieldName[:len(parentFieldName)-9]
+			}
+			for _, fd := range f.ConstructedFor().Fields() {
+				if inv := fd.Inverse(); inv != nil {
+					if inv.Name() == parentFieldName {
+						invField = fd
+						break
+					}
+				}
+			}
+			if invField != nil {
+				inversePredicate = invField.DgraphPredicate()
+			} else {
+				inversePredicate = "~" + constructedForDgraphPredicate
+			}
+		}
+		if inversePredicate != "" {
+			parentFilter = &dql.FilterTree{
+				Func: &dql.Function{
+					Name: "uid_in",
+					Args: []dql.Arg{
+						{Value: inversePredicate},
+						{Value: "uid(" + auth.parentVarName + ")"},
+					},
+				},
+			}
+			addToFilterTree(mainField, parentFilter)
+		}
+	}
+
 	// Add type filter in case the Dgraph predicate for which the aggregate
 	// field belongs to is a reverse edge
 	if strings.HasPrefix(constructedForDgraphPredicate, "~") {
@@ -2959,7 +3033,34 @@ func buildAggregateFields(
 				Attr:  "count(" + constructedForDgraphPredicate + ")",
 			}
 			// Add filter to count aggregation field.
-			addFilter(aggregateChild, constructedForType, fieldFilter, auth, f.Alias())
+			_, countVarQry := addFilter(aggregateChild, constructedForType, fieldFilter, auth, f.Alias())
+			for _, q := range countVarQry {
+				exists := false
+				for _, existing := range varQry {
+					if q == existing {
+						exists = true
+						break
+					}
+					qVar := q.Var
+					if qVar == "" && len(q.Children) == 1 {
+						qVar = q.Children[0].Var
+					}
+					exVar := existing.Var
+					if exVar == "" && len(existing.Children) == 1 {
+						exVar = existing.Children[0].Var
+					}
+					if qVar != "" && qVar == exVar {
+						exists = true
+						break
+					}
+				}
+				if !exists {
+					varQry = append(varQry, q)
+				}
+			}
+			if parentFilter != nil {
+				addToFilterTree(aggregateChild, parentFilter)
+			}
 
 			// Add type filter in case the Dgraph predicate for which the aggregate
 			// field belongs to is a reverse edge
@@ -3497,9 +3598,64 @@ func addFilter(q *dql.GraphQuery,
 //
 // TODO: There's cases that don't make much sense like
 // filter: { or: { title: { anyofterms: "GraphQL" } } }
-// ATM those will probably generate junk that might cause a Dgraph error.  And
 // bubble back to the user as a GraphQL error when the query fails. Really,
 // they should fail query validation and never get here.
+
+func isBroadFilter(v interface{}, typ schema.Type) bool {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		if len(val) == 0 {
+			return true
+		}
+		for k, subVal := range val {
+			if k == "_metadata" || k == "not" {
+				continue
+			}
+			if typ != nil {
+				if k == "and" || k == "or" {
+					if !isBroadFilter(subVal, typ) {
+						return false
+					}
+					continue
+				}
+				fd := typ.Field(k)
+				if fd != nil {
+					// Clean Engine Heuristic: Skip any Boolean fields entirely because they
+					// are fundamentally low-selectivity (e.g. soft-delete deleted: false flags).
+					if fd.Type().IsInbuiltOrEnumType() && fd.Type().Name() == "Boolean" {
+						continue
+					}
+					if !fd.Type().IsInbuiltOrEnumType() {
+						if !isBroadFilter(subVal, fd.Type()) {
+							return false
+						}
+						continue
+					}
+				}
+			}
+			// Fallback/Leaf/Operator evaluations (e.g. eq, in, range operations)
+			if k == "eq" || k == "in" || k == "le" || k == "ge" || k == "gt" || k == "lt" {
+				return false
+			}
+			if !isBroadFilter(subVal, nil) {
+				return false
+			}
+		}
+		return true
+	case []interface{}:
+		for _, item := range val {
+			if !isBroadFilter(item, typ) {
+				return false
+			}
+		}
+		return true
+	default:
+		// Primitive types (string, bool, int, float, etc.) signify a direct equality filter,
+		// which is a selective/narrow check.
+		return false
+	}
+}
+
 func buildFilter(typ schema.Type,
 	filter map[string]interface{},
 	auth *authRewriter,
@@ -3613,10 +3769,9 @@ func buildFilter(typ schema.Type,
 			varQry = append(varQry, qs...)
 		default:
 			fd := typ.Field(field)
-			// memberTypes is consumed at the top-level addFilter for interface types.
-			// If it somehow reaches buildFilter (e.g. nested inside and/or/not which is
-			// not supported), skip it to avoid a nil-pointer panic on fd.IsExternal().
-			if field == "memberTypes" {
+			// memberTypes and _metadata are consumed at top-levels.
+			// Skip them to avoid nil-pointer panics or unrecognized field errors.
+			if field == "memberTypes" || field == "_metadata" {
 				continue
 			}
 			if fd != nil && fd.HasEmbeddingDirective() {
@@ -3679,61 +3834,93 @@ func buildFilter(typ schema.Type,
 			// 		nested_field_name as <inverse field>
 			// }
 			// root() @filter(var(nested_field_name))
-			if fd != nil && fd.HasSearchDirective() {
+			if fd != nil && fd.HasSearchDirective() && !fd.Type().IsInbuiltOrEnumType() {
+				nestedFilter := filter[field].(map[string]interface{})
 
-				if inv := fd.Inverse(); inv != nil {
+				// 1. Extract _metadata if present
+				var queryStrategy string
+				if meta, ok := nestedFilter["_metadata"]; ok {
+					delete(nestedFilter, "_metadata")
+					if metaMap, ok := meta.(map[string]interface{}); ok {
+						if l, ok := metaMap["lookup"].(string); ok {
+							queryStrategy = l
+						}
+					}
+				}
 
-					nestedFilter := filter[field].(map[string]interface{})
+				// 2. Resolve final strategy (Dynamic Resolution Heuristics)
+				resolvedStrategy := queryStrategy
+				if resolvedStrategy == "" {
+					resolvedStrategy = fd.LookupStrategy()
+				}
+				if resolvedStrategy == "" || resolvedStrategy == "DYNAMIC" {
+					if fd.Inverse() != nil || (!fd.Type().IsInbuiltOrEnumType() && fd.HasSearchDirective()) {
+						// Smarter Dynamic Heuristic:
+						// If the nested filter is broad/low-selectivity (e.g., just checking 'deleted: false'),
+						// we dynamically select the FORWARD strategy to bypass traversing massive index lists.
+						if isBroadFilter(nestedFilter, fd.Type()) {
+							resolvedStrategy = "FORWARD"
+						} else {
+							resolvedStrategy = "REVERSE"
+						}
+					} else {
+						resolvedStrategy = "FORWARD"
+					}
+				}
 
-					// For interface-typed nested fields: extract memberTypes before calling
-					// buildFilter so it scopes the nested var query's func: type(...) rather
-					// than being silently dropped.  Mirrors the same logic in addFilter for
-					// the root query case.
-					nestedFuncArgs := []dql.Arg{{Value: fd.Type().DgraphName()}} // default: full interface
-					nestedDenyAll := false
-					if fd.Type().IsInterface() {
-						if mt, ok := nestedFilter["memberTypes"]; ok {
-							delete(nestedFilter, "memberTypes")
-							if names, ok := mt.([]interface{}); ok {
-								var allowed []string
+				// For interface-typed nested fields: extract memberTypes before calling
+				// buildFilter so it scopes the nested var query's func: type(...) rather
+				// than being silently dropped.
+				nestedFuncArgs := []dql.Arg{{Value: fd.Type().DgraphName()}} // default: full interface
+				nestedDenyAll := false
+				if fd.Type().IsInterface() {
+					if mt, ok := nestedFilter["memberTypes"]; ok {
+						delete(nestedFilter, "memberTypes")
+						if names, ok := mt.([]interface{}); ok {
+							var allowed []string
+							for _, n := range names {
+								if s, ok := n.(string); ok && s != "" {
+									allowed = append(allowed, s)
+								}
+							}
+							if len(allowed) > 0 {
+								if auth.allowedTypesForEdge == nil {
+									auth.allowedTypesForEdge = make(map[string][]string)
+								}
+								auth.allowedTypesForEdge[fd.DgraphPredicate()] = allowed
+								auth.allowedTypesForEdge[fd.Type().Name()] = allowed
+							}
+
+							if len(names) == 0 {
+								nestedDenyAll = true
+							} else {
+								args := make([]dql.Arg, 0, len(names))
 								for _, n := range names {
 									if s, ok := n.(string); ok && s != "" {
-										allowed = append(allowed, s)
+										args = append(args, dql.Arg{Value: s})
 									}
 								}
-								if len(allowed) > 0 {
-									if auth.allowedTypesForEdge == nil {
-										auth.allowedTypesForEdge = make(map[string][]string)
-									}
-									// Interface Member Types Optimization:
-									// Populate both keys:
-									// 1. fd.DgraphPredicate() (e.g. "Note.forResource") — used by CascadeWrap and CascadeEdge checks inside the rules.
-									// 2. fd.Type().Name() (e.g. "NoteOwner") — used by the sub-rewriter when calling addAuthQueries on the interface itself.
-									auth.allowedTypesForEdge[fd.DgraphPredicate()] = allowed
-									auth.allowedTypesForEdge[fd.Type().Name()] = allowed
-								}
-
-								if len(names) == 0 {
-									nestedDenyAll = true
-								} else {
-									args := make([]dql.Arg, 0, len(names))
-									for _, n := range names {
-										if s, ok := n.(string); ok && s != "" {
-											args = append(args, dql.Arg{Value: s})
-										}
-									}
-									if len(args) > 0 {
-										nestedFuncArgs = args
-									}
+								if len(args) > 0 {
+									nestedFuncArgs = args
 								}
 							}
 						}
 					}
+				}
 
+				var nestedFunc *dql.Function
+				if nestedDenyAll {
+					nestedFunc = &dql.Function{Name: "uid", UID: []uint64{0}}
+				} else {
+					nestedFunc = &dql.Function{Name: "type", Args: nestedFuncArgs}
+				}
+
+				if resolvedStrategy == "REVERSE" {
+					// --- REVERSE LOOKUP ---
 					fil, qs := buildFilter(fd.Type(), nestedFilter, auth, qn)
 					varQry = append(varQry, qs...)
 
-					// add the uids of the nested object
+					// Parent matches if uid(qn) is non-empty (walked reverse from matching children)
 					ands = append(ands, &dql.FilterTree{
 						Op: "and",
 						Child: []*dql.FilterTree{{
@@ -3744,32 +3931,32 @@ func buildFilter(typ schema.Type,
 						}},
 					})
 
-					// generate filter var query for nested object
-					var nestedFunc *dql.Function
-					if nestedDenyAll {
-						nestedFunc = &dql.Function{Name: "uid", UID: []uint64{0}}
+					var invPred string
+					if inv := fd.Inverse(); inv != nil {
+						invPred = inv.DgraphPredicate()
 					} else {
-						nestedFunc = &dql.Function{Name: "type", Args: nestedFuncArgs}
+						invPred = "~" + fd.DgraphPredicate()
 					}
+
 					nestedQry := &dql.GraphQuery{
 						Attr:   "var",
 						Func:   nestedFunc,
 						Filter: fil,
 						Children: []*dql.GraphQuery{{
-							Attr: inv.DgraphPredicate(),
+							Attr: invPred,
 							Var:  qn,
 						}},
 					}
 
-					// add auth queries to nested field
 					nestedQrys := []*dql.GraphQuery{nestedQry}
-
 					if !auth.isWritingAuth {
 						wr := &authRewriter{
 							authVariables:       auth.authVariables,
 							varGen:              auth.varGen,
 							selector:            auth.selector,
 							parentVarName:       qn + "Root",
+							parentRelationVar:   auth.parentVarName,
+							parentRelationPred:  fd.DgraphPredicate(),
 							isWritingAuth:       auth.isWritingAuth,
 							cascadeVarCache:     auth.cascadeVarCache,
 							forceForward:        auth.forceForward,
@@ -3777,28 +3964,85 @@ func buildFilter(typ schema.Type,
 						}
 
 						rbac := wr.evaluateStaticRules(fd.Type())
+						if fd.BypassAuth() {
+							rbac = schema.Positive
+						}
 						if rbac == schema.Uncertain {
-							// addAuthQueries returns:
-							//   [0] nestedQry  – consumer: var(func:uid(qnRoot)){qn as inv}
-							//   [1] rootQry    – defines qnRoot, USES varName
-							//   [2] varQry     – defines varName (e.g. Group_N, Workspace_N)
-							//   [3+] authVars  – auth var blocks (use varName / qnRoot)
-							//
-							// DQL var blocks must be emitted in definition-before-use order.
-							// The required sequence is:
-							//   varQry → rootQry → authVars → nestedQry (consumer last)
 							authQrys, nestedAuthVarSubst := wr.addAuthQueries(fd.Type(), nestedQrys, rbac)
-							// The deduplication that happens inside addAuthQueries may remove
-							// auth var blocks and produce a substitution map.  Apply it to the
-							// filter trees that already reference those var names so we don't
-							// leave dangling uid(Workspace_AuthN) references after the
-							// definition block has been dropped.
 							if len(nestedAuthVarSubst) > 0 {
 								applyAuthVarSubst(fil, nestedAuthVarSubst)
 							}
 							if len(authQrys) >= 3 {
-								// Full auth scaffolding present: reorder so definitions
-								// always precede uses and the consumer block comes last.
+								nestedQrys = make([]*dql.GraphQuery, 0, len(authQrys))
+								nestedQrys = append(nestedQrys, authQrys[2])     // varQry first
+								nestedQrys = append(nestedQrys, authQrys[1])     // rootQry second
+								nestedQrys = append(nestedQrys, authQrys[3:]...) // authVars
+								nestedQrys = append(nestedQrys, authQrys[0])     // consumer last
+							} else {
+								nestedQrys = authQrys
+							}
+						} else if rbac == schema.Negative {
+							nestedQry.Attr = "var()"
+							nestedQry.Var = qn
+							nestedQry.Func = nil
+							nestedQry.Filter = nil
+							nestedQry.Children = nil
+						}
+					}
+
+					varQry = append(varQry, nestedQrys...)
+					continue
+				} else {
+					// --- FORWARD LOOKUP (uid_in) ---
+					fil, qs := buildFilter(fd.Type(), nestedFilter, auth, qn)
+					varQry = append(varQry, qs...)
+
+					// Filter parent: uid_in(fd.DgraphPredicate(), uid(qn))
+					ands = append(ands, &dql.FilterTree{
+						Op: "and",
+						Child: []*dql.FilterTree{{
+							Func: &dql.Function{
+								Name: "uid_in",
+								Args: []dql.Arg{
+									{Value: fd.DgraphPredicate()},
+									{Value: "uid(" + qn + ")"},
+								},
+							},
+						}},
+					})
+
+					nestedQry := &dql.GraphQuery{
+						Attr:   "var",
+						Var:    qn,
+						Func:   nestedFunc,
+						Filter: fil,
+					}
+
+					nestedQrys := []*dql.GraphQuery{nestedQry}
+					if !auth.isWritingAuth {
+						wr := &authRewriter{
+							authVariables:       auth.authVariables,
+							varGen:              auth.varGen,
+							selector:            auth.selector,
+							parentVarName:       qn + "Root",
+							parentRelationVar:   auth.parentVarName,
+							parentRelationPred:  fd.DgraphPredicate(),
+							isWritingAuth:       auth.isWritingAuth,
+							cascadeVarCache:     auth.cascadeVarCache,
+							forceForward:        auth.forceForward,
+							allowedTypesForEdge: auth.allowedTypesForEdge,
+						}
+
+						rbac := wr.evaluateStaticRules(fd.Type())
+						if fd.BypassAuth() {
+							rbac = schema.Positive
+						}
+						if rbac == schema.Uncertain {
+							authQrys, nestedAuthVarSubst := wr.addAuthQueries(fd.Type(), nestedQrys, rbac)
+							if len(nestedAuthVarSubst) > 0 {
+								applyAuthVarSubst(fil, nestedAuthVarSubst)
+							}
+							if len(authQrys) >= 3 {
 								nestedQrys = make([]*dql.GraphQuery, 0, len(authQrys))
 								nestedQrys = append(nestedQrys, authQrys[2])     // varQry first
 								nestedQrys = append(nestedQrys, authQrys[1])     // rootQry second
@@ -4304,4 +4548,154 @@ func buildSimilarToIdFilter(
 	}
 
 	return similarToFunc, []*dql.GraphQuery{varQry}
+}
+
+// applyQueryPlanInversion traverses and optimizes a list of GraphQuery blocks.
+// It executes a depth-first traversal of the DQL GraphQuery tree to find and
+// rewrite inefficient root-level scans into highly selective UID lookups.
+func applyQueryPlanInversion(queries []*dql.GraphQuery) {
+	for _, q := range queries {
+		if q == nil {
+			continue
+		}
+		optimizeBlock(q)
+		if len(q.Children) > 0 {
+			applyQueryPlanInversion(q.Children)
+		}
+	}
+}
+
+// optimizeBlock inspects an individual GraphQuery block. If it is a broad type scan
+// (e.g., func: type(T)) and contains a high-selectivity UID filter (either a DQL
+// variable reference like uid(Var) or a literal hex UID list like uid(0x1, 0x2)),
+// it inverts the block:
+//
+//	Before: func: type(T) @filter(uid(V))
+//	After:  func: uid(V)  @filter(type(T))
+//
+// This replaces a slow table scan with an O(1) index lookup.
+func optimizeBlock(q *dql.GraphQuery) {
+	// We only optimize blocks that start with a root 'type(T)' function having exactly 1 argument (the type name).
+	if q.Func != nil && q.Func.Name == "type" && len(q.Func.Args) == 1 {
+		typeName := q.Func.Args[0].Value
+		if typeName == "" {
+			return
+		}
+
+		// Try to extract a UID function from the block's filter tree.
+		extractedArg, extractedUID, updatedFilter := extractUidArg(q.Filter)
+		if extractedArg != nil || len(extractedUID) > 0 {
+			// Invert the root function to use the extracted UID source.
+			if extractedArg != nil {
+				// Case A: The filter was a DQL variable reference, e.g., uid(Group_Auth12).
+				q.Func = &dql.Function{
+					Name: "uid",
+					Args: []dql.Arg{*extractedArg},
+				}
+			} else {
+				// Case B: The filter was a hardcoded list of hex UIDs, e.g., uid(0x26e943).
+				q.Func = &dql.Function{
+					Name: "uid",
+					UID:  extractedUID,
+				}
+			}
+
+			// Move the type constraint to the filter tree.
+			typeFilter := &dql.FilterTree{
+				Func: &dql.Function{
+					Name: "type",
+					Args: []dql.Arg{{Value: typeName}},
+				},
+			}
+
+			// Merge the updated filter (with the UID constraint removed) with our new type filter.
+			if updatedFilter == nil {
+				q.Filter = typeFilter
+			} else {
+				q.Filter = &dql.FilterTree{
+					Op:    "and",
+					Child: []*dql.FilterTree{updatedFilter, typeFilter},
+				}
+			}
+		}
+	}
+}
+
+// extractUidArg traverses a filter tree to find and extract a 'uid' constraint.
+// It supports finding:
+//  1. Variable-based UID constraints (len(Args) == 1), e.g. uid(Group_Auth1)
+//  2. Literal-based UID constraints (len(UID) > 0), e.g. uid(0x26e943)
+//
+// If found, it returns the extracted constraint (arg or uint64 slice) and an
+// updated filter tree with the extracted constraint removed.
+func extractUidArg(filter *dql.FilterTree) (*dql.Arg, []uint64, *dql.FilterTree) {
+	if filter == nil {
+		return nil, nil, nil
+	}
+
+	// Base case: We encountered a leaf function block.
+	if filter.Func != nil {
+		if filter.Func.Name == "uid" {
+			// Extract DQL variable references
+			if len(filter.Func.Args) == 1 {
+				arg := filter.Func.Args[0]
+				return &arg, nil, nil
+			}
+			// Extract literal hex UID lists
+			if len(filter.Func.UID) > 0 {
+				return nil, filter.Func.UID, nil
+			}
+		}
+		return nil, nil, filter
+	}
+
+	// We only recurse into 'and' operators (conjunctions).
+	// We cannot pull a UID filter out of an 'or' operator, as doing so would
+	// semantically restrict the other branches of the disjunction.
+	if filter.Op != "" && filter.Op != "and" {
+		return nil, nil, filter
+	}
+
+	var newChildren []*dql.FilterTree
+	var extractedArg *dql.Arg
+	var extractedUID []uint64
+
+	for _, child := range filter.Child {
+		if child == nil {
+			continue
+		}
+		// Try to extract from the child if we haven't found a UID constraint yet.
+		if extractedArg == nil && len(extractedUID) == 0 {
+			arg, uid, updatedChild := extractUidArg(child)
+			if arg != nil {
+				extractedArg = arg
+				if updatedChild != nil {
+					newChildren = append(newChildren, updatedChild)
+				}
+				continue
+			}
+			if len(uid) > 0 {
+				extractedUID = uid
+				if updatedChild != nil {
+					newChildren = append(newChildren, updatedChild)
+				}
+				continue
+			}
+		}
+		newChildren = append(newChildren, child)
+	}
+
+	// Rebuild and return the updated filter tree.
+	if extractedArg != nil || len(extractedUID) > 0 {
+		if len(newChildren) == 0 {
+			return extractedArg, extractedUID, nil
+		}
+		if len(newChildren) == 1 {
+			return extractedArg, extractedUID, newChildren[0]
+		}
+		filter.Child = newChildren
+		return extractedArg, extractedUID, filter
+	}
+
+	return nil, nil, filter
 }

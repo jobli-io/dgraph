@@ -224,6 +224,7 @@ type Field interface {
 	// GetAuthMeta returns the Dgraph.Authorization meta information stored in schema
 	GetAuthMeta() *authorization.AuthMeta
 	BypassAuth() bool
+	LookupStrategy() string
 }
 
 // A Mutation is a field (from the schema's Mutation type) from an Operation
@@ -337,6 +338,8 @@ type FieldDefinition interface {
 	ForwardEdge() FieldDefinition
 	// GetAuthMeta returns the Dgraph.Authorization meta information stored in schema
 	GetAuthMeta() *authorization.AuthMeta
+	LookupStrategy() string
+	BypassAuth() bool
 }
 
 type astType struct {
@@ -1201,6 +1204,21 @@ func (f *field) BypassAuth() bool {
 	return f.field.Definition.Directives.ForName(bypassAuthDirective) != nil
 }
 
+func (f *field) LookupStrategy() string {
+	if f.field == nil || f.field.Definition == nil {
+		return ""
+	}
+	dir := f.field.Definition.Directives.ForName("search")
+	if dir == nil {
+		return ""
+	}
+	arg := dir.Arguments.ForName("strategy")
+	if arg == nil || arg.Value == nil {
+		return ""
+	}
+	return arg.Value.Raw
+}
+
 func (f *field) Arguments() map[string]interface{} {
 	if f.arguments == nil {
 		// Compute and cache the map first time this function is called for a field.
@@ -1764,6 +1782,10 @@ func (q *query) GetAuthMeta() *authorization.AuthMeta {
 
 func (q *query) BypassAuth() bool {
 	return (*field)(q).BypassAuth()
+}
+
+func (q *query) LookupStrategy() string {
+	return (*field)(q).LookupStrategy()
 }
 
 func (q *query) RepresentationsArg() (*EntityRepresentations, error) {
@@ -2355,6 +2377,10 @@ func (m *mutation) GetAuthMeta() *authorization.AuthMeta {
 
 func (m *mutation) BypassAuth() bool {
 	return (*field)(m).BypassAuth()
+}
+
+func (m *mutation) LookupStrategy() string {
+	return (*field)(m).LookupStrategy()
 }
 
 func (t *astType) AuthRules() *TypeAuth {
@@ -4209,6 +4235,28 @@ func (fd *fieldDefinition) ForwardEdge() FieldDefinition {
 
 func (fd *fieldDefinition) GetAuthMeta() *authorization.AuthMeta {
 	return fd.inSchema.meta.authMeta
+}
+
+func (fd *fieldDefinition) LookupStrategy() string {
+	if fd.fieldDef == nil {
+		return ""
+	}
+	dir := fd.fieldDef.Directives.ForName("search")
+	if dir == nil {
+		return ""
+	}
+	arg := dir.Arguments.ForName("strategy")
+	if arg == nil || arg.Value == nil {
+		return ""
+	}
+	return arg.Value.Raw
+}
+
+func (fd *fieldDefinition) BypassAuth() bool {
+	if fd == nil || fd.fieldDef == nil {
+		return false
+	}
+	return fd.fieldDef.Directives.ForName(bypassAuthDirective) != nil
 }
 
 func (t *astType) Name() string {

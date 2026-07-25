@@ -142,7 +142,7 @@
     }
   dgquery: |-
     query {
-      queryState(func: type(State)) @filter(uid(0x0)) {
+      queryState(func: uid(0x0)) @filter(type(State)) {
         State.code : State.code
         State.name : State.name
         dgraph.uid : uid
@@ -159,7 +159,7 @@
     }
   dgquery: |-
     query {
-      queryVerification(func: type(Verification)) @filter(uid(0x0)) {
+      queryVerification(func: uid(0x0)) @filter(type(Verification)) {
         Verification.name : Verification.name
         Verification.status : Verification.status
         dgraph.uid : uid
@@ -2191,7 +2191,7 @@
     }
   dgquery: |-
     query {
-      queryAuthor(func: type(Author)) @filter((uid(0x1, 0x2) AND eq(Author.name, "A. N. Author"))) {
+      queryAuthor(func: uid(0x1, 0x2)) @filter((eq(Author.name, "A. N. Author") AND type(Author))) {
         Author.name : Author.name
         dgraph.uid : uid
       }
@@ -3568,7 +3568,7 @@
     }
   dgquery: |-
     query {
-      queryNested_X(func: type(Nested_X)) @filter((eq(Nested_X.s, "") AND (uid(queryNested_X_y)))) {
+      queryNested_X(func: uid(queryNested_X_y)) @filter((eq(Nested_X.s, "") AND type(Nested_X))) {
         Nested_X.s : Nested_X.s
         dgraph.uid : uid
       }
@@ -3586,7 +3586,7 @@
     }
   dgquery: |-
     query {
-      queryNested_Y(func: type(Nested_Y)) @filter((eq(Nested_Y.s, "") AND (uid(queryNested_Y_x)))) {
+      queryNested_Y(func: uid(queryNested_Y_x)) @filter((eq(Nested_Y.s, "") AND type(Nested_Y))) {
         Nested_Y.s : Nested_Y.s
         dgraph.uid : uid
       }
@@ -3604,7 +3604,7 @@
     }
   dgquery: |-
     query {
-      queryNested_Z(func: type(Nested_Z)) @filter((uid(queryNested_Z_x))) {
+      queryNested_Z(func: uid(queryNested_Z_x)) @filter(type(Nested_Z)) {
         dgraph.type
         Nested_Z.x : Nested_Z.x {
           Nested_X.s : Nested_X.s
@@ -3625,7 +3625,7 @@
     }
   dgquery: |-
     query {
-      queryNested_Z(func: type(Nested_Z)) @filter((uid(queryNested_Z_x))) {
+      queryNested_Z(func: uid(queryNested_Z_x)) @filter(type(Nested_Z)) {
         dgraph.type
         Nested_Z.x : Nested_Z.x {
           Nested_X.s : Nested_X.s
@@ -3636,7 +3636,7 @@
       var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "")) {
         queryNested_Z_x_y as Nested_Z.x
       }
-      var(func: type(Nested_X)) @filter((uid(queryNested_Z_x_y))) {
+      var(func: uid(queryNested_Z_x_y)) @filter(type(Nested_X)) {
         queryNested_Z_x as Nested_X.y
       }
     }
@@ -3650,7 +3650,7 @@
     }
   dgquery: |-
     query {
-      queryNested_X(func: type(Nested_X)) @filter(((uid(queryNested_X_and_y)) AND eq(Nested_X.s, ""))) {
+      queryNested_X(func: uid(queryNested_X_and_y)) @filter((eq(Nested_X.s, "") AND type(Nested_X))) {
         Nested_X.s : Nested_X.s
         dgraph.uid : uid
       }

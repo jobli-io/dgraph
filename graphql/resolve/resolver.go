@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -598,6 +599,9 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 			var res *Resolved
 			res, allSuccessful = r.resolvers.mutationResolverFor(m).Resolve(ctx, m)
 			addResult(resp, res)
+			if allSuccessful && res != nil && len(res.Data) > 0 {
+				triggerMutationInvalidation(m, res.Data)
+			}
 		}
 	case op.IsSubscription():
 		resolveQueries()
@@ -754,4 +758,78 @@ func newtimer(ctx context.Context, Duration *schema.OffsetDuration) schema.Offse
 	resolveStartTime, _ := ctx.Value(resolveStartTime).(time.Time)
 	tf := schema.NewOffsetTimerFactory(resolveStartTime)
 	return tf.NewOffsetTimer(Duration)
+}
+
+// InvalidationFunc is registered by the subscription package to avoid circular package imports.
+var InvalidationFunc func(uids, types, predicates []string, commitTs uint64)
+
+var hexRegex = regexp.MustCompile(`^0x[0-9a-fA-F]+$`)
+
+func extractUIDs(data []byte) []string {
+	var payload interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil
+	}
+	uids := make(map[string]struct{})
+	var traverse func(val interface{})
+	traverse = func(val interface{}) {
+		switch v := val.(type) {
+		case string:
+			if hexRegex.MatchString(v) {
+				uids[v] = struct{}{}
+			}
+		case []interface{}:
+			for _, item := range v {
+				traverse(item)
+			}
+		case map[string]interface{}:
+			for k, item := range v {
+				if k == "id" || k == "uid" {
+					if str, ok := item.(string); ok && hexRegex.MatchString(str) {
+						uids[str] = struct{}{}
+					}
+				}
+				traverse(item)
+			}
+		}
+	}
+	traverse(payload)
+	res := make([]string, 0, len(uids))
+	for u := range uids {
+		res = append(res, u)
+	}
+	return res
+}
+
+func triggerMutationInvalidation(m schema.Mutation, data []byte) {
+	if InvalidationFunc == nil {
+		return
+	}
+
+	uids := extractUIDs(data)
+	types := []string{}
+	if m.MutatedType() != nil {
+		if name := m.MutatedType().Name(); name != "" {
+			types = append(types, name)
+		}
+		if dgraphName := m.MutatedType().DgraphName(); dgraphName != "" {
+			types = append(types, dgraphName)
+		}
+	}
+
+	predicates := []string{}
+	var extractPredicates func(fields []schema.Field)
+	extractPredicates = func(fields []schema.Field) {
+		for _, f := range fields {
+			if pred := f.DgraphPredicate(); pred != "" {
+				predicates = append(predicates, pred)
+			}
+			extractPredicates(f.SelectionSet())
+		}
+	}
+	extractPredicates(m.SelectionSet())
+
+	commitTs := uint64(time.Now().UnixNano())
+
+	InvalidationFunc(uids, types, predicates, commitTs)
 }
