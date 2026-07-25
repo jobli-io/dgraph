@@ -1842,7 +1842,7 @@ func (authRw *authRewriter) addVariableUIDFunc(q *dql.GraphQuery) {
 }
 
 func (authRw *authRewriter) getRootFunc(cascadeWrapType string) *dql.Function {
-	if authRw != nil && authRw.forceForward && authRw.varName != "" {
+	if authRw != nil && authRw.forceForward && authRw.varName != "" && authRw.cascadeAuthorityType == cascadeWrapType {
 		return &dql.Function{
 			Name: "uid",
 			Args: []dql.Arg{{Value: authRw.varName}},
@@ -2814,10 +2814,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 
 		if authRw.cascadeAuthorityType != "" {
 			// REVERTED: always use cascadeAuthorityType as the var root.
-			r1[0].Func = &dql.Function{
-				Name: "type",
-				Args: []dql.Arg{{Value: authRw.cascadeAuthorityType}},
-			}
+			r1[0].Func = authRw.getRootFunc(authRw.cascadeAuthorityType)
 			if len(r1[0].Cascade) == 0 {
 				r1[0].Cascade = append(r1[0].Cascade, "__all__")
 			}
@@ -3961,8 +3958,8 @@ func buildFilter(typ schema.Type,
 							varGen:              auth.varGen,
 							selector:            auth.selector,
 							parentVarName:       qn + "Root",
-							parentRelationVar:   auth.parentVarName,
-							parentRelationPred:  fd.DgraphPredicate(),
+							parentRelationVar:   "",
+							parentRelationPred:  "",
 							isWritingAuth:       auth.isWritingAuth,
 							cascadeVarCache:     auth.cascadeVarCache,
 							forceForward:        auth.forceForward,
@@ -4031,8 +4028,8 @@ func buildFilter(typ schema.Type,
 							varGen:              auth.varGen,
 							selector:            auth.selector,
 							parentVarName:       qn + "Root",
-							parentRelationVar:   auth.parentVarName,
-							parentRelationPred:  fd.DgraphPredicate(),
+							parentRelationVar:   "",
+							parentRelationPred:  "",
 							isWritingAuth:       auth.isWritingAuth,
 							cascadeVarCache:     auth.cascadeVarCache,
 							forceForward:        auth.forceForward,
