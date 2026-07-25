@@ -674,13 +674,14 @@ func TestInterfaceMemberTypesFilterAuthOptimization(t *testing.T) {
 	actual := dgraph.AsString(dgQuery)
 	t.Logf("Generated DQL:\n%s", actual)
 
-	// Since we filtered forResource to only Company:
-	// We should see Company auth blocks
-	require.Contains(t, actual, "Company_Auth")
+	// Since we filtered forResource to only Company, and have forceForward: true:
+	// 1. The compiler optimizes compilation by nested/forward-linking checks.
+	// 2. We should see the Groupable.inGroup relation predicate, but NOT Contact.forCompany.
+	require.Contains(t, actual, "Groupable.inGroup")
+	require.NotContains(t, actual, "Contact.forCompany")
 
-	// We should NOT see Candidate or Job auth blocks in the generated DQL!
-	require.NotContains(t, actual, "Candidate_Auth")
-	require.NotContains(t, actual, "Job_Auth")
+	// We should NOT see Candidate or Job predicates (e.g., Job.inGroup) because they are filtered out.
+	require.NotContains(t, actual, "Job.inGroup")
 
 	_, parseErr := dql.Parse(dql.Request{Str: actual})
 	require.NoError(t, parseErr, "DQL should parse perfectly")
@@ -989,17 +990,89 @@ func TestInterfaceMemberTypesMultiple(t *testing.T) {
 	actual := dgraph.AsString(dgQuery)
 	t.Logf("Generated DQL:\n%s", actual)
 
-	// Since we filter forResource to Company and Contact:
-	// We should see Company and Contact auth blocks
-	require.Contains(t, actual, "Company_Auth")
-	require.Contains(t, actual, "Contact_Auth")
+	// Since we filter forResource to Company and Contact, and have forceForward: true:
+	// 1. The compiler optimizes compilation by nested/forward-linking checks.
+	// 2. We should see the specific relation predicates Contact.forCompany and Groupable.inGroup.
+	require.Contains(t, actual, "Contact.forCompany")
+	require.Contains(t, actual, "Groupable.inGroup")
 
-	// We should NOT see Candidate or Job auth blocks in the generated DQL!
-	require.NotContains(t, actual, "Candidate_Auth")
-	require.NotContains(t, actual, "Job_Auth")
+	// We should NOT see any Candidate or Job predicates (e.g., Job.inGroup) because they are filtered out.
+	require.NotContains(t, actual, "Job.inGroup")
 
 	// Verify the root function of the variable query NoteOwner_1 has been inverted to a valid uid(...) function
 	// and the multiple types have been moved to the @filter tree as an OR.
+	_, parseErr := dql.Parse(dql.Request{Str: actual})
+	require.NoError(t, parseErr, "Generated DQL should parse perfectly")
+}
+
+func TestHighSelectivityCascadeAuthForward(t *testing.T) {
+	// Mock lambda URL so the parser accepts @lambda directives
+	x.Config.GraphQL = z.NewSuperFlag("lambda-url=http://localhost:8086/graphql-worker;").
+		MergeAndCheckDefault("lambda-url=;")
+
+	schemaBytes, err := os.ReadFile("/Users/idowuayoola/Documents/jobli/graph/.graphql")
+	require.NoError(t, err)
+
+	strSchema := string(schemaBytes)
+	authIdx := strings.LastIndex(strSchema, "Dgraph.Authorization")
+	require.NotEqual(t, -1, authIdx)
+	endOfLine := strings.Index(strSchema[authIdx:], "\n")
+	if endOfLine != -1 {
+		strSchema = strSchema[:authIdx+endOfLine]
+	}
+
+	gqlSchema := test.LoadSchemaFromString(t, string(schemaBytes))
+
+	authParsed, err := authorization.Parse(strSchema)
+	require.NoError(t, err)
+
+	metaInfo := &testutil.AuthMeta{
+		PublicKey:       authParsed.VerificationKey,
+		Namespace:       authParsed.Namespace,
+		Algo:            authParsed.Algo,
+		ClosedByDefault: authParsed.ClosedByDefault,
+	}
+
+	gqlQuery := `
+		query {
+			queryNote(filter: { forResource: { id: ["0x4df8fe", "0x4df907"], memberTypes: [Company, Contact] } }) {
+				id
+				text
+			}
+		}
+	`
+
+	op, err := gqlSchema.Operation(&schema.Request{
+		Query: gqlQuery,
+	})
+	require.NoError(t, err)
+	gqlQry := test.GetQuery(t, op)
+
+	metaInfo.AuthVars = map[string]interface{}{
+		"sub":   "ZGifl7RD37Pa0fHOdTZwjsxjKHO2",
+		"SUB":   "ZGifl7RD37Pa0fHOdTZwjsxjKHO2",
+		"ws":    "test",
+		"WS":    "test",
+		"email": "test@gorillajobs.app",
+		"EMAIL": "test@gorillajobs.app",
+	}
+	ctx, err := metaInfo.AddClaimsToContext(context.Background())
+	require.NoError(t, err)
+
+	rewriter := NewQueryRewriter()
+	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	require.NoError(t, err)
+
+	actual := dgraph.AsString(dgQuery)
+	t.Logf("Generated DQL:\n%s", actual)
+
+	// Since we filter forResource with selective IDs, the root authRewriter should have
+	// forceForward = true. This means we should see parent-linked forward variables
+	// and NO global scans for Group/Workspace!
+	require.Contains(t, actual, "uid_in(Note.forResource")
+	require.NotContains(t, actual, "var(func: type(Group))")
+	require.NotContains(t, actual, "var(func: type(Workspace))")
+
 	_, parseErr := dql.Parse(dql.Request{Str: actual})
 	require.NoError(t, parseErr, "Generated DQL should parse perfectly")
 }

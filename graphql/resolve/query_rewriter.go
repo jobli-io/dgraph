@@ -154,13 +154,18 @@ func (qr *queryRewriter) Rewrite(
 		return nil, err
 	}
 
+	isSelective := false
+	if qFlt := extractQueryFilter(gqlQuery); qFlt != nil {
+		isSelective = !isBroadFilter(qFlt, gqlQuery.ConstructedFor())
+	}
+
 	authRw := &authRewriter{
 		authVariables:       customClaims.AuthVariables,
 		varGen:              NewVariableGenerator(),
 		selector:            getAuthSelector(gqlQuery.QueryType()),
 		parentVarName:       gqlQuery.ConstructedFor().Name() + "Root",
 		cascadeVarCache:     make(map[cascadeCacheKey]string),
-		forceForward:        gqlQuery.QueryType() == schema.GetQuery || gqlQuery.QueryType() == schema.SimilarByIdQuery,
+		forceForward:        gqlQuery.QueryType() == schema.GetQuery || gqlQuery.QueryType() == schema.SimilarByIdQuery || isSelective,
 		allowedTypesForEdge: make(map[string][]string),
 	}
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
@@ -1679,7 +1684,7 @@ func (authRw *authRewriter) addAuthQueries(
 		fldAuthQueries = append(fldAuthQueries, qrys...)
 		objOrfilter := &dql.FilterTree{
 			Op:    "or",
-			Child: filts,
+			Child: deduplicateFilters(filts),
 		}
 
 		// if filts is non empty, which means it was a query on interface
@@ -1687,7 +1692,7 @@ func (authRw *authRewriter) addAuthQueries(
 		// some type with no Auth rules, In this case, the query will be different
 		// and will look somewhat like this:
 		// PostRoot as var(func: uid(Post1)) @filter((uid(QuestionAuth2) OR uid(AnswerAuth4)))
-		if len(filts) > 0 {
+		if len(objOrfilter.Child) > 0 {
 			filter = objOrfilter
 		}
 
@@ -3883,7 +3888,8 @@ func buildFilter(typ schema.Type,
 									allowed = append(allowed, s)
 								}
 							}
-							if len(allowed) > 0 {
+							implTypes := fd.Type().ImplementingTypes()
+							if len(allowed) > 0 && len(allowed) < len(implTypes) {
 								if auth.allowedTypesForEdge == nil {
 									auth.allowedTypesForEdge = make(map[string][]string)
 								}
@@ -3900,7 +3906,7 @@ func buildFilter(typ schema.Type,
 										args = append(args, dql.Arg{Value: s})
 									}
 								}
-								if len(args) > 0 {
+								if len(args) > 0 && len(args) < len(implTypes) {
 									nestedFuncArgs = args
 								}
 							}
@@ -4721,4 +4727,71 @@ func extractUidArg(filter *dql.FilterTree) (*dql.Arg, []uint64, *dql.FilterTree)
 	}
 
 	return nil, nil, filter
+}
+
+func isEqualFilterTree(a, b *dql.FilterTree) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if a.Op != b.Op {
+		return false
+	}
+	if (a.Func == nil) != (b.Func == nil) {
+		return false
+	}
+	if a.Func != nil {
+		if a.Func.Name != b.Func.Name {
+			return false
+		}
+		if len(a.Func.UID) != len(b.Func.UID) {
+			return false
+		}
+		for i := range a.Func.UID {
+			if a.Func.UID[i] != b.Func.UID[i] {
+				return false
+			}
+		}
+		if len(a.Func.Args) != len(b.Func.Args) {
+			return false
+		}
+		for i := range a.Func.Args {
+			if a.Func.Args[i].Value != b.Func.Args[i].Value ||
+				a.Func.Args[i].IsValueVar != b.Func.Args[i].IsValueVar ||
+				a.Func.Args[i].IsDQLVar != b.Func.Args[i].IsDQLVar {
+				return false
+			}
+		}
+	}
+	if len(a.Child) != len(b.Child) {
+		return false
+	}
+	for i := range a.Child {
+		if !isEqualFilterTree(a.Child[i], b.Child[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func deduplicateFilters(filts []*dql.FilterTree) []*dql.FilterTree {
+	var unique []*dql.FilterTree
+	for _, f := range filts {
+		if f == nil {
+			continue
+		}
+		found := false
+		for _, u := range unique {
+			if isEqualFilterTree(f, u) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			unique = append(unique, f)
+		}
+	}
+	return unique
 }
