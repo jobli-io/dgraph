@@ -84,6 +84,7 @@ type authRewriter struct {
 	allowedTypesForEdge map[string][]string
 	// parentRelationVar and parentRelationPred are used to limit the root type scan
 	// of nested auth queries to only the actual related nodes, eliminating global type scans.
+	isSelective        bool
 	parentRelationVar  string
 	parentRelationPred string
 }
@@ -166,6 +167,7 @@ func (qr *queryRewriter) Rewrite(
 		parentVarName:       gqlQuery.ConstructedFor().Name() + "Root",
 		cascadeVarCache:     make(map[cascadeCacheKey]string),
 		forceForward:        gqlQuery.QueryType() == schema.GetQuery || gqlQuery.QueryType() == schema.SimilarByIdQuery || isSelective,
+		isSelective:         isSelective,
 		allowedTypesForEdge: make(map[string][]string),
 	}
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
@@ -1610,6 +1612,27 @@ func (authRw *authRewriter) addAuthQueries(
 						},
 					},
 				}
+			} else if authRw.forceForward && authRw.isSelective && authRw.varName != "" {
+				// OPTIMIZATION: For selective queries on interfaces (such as single-record or ID-filtered lookups),
+				// compiling a generic type scan like type(ConcreteType) results in extremely slow O(N) database-wide scans.
+				// By detecting that a selective parent variable context (varName) is available and the query is selective,
+				// we root the concrete implementing type's authorization query directly on that selective parent variable
+				// and filter by the concrete type. This transitions evaluation complexity from O(N) global table scans
+				// to O(1) direct parent-rooted lookups.
+				varQry = &dql.GraphQuery{
+					Attr: "var",
+					Var:  queryVar,
+					Func: &dql.Function{
+						Name: "uid",
+						Args: []dql.Arg{{Value: authRw.varName}},
+					},
+					Filter: &dql.FilterTree{
+						Func: &dql.Function{
+							Name: "type",
+							Args: []dql.Arg{{Value: object.Name()}},
+						},
+					},
+				}
 			} else {
 				varQry = &dql.GraphQuery{
 					Attr: "var",
@@ -1633,6 +1656,7 @@ func (authRw *authRewriter) addAuthQueries(
 				hasAuthRules:        authRw.hasAuthRules,
 				cascadeVarCache:     authRw.cascadeVarCache,
 				forceForward:        authRw.forceForward,
+				isSelective:         authRw.isSelective,
 				allowedTypesForEdge: authRw.allowedTypesForEdge,
 			}).rewriteAuthQueries(object)
 
@@ -1973,6 +1997,7 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 		cascadeVarCache:      authRw.cascadeVarCache,
 		cascadeAuthorityType: authRw.cascadeAuthorityType,
 		forceForward:         authRw.forceForward,
+		isSelective:          authRw.isSelective,
 		allowedTypesForEdge:  authRw.allowedTypesForEdge,
 	}).rewriteRuleNode(typ, authRw.selector(typ))
 }
@@ -2760,6 +2785,7 @@ func (authRw *authRewriter) rewriteRuleNode(
 				hasAuthRules:        authRw.hasAuthRules,
 				cascadeVarCache:     authRw.cascadeVarCache, // share the cache
 				forceForward:        authRw.forceForward,
+				isSelective:         authRw.isSelective,
 				allowedTypesForEdge: authRw.allowedTypesForEdge,
 			}
 			authSubVars, authFilter := cascadeAuthRw.rewriteAuthQueries(authorityType)
@@ -3963,6 +3989,7 @@ func buildFilter(typ schema.Type,
 							isWritingAuth:       auth.isWritingAuth,
 							cascadeVarCache:     auth.cascadeVarCache,
 							forceForward:        auth.forceForward,
+							isSelective:         auth.isSelective,
 							allowedTypesForEdge: auth.allowedTypesForEdge,
 						}
 
@@ -4033,6 +4060,7 @@ func buildFilter(typ schema.Type,
 							isWritingAuth:       auth.isWritingAuth,
 							cascadeVarCache:     auth.cascadeVarCache,
 							forceForward:        auth.forceForward,
+							isSelective:         auth.isSelective,
 							allowedTypesForEdge: auth.allowedTypesForEdge,
 						}
 
@@ -4557,27 +4585,176 @@ func buildSimilarToIdFilter(
 // It executes a depth-first traversal of the DQL GraphQuery tree to find and
 // rewrite inefficient root-level scans into highly selective UID lookups.
 func applyQueryPlanInversion(queries []*dql.GraphQuery) {
+	defines := make(map[string]*dql.GraphQuery)
+	parentMap := make(map[*dql.GraphQuery]*dql.GraphQuery)
+	buildDefineMap(queries, defines, parentMap, nil)
+
 	for _, q := range queries {
 		if q == nil {
 			continue
 		}
-		optimizeBlock(q)
+		optimizeBlockWithDefines(q, defines, parentMap)
 		if len(q.Children) > 0 {
-			applyQueryPlanInversion(q.Children)
+			applyQueryPlanInversionWithDefines(q.Children, defines, parentMap)
 		}
 	}
 }
 
-// optimizeBlock inspects an individual GraphQuery block. If it is a broad type scan
-// (e.g., func: type(T)) and contains a high-selectivity UID filter (either a DQL
-// variable reference like uid(Var) or a literal hex UID list like uid(0x1, 0x2)),
-// it inverts the block:
+func applyQueryPlanInversionWithDefines(queries []*dql.GraphQuery, defines map[string]*dql.GraphQuery, parentMap map[*dql.GraphQuery]*dql.GraphQuery) {
+	for _, q := range queries {
+		if q == nil {
+			continue
+		}
+		optimizeBlockWithDefines(q, defines, parentMap)
+		if len(q.Children) > 0 {
+			applyQueryPlanInversionWithDefines(q.Children, defines, parentMap)
+		}
+	}
+}
+
+func buildDefineMap(queries []*dql.GraphQuery, defines map[string]*dql.GraphQuery, parentMap map[*dql.GraphQuery]*dql.GraphQuery, parent *dql.GraphQuery) {
+	for _, q := range queries {
+		if q == nil {
+			continue
+		}
+		if parent != nil {
+			parentMap[q] = parent
+		}
+		if q.Var != "" {
+			defines[q.Var] = q
+		}
+		for _, child := range q.Children {
+			if child.Var != "" {
+				defines[child.Var] = child
+			}
+		}
+		buildDefineMap(q.Children, defines, parentMap, q)
+	}
+}
+
+// getVariableHops recursively traces the dependency lineage of a DQL variable block back to its roots
+// (e.g. literal UIDs, ID filters, or database-wide type scans). It computes a "hop-count" representational
+// metric of the relationship distance, where smaller hop-counts indicate higher selectivity.
 //
-//	Before: func: type(T) @filter(uid(V))
-//	After:  func: uid(V)  @filter(type(T))
-//
-// This replaces a slow table scan with an O(1) index lookup.
+// Unselective class-wide scans (func: type(...)) are penalised with a heavy cost (+1000) to guarantee they are
+// never chosen over direct relations. Cycles are gracefully detected and capped to avoid infinite recursion.
+func getVariableHops(varName string, defines map[string]*dql.GraphQuery, parentMap map[*dql.GraphQuery]*dql.GraphQuery, visited map[string]bool) int {
+	// Guard against infinite recursion in cyclic relationship dependencies.
+	if visited[varName] {
+		return 999
+	}
+	visited[varName] = true
+	defer func() { visited[varName] = false }()
+
+	gq, ok := defines[varName]
+	if !ok {
+		return 0
+	}
+
+	parent := parentMap[gq]
+	if parent == nil {
+		parent = gq
+	}
+
+	hops := 0
+	// If this represents a relational hop (an edge predicate), increment the hop-count.
+	if gq.Attr != "" && gq.Attr != "var" && gq.Attr != "uid" && !strings.HasPrefix(gq.Attr, "count(") {
+		hops = 1
+	}
+
+	if parent.Func != nil {
+		// Heavily penalise generic type/class scans to deprioritise them as inversion targets.
+		if parent.Func.Name == "type" {
+			return hops + 1000
+		}
+		// If the node is rooted on another variable, recursively trace its parent's hops.
+		if parent.Func.Name == "uid" {
+			if len(parent.Func.Args) == 1 {
+				parentVar := parent.Func.Args[0].Value
+				if parentVar != "" && !strings.HasPrefix(parentVar, "0x") {
+					return hops + getVariableHops(parentVar, defines, parentMap, visited)
+				}
+			}
+		}
+	}
+	return hops
+}
+
+func collectUidVars(filter *dql.FilterTree, vars *[]string) {
+	if filter == nil {
+		return
+	}
+	if filter.Func != nil && filter.Func.Name == "uid" && len(filter.Func.Args) == 1 {
+		val := filter.Func.Args[0].Value
+		if val != "" && !strings.HasPrefix(val, "0x") {
+			*vars = append(*vars, val)
+		}
+	}
+	for _, child := range filter.Child {
+		collectUidVars(child, vars)
+	}
+}
+
+func extractSpecificUidArg(filter *dql.FilterTree, targetVar string) (*dql.Arg, *dql.FilterTree) {
+	if filter == nil {
+		return nil, nil
+	}
+
+	if filter.Func != nil {
+		if filter.Func.Name == "uid" && len(filter.Func.Args) == 1 {
+			if filter.Func.Args[0].Value == targetVar {
+				arg := filter.Func.Args[0]
+				return &arg, nil
+			}
+		}
+		return nil, filter
+	}
+
+	if filter.Op != "" && filter.Op != "and" {
+		return nil, filter
+	}
+
+	var newChildren []*dql.FilterTree
+	var extractedArg *dql.Arg
+
+	for _, child := range filter.Child {
+		if child == nil {
+			continue
+		}
+		if extractedArg == nil {
+			arg, updatedChild := extractSpecificUidArg(child, targetVar)
+			if arg != nil {
+				extractedArg = arg
+				if updatedChild != nil {
+					newChildren = append(newChildren, updatedChild)
+				}
+				continue
+			}
+		}
+		newChildren = append(newChildren, child)
+	}
+
+	if extractedArg != nil {
+		if len(newChildren) == 0 {
+			return extractedArg, nil
+		}
+		if len(newChildren) == 1 {
+			return extractedArg, newChildren[0]
+		}
+		filter.Child = newChildren
+		return extractedArg, filter
+	}
+
+	return nil, filter
+}
+
 func optimizeBlock(q *dql.GraphQuery) {
+	defines := make(map[string]*dql.GraphQuery)
+	parentMap := make(map[*dql.GraphQuery]*dql.GraphQuery)
+	optimizeBlockWithDefines(q, defines, parentMap)
+}
+
+func optimizeBlockWithDefines(q *dql.GraphQuery, defines map[string]*dql.GraphQuery, parentMap map[*dql.GraphQuery]*dql.GraphQuery) {
 	// We optimize blocks that start with a root 'type(T)' function having at least 1 argument.
 	if q.Func != nil && q.Func.Name == "type" && len(q.Func.Args) >= 1 {
 		var typeNames []string
@@ -4590,8 +4767,36 @@ func optimizeBlock(q *dql.GraphQuery) {
 			return
 		}
 
-		// Try to extract a UID function from the block's filter tree.
-		extractedArg, extractedUID, updatedFilter := extractUidArg(q.Filter)
+		// Collect all candidate variables from the filter tree
+		var candidates []string
+		collectUidVars(q.Filter, &candidates)
+
+		var extractedArg *dql.Arg
+		var extractedUID []uint64
+		var updatedFilter *dql.FilterTree
+
+		if len(candidates) > 0 {
+			// Find the candidate with the minimum hops (highest selectivity)
+			bestCandidate := candidates[0]
+			minHops := getVariableHops(bestCandidate, defines, parentMap, make(map[string]bool))
+			for _, candidate := range candidates[1:] {
+				hops := getVariableHops(candidate, defines, parentMap, make(map[string]bool))
+				if hops < minHops {
+					minHops = hops
+					bestCandidate = candidate
+				}
+			}
+
+			// Extract the best candidate specifically!
+			extractedArg, updatedFilter = extractSpecificUidArg(q.Filter, bestCandidate)
+		}
+
+		// Fallback to the original extractUidArg if we didn't find any variable candidate,
+		// or if extraction failed, to handle literal hex UID lists.
+		if extractedArg == nil && len(extractedUID) == 0 {
+			extractedArg, extractedUID, updatedFilter = extractUidArg(q.Filter)
+		}
+
 		if extractedArg != nil || len(extractedUID) > 0 {
 			// Invert the root function to use the extracted UID source.
 			if extractedArg != nil {

@@ -803,7 +803,7 @@ func TestForwardStrategyVariableUnification(t *testing.T) {
 							{ or: [{ deleted: false }, { not: { has: deleted } }] }
 							{
 								hasStatus: {
-									not: { name: { eq: "Draft" } }
+									not: { name: { allofterms: "Draft" } }
 								}
 							}
 							{
@@ -890,7 +890,7 @@ func TestCascadeAuthDQL_JobAdAggregateCountDebug(t *testing.T) {
 						hasCandidate: { _metadata: { lookup: REVERSE }, deleted: false }
 						hasStatus: {
 							_metadata: { lookup: REVERSE }
-							not: { _metadata: { lookup: REVERSE }, name: { eq: "Draft" } }
+							not: { _metadata: { lookup: REVERSE }, name: { allofterms: "Draft" } }
 						}
 					}
 				) {
@@ -1072,6 +1072,87 @@ func TestHighSelectivityCascadeAuthForward(t *testing.T) {
 	require.Contains(t, actual, "uid_in(Note.forResource")
 	require.NotContains(t, actual, "var(func: type(Group))")
 	require.NotContains(t, actual, "var(func: type(Workspace))")
+
+	_, parseErr := dql.Parse(dql.Request{Str: actual})
+	require.NoError(t, parseErr, "Generated DQL should parse perfectly")
+}
+
+func TestMultipleUIDInversionCandidates(t *testing.T) {
+	// Mock lambda URL so the parser accepts @lambda directives
+	x.Config.GraphQL = z.NewSuperFlag("lambda-url=http://localhost:8086/graphql-worker;").
+		MergeAndCheckDefault("lambda-url=;")
+
+	schemaBytes, err := os.ReadFile("/Users/idowuayoola/Documents/jobli/graph/.graphql")
+	require.NoError(t, err)
+
+	strSchema := string(schemaBytes)
+	authIdx := strings.LastIndex(strSchema, "Dgraph.Authorization")
+	require.NotEqual(t, -1, authIdx)
+	endOfLine := strings.Index(strSchema[authIdx:], "\n")
+	if endOfLine != -1 {
+		strSchema = strSchema[:authIdx+endOfLine]
+	}
+
+	gqlSchema := test.LoadSchemaFromString(t, string(schemaBytes))
+
+	authParsed, err := authorization.Parse(strSchema)
+	require.NoError(t, err)
+
+	metaInfo := &testutil.AuthMeta{
+		PublicKey:       authParsed.VerificationKey,
+		Namespace:       authParsed.Namespace,
+		Algo:            authParsed.Algo,
+		ClosedByDefault: authParsed.ClosedByDefault,
+	}
+
+	gqlQuery := `
+		query {
+			queryApplication(filter: {
+				and: [
+					{
+						and: [
+							{ deleted: false },
+							{ inGroup: { inWorkspace: { id: ["0x26e943"] } } },
+							{ forJobAd: { id: ["0x48f043"] } }
+						]
+					}
+				]
+			}) {
+				id
+			}
+		}
+	`
+
+	op, err := gqlSchema.Operation(&schema.Request{
+		Query: gqlQuery,
+	})
+	require.NoError(t, err)
+	gqlQry := test.GetQuery(t, op)
+
+	metaInfo.AuthVars = map[string]interface{}{
+		"sub":   "ZGifl7RD37Pa0fHOdTZwjsxjKHO2",
+		"SUB":   "ZGifl7RD37Pa0fHOdTZwjsxjKHO2",
+		"ws":    "test",
+		"WS":    "test",
+		"email": "test@gorillajobs.app",
+		"EMAIL": "test@gorillajobs.app",
+	}
+	ctx, err := metaInfo.AddClaimsToContext(context.Background())
+	require.NoError(t, err)
+
+	rewriter := NewQueryRewriter()
+	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	require.NoError(t, err)
+
+	actual := dgraph.AsString(dgQuery)
+	t.Logf("Generated DQL:\n%s", actual)
+
+	// Since we filter forJobAd with selective IDs (1 hop) and inGroup with Workspace ID (2 hops),
+	// the rewriter must select the variable representing forJobAd as the optimized root function
+	// of the Application query block, while keeping the inGroup variable as a filter.
+	// This replaces a broad Workspace-wide scan of applications with a highly selective JobAd application set lookup.
+	require.Contains(t, actual, "as var(func: uid(queryApplication_and_and_2_forJobAd))")
+	require.Contains(t, actual, "uid(queryApplication_and_and_1_inGroup)")
 
 	_, parseErr := dql.Parse(dql.Request{Str: actual})
 	require.NoError(t, parseErr, "Generated DQL should parse perfectly")

@@ -1572,7 +1572,7 @@
       }
       PostRoot as var(func: uid(Post_1), orderdesc: Post.text, first: 10, offset: 5) @filter(((uid(Question_Auth3) AND uid(Question_Auth4)) OR uid(FbPost_Auth6) OR uid(Answer_Auth8)))
       Post_1 as var(func: type(Post)) @filter(eq(Post.text, "A Post"))
-      Question_2 as var(func: type(Question))
+      Question_2 as var(func: uid(Post_1)) @filter(type(Question))
       Question_Auth3 as var(func: uid(Question_2)) @filter(eq(Question.answered, true)) @cascade {
         Question.id : uid
       }
@@ -1582,14 +1582,14 @@
           Author.name : Author.name
         }
       }
-      FbPost_5 as var(func: type(FbPost))
+      FbPost_5 as var(func: uid(Post_1)) @filter(type(FbPost))
       FbPost_Auth6 as var(func: uid(FbPost_5)) @cascade {
         dgraph.type
         Post.author : Post.author @filter(eq(Author.name, "Random")) {
           Author.name : Author.name
         }
       }
-      Answer_7 as var(func: type(Answer))
+      Answer_7 as var(func: uid(Post_1)) @filter(type(Answer))
       Answer_Auth8 as var(func: uid(Answer_7)) @cascade {
         dgraph.type
         Post.author : Post.author @filter(eq(Author.name, "Random")) {
