@@ -301,6 +301,8 @@ type FieldDefinition interface {
 	IsExternal() bool
 	HasIDDirective() bool
 	HasSearchDirective() bool
+	// HasHashFilter reports whether this field's @search directive includes a 'hash' filter index.
+	HasHashFilter() bool
 	HasOldValueDirective() bool
 	OldValueFields() []string
 	// OldValueFirst returns the `first` argument of @oldValue (0 = no limit).
@@ -3877,6 +3879,19 @@ func (fd *fieldDefinition) HasSearchDirective() bool {
 		return false
 	}
 	return hasSearchDirective(fd.fieldDef)
+}
+
+// HasHashFilter reports whether this field definition is marked with a 'hash' search index.
+func (fd *fieldDefinition) HasHashFilter() bool {
+	if fd.fieldDef == nil {
+		return false
+	}
+	for _, arg := range getSearchArgs(fd.fieldDef) {
+		if arg == "hash" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasSearchDirective(fd *ast.FieldDefinition) bool {

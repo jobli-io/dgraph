@@ -1497,16 +1497,181 @@ func rewriteAsQuery(field schema.Field, authRw *authRewriter, queryName string) 
 		return append(dgQuery, selectionAuth...)
 	}
 
-	dgQuery = rootQueryOptimization(dgQuery)
+	dgQuery = rootQueryOptimization(dgQuery, field.Type())
 	return dgQuery
 }
 
-func rootQueryOptimization(dgQuery []*dql.GraphQuery) []*dql.GraphQuery {
+func isAuthBlock(q *dql.GraphQuery) bool {
+	if q == nil {
+		return false
+	}
+	if strings.Contains(q.Var, "_Auth") {
+		return true
+	}
+	for _, child := range q.Children {
+		if strings.Contains(child.Var, "_Auth") {
+			return true
+		}
+		if isAuthBlock(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func collectSchemaTypes(t schema.Type, visited map[string]schema.Type) {
+	if t == nil {
+		return
+	}
+	name := t.Name()
+	if name == "" {
+		name = t.DgraphName()
+	}
+	if name == "" {
+		return
+	}
+	if _, ok := visited[name]; ok {
+		return
+	}
+	visited[name] = t
+
+	for _, fld := range t.Fields() {
+		if fld != nil && fld.Type() != nil {
+			collectSchemaTypes(fld.Type(), visited)
+		}
+	}
+}
+
+func hasUidFilter(ft *dql.FilterTree) bool {
+	if ft == nil {
+		return false
+	}
+	if ft.Func != nil && ft.Func.Name == "uid" {
+		return true
+	}
+	for _, child := range ft.Child {
+		if hasUidFilter(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSelectiveSearchField(fld schema.FieldDefinition) bool {
+	if fld == nil {
+		return false
+	}
+	return fld.HasHashFilter()
+}
+
+func findAndExtractSelectiveAnchor(ft *dql.FilterTree, currentType schema.Type, typesMap map[string]schema.Type) *dql.Function {
+	if ft == nil {
+		return nil
+	}
+
+	// Case 1: Simple leaf node representing a function
+	if ft.Func != nil {
+		if ft.Func.Name == "eq" || ft.Func.Name == "in" {
+			if len(ft.Func.Args) > 0 {
+				attr := ft.Func.Args[0].Value
+
+				// Resolve the field definition from the schema
+				var fld schema.FieldDefinition
+				parts := strings.Split(attr, ".")
+				if len(parts) == 2 {
+					typeName := parts[0]
+					fieldName := parts[1]
+					if t, ok := typesMap[typeName]; ok {
+						fld = t.Field(fieldName)
+					}
+				} else if currentType != nil {
+					fld = currentType.Field(attr)
+				}
+
+				// Schema-driven selectivity rule: Is the field of ID type, marked with @id, or a selective search anchor?
+				if fld != nil && (fld.IsID() || fld.HasIDDirective() || isSelectiveSearchField(fld)) {
+					extracted := ft.Func
+					ft.Func = nil // Remove from filter tree
+					return extracted
+				}
+			}
+		}
+	}
+
+	// Case 2: Compound logical tree (AND/OR/NOT)
+	for i, child := range ft.Child {
+		if anchor := findAndExtractSelectiveAnchor(child, currentType, typesMap); anchor != nil {
+			// Clean up any empty/null branches in the child list to keep DQL valid
+			if child.Func == nil && len(child.Child) == 0 {
+				ft.Child = append(ft.Child[:i], ft.Child[i+1:]...)
+			}
+			return anchor
+		}
+	}
+
+	return nil
+}
+
+func optimizeQueryBlock(q *dql.GraphQuery, typesMap map[string]schema.Type) {
+	if q == nil {
+		return
+	}
+
+	// Only optimize block if it is an authorization query block (contains _Auth variables)
+	if isAuthBlock(q) && q.Func != nil && q.Func.Name == "type" {
+		var currentType schema.Type
+		if len(q.Func.Args) > 0 {
+			currentType = typesMap[q.Func.Args[0].Value]
+		}
+
+		// If there is any UID filter in the tree, defer to UID query plan inversion (applyQueryPlanInversion)
+		if !hasUidFilter(q.Filter) {
+			if anchor := findAndExtractSelectiveAnchor(q.Filter, currentType, typesMap); anchor != nil {
+				typeScanFunc := q.Func
+				q.Func = anchor
+				typeFilter := &dql.FilterTree{Func: typeScanFunc}
+				if q.Filter == nil {
+					q.Filter = typeFilter
+				} else {
+					if q.Filter.Func == nil && len(q.Filter.Child) == 0 {
+						q.Filter = typeFilter
+					} else {
+						q.Filter = &dql.FilterTree{
+							Op:    "and",
+							Child: []*dql.FilterTree{q.Filter, typeFilter},
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for _, child := range q.Children {
+		optimizeQueryBlock(child, typesMap)
+	}
+}
+
+func rootQueryOptimization(dgQuery []*dql.GraphQuery, rootType schema.Type) []*dql.GraphQuery {
+	if len(dgQuery) == 0 || dgQuery[0] == nil {
+		return dgQuery
+	}
+
+	// 1. Maintain 100% backward compatibility for the legacy top-level flat eq promotion
 	if dgQuery[0].Filter != nil && dgQuery[0].Filter.Func != nil &&
 		dgQuery[0].Filter.Func.Name == "eq" && dgQuery[0].Func.Name == "type" {
 		rootFunc := dgQuery[0].Func
 		dgQuery[0].Func = dgQuery[0].Filter.Func
 		dgQuery[0].Filter.Func = rootFunc
+		return dgQuery
+	}
+
+	// Crawl from the root schema type to find all reachable types in this request's schema context
+	typesMap := make(map[string]schema.Type)
+	collectSchemaTypes(rootType, typesMap)
+
+	// 2. Otherwise, run our schema-driven recursive selective filter promotion on all blocks in the slice (including root if it's an auth block)
+	for _, q := range dgQuery {
+		optimizeQueryBlock(q, typesMap)
 	}
 	return dgQuery
 }

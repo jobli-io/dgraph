@@ -1157,3 +1157,78 @@ func TestMultipleUIDInversionCandidates(t *testing.T) {
 	_, parseErr := dql.Parse(dql.Request{Str: actual})
 	require.NoError(t, parseErr, "Generated DQL should parse perfectly")
 }
+
+func TestRecursiveSelectiveFilterPromotion(t *testing.T) {
+	// Mock lambda URL so the parser accepts @lambda directives
+	x.Config.GraphQL = z.NewSuperFlag("lambda-url=http://localhost:8086/graphql-worker;").
+		MergeAndCheckDefault("lambda-url=;")
+
+	schemaBytes, err := os.ReadFile("/Users/idowuayoola/Documents/jobli/graph/.graphql")
+	require.NoError(t, err)
+
+	strSchema := string(schemaBytes)
+	authIdx := strings.LastIndex(strSchema, "Dgraph.Authorization")
+	require.NotEqual(t, -1, authIdx)
+	endOfLine := strings.Index(strSchema[authIdx:], "\n")
+	if endOfLine != -1 {
+		strSchema = strSchema[:authIdx+endOfLine]
+	}
+
+	gqlSchema := test.LoadSchemaFromString(t, string(schemaBytes))
+
+	authParsed, err := authorization.Parse(strSchema)
+	require.NoError(t, err)
+
+	metaInfo := &testutil.AuthMeta{
+		PublicKey:       authParsed.VerificationKey,
+		Namespace:       authParsed.Namespace,
+		Algo:            authParsed.Algo,
+		ClosedByDefault: authParsed.ClosedByDefault,
+	}
+
+	gqlQuery := `
+		query {
+			aggregateJob {
+				count
+			}
+		}
+	`
+
+	op, err := gqlSchema.Operation(&schema.Request{
+		Query: gqlQuery,
+	})
+	require.NoError(t, err)
+	gqlQry := test.GetQuery(t, op)
+
+	metaInfo.AuthVars = map[string]interface{}{
+		"sub":   "e8CLjFdOVJeCYirbV5SDQ6yfUg03",
+		"SUB":   "e8CLjFdOVJeCYirbV5SDQ6yfUg03",
+		"ws":    "dc98a028",
+		"WS":    "dc98a028",
+		"email": "idowu@gorillajobs.com.au",
+		"EMAIL": "idowu@gorillajobs.com.au",
+	}
+	ctx, err := metaInfo.AddClaimsToContext(context.Background())
+	require.NoError(t, err)
+
+	rewriter := NewQueryRewriter()
+	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	require.NoError(t, err)
+
+	actual := dgraph.AsString(dgQuery)
+	t.Logf("Generated DQL:\n%s", actual)
+
+	// Assert that we successfully promoted the eq(User.userId, "e8CL...") filter
+	// from being nested inside a type(User) scan block to being the root function
+	// of the User auth query variable!
+	require.Contains(t, actual, "func: eq(User.userId, \"e8CLjFdOVJeCYirbV5SDQ6yfUg03\")")
+	// And the old type scan is moved to a filter
+	require.Contains(t, actual, "type(User)")
+
+	// Assert that there are no global scans for Workspace or User left
+	require.NotContains(t, actual, "var(func: type(User)) @filter")
+	require.NotContains(t, actual, "var(func: type(Workspace))")
+
+	_, parseErr := dql.Parse(dql.Request{Str: actual})
+	require.NoError(t, parseErr, "Generated DQL should parse perfectly")
+}

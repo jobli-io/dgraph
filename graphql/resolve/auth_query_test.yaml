@@ -2175,7 +2175,7 @@
       Nested_XRoot as var(func: uid(Nested_X_3)) @filter(uid(Nested_X_Auth4))
       Nested_X_3 as var(func: uid(queryNested_X_y)) @filter(type(Nested_X))
       Nested_X_Auth4 as var(func: uid(Nested_X_3)) @filter((uid(Nested_X_Auth4_y))) @cascade
-      var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "y")) {
+      var(func: eq(Nested_Y.s, "y")) @filter(type(Nested_Y)) {
         Nested_X_Auth4_y as Nested_Z.x
       }
       var(func: uid(Nested_XRoot)) {
@@ -2204,7 +2204,7 @@
       Nested_XRoot as var(func: uid(Nested_X_3)) @filter(uid(Nested_X_Auth4))
       Nested_X_3 as var(func: uid(queryNested_X_y)) @filter(type(Nested_X))
       Nested_X_Auth4 as var(func: uid(Nested_X_3)) @filter((uid(Nested_X_Auth4_y))) @cascade
-      var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "y")) {
+      var(func: eq(Nested_Y.s, "y")) @filter(type(Nested_Y)) {
         Nested_X_Auth4_y as Nested_Z.x
       }
     }
@@ -2239,7 +2239,7 @@
       Nested_XRoot as var(func: uid(Nested_X_6)) @filter(uid(Nested_X_Auth7))
       Nested_X_6 as var(func: uid(queryNested_X_y)) @filter(type(Nested_X))
       Nested_X_Auth7 as var(func: uid(Nested_X_6)) @filter((uid(Nested_X_Auth7_y))) @cascade
-      var(func: type(Nested_Y)) @filter(eq(Nested_Y.s, "y")) {
+      var(func: eq(Nested_Y.s, "y")) @filter(type(Nested_Y)) {
         Nested_X_Auth7_y as Nested_Z.x
       }
       var(func: uid(Nested_XRoot)) {
