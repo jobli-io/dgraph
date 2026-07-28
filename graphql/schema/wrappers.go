@@ -4275,13 +4275,22 @@ func (fd *fieldDefinition) BypassAuth() bool {
 }
 
 func (t *astType) Name() string {
+	if t == nil || t.typ == nil {
+		return ""
+	}
 	if t.typ.NamedType == "" {
+		if t.typ.Elem == nil {
+			return ""
+		}
 		return t.typ.Elem.NamedType
 	}
 	return t.typ.NamedType
 }
 
 func (t *astType) DgraphName() string {
+	if t == nil || t.typ == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return ""
+	}
 	typeDef := t.inSchema.schema.Types[t.typ.Name()]
 	name := typeName(typeDef)
 	if name != "" {
@@ -4291,22 +4300,46 @@ func (t *astType) DgraphName() string {
 }
 
 func (t *astType) Nullable() bool {
+	if t == nil || t.typ == nil {
+		return true
+	}
 	return !t.typ.NonNull
 }
 
 func (t *astType) IsInterface() bool {
-	return t.inSchema.schema.Types[t.typ.Name()].Kind == ast.Interface
+	if t == nil || t.typ == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return false
+	}
+	typeDef := t.inSchema.schema.Types[t.typ.Name()]
+	if typeDef == nil {
+		return false
+	}
+	return typeDef.Kind == ast.Interface
 }
 
 func (t *astType) IsUnion() bool {
-	return t.inSchema.schema.Types[t.typ.Name()].Kind == ast.Union
+	if t == nil || t.typ == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return false
+	}
+	typeDef := t.inSchema.schema.Types[t.typ.Name()]
+	if typeDef == nil {
+		return false
+	}
+	return typeDef.Kind == ast.Union
 }
 
 func (t *astType) UnionMembers(memberTypesList []interface{}) []Type {
+	if t == nil || t.typ == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return nil
+	}
+	typeDef := t.inSchema.schema.Types[t.typ.Name()]
+	if typeDef == nil {
+		return nil
+	}
 	var memberTypes []Type
 	if (memberTypesList) == nil {
 		// if no specific members were requested, find out all the members of this union
-		for _, typName := range t.inSchema.schema.Types[t.typ.Name()].Types {
+		for _, typName := range typeDef.Types {
 			memberTypes = append(memberTypes, &astType{
 				typ:             &ast.Type{NamedType: typName},
 				inSchema:        t.inSchema,
@@ -4327,7 +4360,7 @@ func (t *astType) UnionMembers(memberTypesList []interface{}) []Type {
 }
 
 func (t *astType) ListType() Type {
-	if t.typ == nil || t.typ.Elem == nil {
+	if t == nil || t.typ == nil || t.typ.Elem == nil {
 		return nil
 	}
 	return &astType{
@@ -4339,6 +4372,9 @@ func (t *astType) ListType() Type {
 // DgraphPredicate returns the name of the predicate in Dgraph that represents this
 // type's field fld.  Mostly this will be type_name.field_name,.
 func (t *astType) DgraphPredicate(fld string) string {
+	if t == nil || t.dgraphPredicate == nil {
+		return ""
+	}
 	return t.dgraphPredicate[t.Name()][fld]
 }
 
@@ -4371,7 +4407,13 @@ func (t *astType) String() string {
 }
 
 func (t *astType) IDField() FieldDefinition {
+	if t == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return nil
+	}
 	def := t.inSchema.schema.Types[t.Name()]
+	if def == nil {
+		return nil
+	}
 	// If the field is of ID type but it is an external field,
 	// then it is stored in Dgraph as string type with Hash index.
 	// So the this field is actually not stored as ID type.
@@ -4393,7 +4435,13 @@ func (t *astType) IDField() FieldDefinition {
 }
 
 func (t *astType) PasswordField() FieldDefinition {
+	if t == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return nil
+	}
 	def := t.inSchema.schema.Types[t.Name()]
+	if def == nil {
+		return nil
+	}
 	if def.Kind != ast.Object && def.Kind != ast.Interface {
 		return nil
 	}
@@ -4411,7 +4459,13 @@ func (t *astType) PasswordField() FieldDefinition {
 }
 
 func (t *astType) XIDFields() []FieldDefinition {
+	if t == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return nil
+	}
 	def := t.inSchema.schema.Types[t.Name()]
+	if def == nil {
+		return nil
+	}
 	if def.Kind != ast.Object && def.Kind != ast.Interface {
 		return nil
 	}
@@ -4436,6 +4490,9 @@ func (t *astType) XIDFields() []FieldDefinition {
 
 // InterfaceImplHasAuthRules checks if an interface's implementation has auth rules.
 func (t *astType) InterfaceImplHasAuthRules() bool {
+	if t == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return false
+	}
 	schema := t.inSchema.schema
 	types := schema.Types
 	if typ, ok := types[t.Name()]; !ok || typ.Kind != ast.Interface {

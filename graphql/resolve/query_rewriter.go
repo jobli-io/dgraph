@@ -1535,6 +1535,20 @@ func collectSchemaTypes(t schema.Type, visited map[string]schema.Type) {
 	}
 	visited[name] = t
 
+	// Recursively collect Union members
+	if t.IsUnion() {
+		for _, m := range t.UnionMembers(nil) {
+			collectSchemaTypes(m, visited)
+		}
+	}
+
+	// Recursively collect Implementing Types of Interfaces
+	if t.IsInterface() {
+		for _, impl := range t.ImplementingTypes() {
+			collectSchemaTypes(impl, visited)
+		}
+	}
+
 	for _, fld := range t.Fields() {
 		if fld != nil && fld.Type() != nil {
 			collectSchemaTypes(fld.Type(), visited)
@@ -1651,18 +1665,116 @@ func optimizeQueryBlock(q *dql.GraphQuery, typesMap map[string]schema.Type) {
 	}
 }
 
+func cloneArg(a dql.Arg) dql.Arg {
+	return dql.Arg{
+		Value:      a.Value,
+		IsValueVar: a.IsValueVar,
+		IsDQLVar:   a.IsDQLVar,
+	}
+}
+
+func cloneFunction(f *dql.Function) *dql.Function {
+	if f == nil {
+		return nil
+	}
+	cloned := &dql.Function{
+		Name:    f.Name,
+		Lang:    f.Lang,
+		IsCount: f.IsCount,
+	}
+	if f.Args != nil {
+		cloned.Args = make([]dql.Arg, len(f.Args))
+		for i, arg := range f.Args {
+			cloned.Args[i] = cloneArg(arg)
+		}
+	}
+	if f.UID != nil {
+		cloned.UID = append([]uint64(nil), f.UID...)
+	}
+	return cloned
+}
+
+func cloneFilterTree(ft *dql.FilterTree) *dql.FilterTree {
+	if ft == nil {
+		return nil
+	}
+	cloned := &dql.FilterTree{
+		Op:   ft.Op,
+		Func: cloneFunction(ft.Func),
+	}
+	if ft.Child != nil {
+		cloned.Child = make([]*dql.FilterTree, len(ft.Child))
+		for i, child := range ft.Child {
+			cloned.Child[i] = cloneFilterTree(child)
+		}
+	}
+	return cloned
+}
+
+func cloneGraphQuery(q *dql.GraphQuery) *dql.GraphQuery {
+	if q == nil {
+		return nil
+	}
+	cloned := &dql.GraphQuery{
+		UID:              append([]uint64(nil), q.UID...),
+		Attr:             q.Attr,
+		Langs:            append([]string(nil), q.Langs...),
+		Alias:            q.Alias,
+		IsCount:          q.IsCount,
+		IsInternal:       q.IsInternal,
+		IsGroupby:        q.IsGroupby,
+		Var:              q.Var,
+		NeedsVar:         append([]dql.VarContext(nil), q.NeedsVar...),
+		Func:             cloneFunction(q.Func),
+		Expand:           q.Expand,
+		Order:            append([]*pb.Order(nil), q.Order...),
+		Filter:           cloneFilterTree(q.Filter),
+		MathExp:          q.MathExp,
+		Normalize:        q.Normalize,
+		Recurse:          q.Recurse,
+		RecurseArgs:      q.RecurseArgs,
+		ShortestPathArgs: q.ShortestPathArgs,
+		Cascade:          append([]string(nil), q.Cascade...),
+		IgnoreReflex:     q.IgnoreReflex,
+		Facets:           q.Facets,
+		FacetsFilter:     cloneFilterTree(q.FacetsFilter),
+		GroupbyAttrs:     append([]dql.GroupByAttr(nil), q.GroupbyAttrs...),
+		AllowedPreds:     append([]string(nil), q.AllowedPreds...),
+		IsEmpty:          q.IsEmpty,
+	}
+	if q.Args != nil {
+		cloned.Args = make(map[string]string)
+		for k, v := range q.Args {
+			cloned.Args[k] = v
+		}
+	}
+	if q.Children != nil {
+		cloned.Children = make([]*dql.GraphQuery, len(q.Children))
+		for i, child := range q.Children {
+			cloned.Children[i] = cloneGraphQuery(child)
+		}
+	}
+	return cloned
+}
+
 func rootQueryOptimization(dgQuery []*dql.GraphQuery, rootType schema.Type) []*dql.GraphQuery {
 	if len(dgQuery) == 0 || dgQuery[0] == nil {
 		return dgQuery
 	}
 
+	// Deep-copy all queries to prevent corrupting shared, cached, or global auth query blocks!
+	clonedQuery := make([]*dql.GraphQuery, len(dgQuery))
+	for i, q := range dgQuery {
+		clonedQuery[i] = cloneGraphQuery(q)
+	}
+
 	// 1. Maintain 100% backward compatibility for the legacy top-level flat eq promotion
-	if dgQuery[0].Filter != nil && dgQuery[0].Filter.Func != nil &&
-		dgQuery[0].Filter.Func.Name == "eq" && dgQuery[0].Func.Name == "type" {
-		rootFunc := dgQuery[0].Func
-		dgQuery[0].Func = dgQuery[0].Filter.Func
-		dgQuery[0].Filter.Func = rootFunc
-		return dgQuery
+	if clonedQuery[0].Filter != nil && clonedQuery[0].Filter.Func != nil &&
+		clonedQuery[0].Filter.Func.Name == "eq" && clonedQuery[0].Func.Name == "type" {
+		rootFunc := clonedQuery[0].Func
+		clonedQuery[0].Func = clonedQuery[0].Filter.Func
+		clonedQuery[0].Filter.Func = rootFunc
+		return clonedQuery
 	}
 
 	// Crawl from the root schema type to find all reachable types in this request's schema context
@@ -1670,10 +1782,10 @@ func rootQueryOptimization(dgQuery []*dql.GraphQuery, rootType schema.Type) []*d
 	collectSchemaTypes(rootType, typesMap)
 
 	// 2. Otherwise, run our schema-driven recursive selective filter promotion on all blocks in the slice (including root if it's an auth block)
-	for _, q := range dgQuery {
+	for _, q := range clonedQuery {
 		optimizeQueryBlock(q, typesMap)
 	}
-	return dgQuery
+	return clonedQuery
 }
 
 func (authRw *authRewriter) writingAuth() bool {

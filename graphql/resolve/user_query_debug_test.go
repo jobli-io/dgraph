@@ -934,18 +934,83 @@ func TestInterfaceMemberTypesMultiple(t *testing.T) {
 	x.Config.GraphQL = z.NewSuperFlag("lambda-url=http://localhost:8086/graphql-worker;").
 		MergeAndCheckDefault("lambda-url=;")
 
-	schemaBytes, err := os.ReadFile("/Users/idowuayoola/Documents/jobli/graph/.graphql")
-	require.NoError(t, err)
+	strSchema := `
+		type User {
+			id: ID!
+			userId: String! @search(by: [hash])
+			ownsResource: [Ownable!] @hasInverse(field: ownedBy)
+		}
 
-	strSchema := string(schemaBytes)
-	authIdx := strings.LastIndex(strSchema, "Dgraph.Authorization")
-	require.NotEqual(t, -1, authIdx)
-	endOfLine := strings.Index(strSchema[authIdx:], "\n")
-	if endOfLine != -1 {
-		strSchema = strSchema[:authIdx+endOfLine]
-	}
+		interface Ownable {
+			id: ID!
+			ownedBy: [User!]
+		}
 
-	gqlSchema := test.LoadSchemaFromString(t, string(schemaBytes))
+		type Workspace implements Ownable @auth(
+			query: { rule: """
+				query {
+					queryWorkspace {
+						name
+						ownedBy {
+							userId
+						}
+					}
+				}
+			""" }
+		) {
+			id: ID!
+			name: String! @search(by: [exact])
+			ownedBy: [User!]
+			hasMembers: [WorkspaceMember!] @hasInverse(field: inWorkspace)
+		}
+
+		interface WorkspaceMember {
+			id: ID!
+			inWorkspace: Workspace! @cascadeAuth(operations: [query], variableContext: parent, bidirectional: false) @hasInverse(field: hasMembers)
+		}
+
+		type Group implements WorkspaceMember {
+			id: ID!
+			inWorkspace: Workspace! @hasInverse(field: hasMembers)
+			hasWorkspaceMember: [WorkspaceMember!]
+			hasGroupable: [Groupable!] @hasInverse(field: inGroup)
+		}
+
+		interface Groupable {
+			id: ID!
+			inGroup: [Group!] @cascadeAuth(variableContext: adaptive, bidirectional: false) @hasInverse(field: hasGroupable)
+		}
+
+		interface NoteOwner {
+			id: ID!
+			hasNote: [Note!] @hasInverse(field: forResource)
+		}
+
+		type Note {
+			id: ID!
+			text: String!
+			forResource: NoteOwner! @search @cascadeAuth(variableContext: parent, bidirectional: false) @hasInverse(field: hasNote)
+		}
+
+		type Company implements Groupable & NoteOwner {
+			id: ID!
+			name: String!
+			inGroup: [Group!] @hasInverse(field: hasGroupable)
+			hasNote: [Note!]
+			hasContact: [Contact!] @hasInverse(field: forCompany)
+		}
+
+		type Contact implements Groupable & NoteOwner {
+			id: ID!
+			inGroup: [Group!] @hasInverse(field: hasGroupable)
+			hasNote: [Note!]
+			forCompany: [Company!] @cascadeAuth(operations: [query], variableContext: parent, bidirectional: true) @hasInverse(field: hasContact)
+		}
+
+		# Dgraph.Authorization {"Header":"Authorization","Namespace":"https://gorillajobs.app/jwt/claims","Algo":"HS256","Audience":["jobli-io"],"VerificationKey":"secret"}
+	`
+
+	gqlSchema := test.LoadSchemaFromString(t, strSchema)
 
 	authParsed, err := authorization.Parse(strSchema)
 	require.NoError(t, err)
