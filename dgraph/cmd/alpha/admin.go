@@ -15,6 +15,7 @@ import (
 
 	"github.com/hypermodeinc/dgraph/v25/graphql/admin"
 	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/hypermodeinc/dgraph/v25/graphql/subscription"
 	"github.com/hypermodeinc/dgraph/v25/worker"
 	"github.com/hypermodeinc/dgraph/v25/x"
 )
@@ -75,6 +76,9 @@ func getAdminMux() *http.ServeMux {
 		http.MethodGet: true,
 		http.MethodPut: true,
 	}, adminAuthHandler(http.HandlerFunc(memoryLimitHandler))))
+	adminMux.Handle("/admin/subscription/invalidate", allowedMethodsHandler(allowedMethods{
+		http.MethodPost: true,
+	}, http.HandlerFunc(adminSubscriptionInvalidateHandler)))
 	return adminMux
 }
 
@@ -211,4 +215,23 @@ func memoryLimitGetHandler(w http.ResponseWriter, r *http.Request) {
 	if _, err := fmt.Fprintln(w, data.Config.CacheMb); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func adminSubscriptionInvalidateHandler(w http.ResponseWriter, r *http.Request) {
+	var msg subscription.InvalidationMessage
+	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	broker := subscription.GetBroker()
+	if clusterBroker, ok := broker.(*subscription.NativeClusterBroker); ok {
+		clusterBroker.PublishLocally(&msg)
+	} else {
+		_ = broker.Publish(r.Context(), &msg)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"success"}`))
 }

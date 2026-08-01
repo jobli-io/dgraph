@@ -294,22 +294,27 @@ graph TD
 - **Resiliency**: Extremely resilient and highly performant. The broker serves as a dedicated event
   queue, offloading cross-node broadcast overhead from your database instances.
 
-#### Driver 3: Native Zero-Assisted gRPC (`native-cluster`)
+#### Driver 3: Native Zero-Assisted P2P HTTP/2 (`native-cluster`)
 
-- **Usage**: Configured via `--graphql "subscription-invalidation-broker=native-cluster;"`. This
-  offers high-performance clustered support with **zero external software dependencies**.
+- **Usage**: Default configuration or configured via
+  `--graphql "subscription-invalidation-broker=native-cluster;"`. This offers high-performance
+  clustered support with **zero external software dependencies**.
 - **Mechanics**:
-  1. Dgraph Alphas continuously heartbeat with Dgraph Zeros, maintaining a local, real-time registry
-     of all active Alpha nodes in the cluster (`groups().State()`).
-  2. When a mutation is successfully committed, the originating Alpha identifies all other active
-     Alpha nodes.
-  3. It fires parallel, asynchronous gRPC `InvalidateRequest` calls directly to the internal gRPC
-     ports of each active peer Alpha.
-  4. Each peer Alpha receives the gRPC payload, extracts the mutation metadata, and pushes it
-     directly into its local `Poller` trigger stream.
-- **Resiliency**: If a peer is temporarily network-partitioned or slow, the P2P gRPC sender
-  implements non-blocking asynchronous dispatch with a 500ms timeout and basic exponential retries,
-  ensuring transient network errors never block the database transaction thread.
+  1. **Dynamic Connection Pool Discovery**: Dgraph Alphas continuously maintain dynamic gRPC
+     connection pools with all other Alpha nodes in the cluster (`conn.GetPools().GetAll()`), which
+     are orchestrated and synchronized securely by Zero.
+  2. **Automatic Port Mapping**: When a mutation is committed, the originating Alpha identifies all
+     active Alpha connection endpoints from the pool. It extracts their host IPs/names and
+     dynamically maps the internal Raft/worker gRPC port (range `7000+`) to the corresponding HTTP
+     Admin API port (range `8080+`) by adding `1000`.
+  3. **P2P HTTP/2 Broadcast**: It fires parallel, non-blocking asynchronous `POST` requests to each
+     peer Alpha's internal `/admin/subscription/invalidate` HTTP endpoint.
+  4. **Local Evaluation**: Each peer Alpha's admin handler receives the payload and pushes it
+     strictly locally into its local `Poller` trigger stream, avoiding any recursive broadcast
+     feedback loops.
+- **Resiliency**: If a peer is temporarily offline or slow, the P2P HTTP/2 client implements
+  non-blocking asynchronous dispatch with a 500ms timeout, ensuring transient connection hiccups
+  never block database write transactions.
 
 ---
 

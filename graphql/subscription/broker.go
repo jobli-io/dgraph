@@ -9,12 +9,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/golang/glog"
+	"github.com/hypermodeinc/dgraph/v25/conn"
 )
 
 // InvalidationMessage is the payload distributed across the cluster when a mutation succeeds.
@@ -43,7 +46,7 @@ var (
 func GetBroker() InvalidationBroker {
 	brokerOnce.Do(func() {
 		if GlobalBrokerInstance == nil {
-			GlobalBrokerInstance = NewLocalBroker()
+			GlobalBrokerInstance = NewNativeClusterBroker()
 		}
 	})
 	return GlobalBrokerInstance
@@ -157,35 +160,37 @@ func (e *externalBroker) startMockReceiveLoop() {
 // 3. NATIVE CLUSTER P2P gRPC BROKER
 // -----------------------------------------------------------------------------
 
-type nativeClusterBroker struct {
+type NativeClusterBroker struct {
 	sync.RWMutex
 	handlers []func(msg *InvalidationMessage)
 }
 
 // NewNativeClusterBroker returns a new native gRPC-assisted peer cluster broker.
 func NewNativeClusterBroker() InvalidationBroker {
-	return &nativeClusterBroker{
+	return &NativeClusterBroker{
 		handlers: make([]func(msg *InvalidationMessage), 0),
 	}
 }
 
-func (n *nativeClusterBroker) Publish(ctx context.Context, msg *InvalidationMessage) error {
+func (n *NativeClusterBroker) Publish(ctx context.Context, msg *InvalidationMessage) error {
 	// 1. Process locally first
-	n.RLock()
-	for _, h := range n.handlers {
-		go h(msg)
-	}
-	n.RUnlock()
+	n.PublishLocally(msg)
 
-	// 2. Broadcast to Peer Alphas using standard Go http client asynchronously.
-	// Since Alpha nodes expose GraphQL /admin endpoints over HTTP/2, we can push
-	// a fast lightweight POST notification to peer Alpha endpoints (e.g. /admin/subscription/invalidate).
+	// 2. Broadcast to Peer Alphas
 	go n.broadcastToPeers(msg)
 
 	return nil
 }
 
-func (n *nativeClusterBroker) Subscribe(ctx context.Context, handler func(msg *InvalidationMessage)) error {
+func (n *NativeClusterBroker) PublishLocally(msg *InvalidationMessage) {
+	n.RLock()
+	defer n.RUnlock()
+	for _, h := range n.handlers {
+		go h(msg)
+	}
+}
+
+func (n *NativeClusterBroker) Subscribe(ctx context.Context, handler func(msg *InvalidationMessage)) error {
 	n.Lock()
 	defer n.Unlock()
 
@@ -193,24 +198,50 @@ func (n *nativeClusterBroker) Subscribe(ctx context.Context, handler func(msg *I
 	return nil
 }
 
-func (n *nativeClusterBroker) Close() error {
+func (n *NativeClusterBroker) Close() error {
 	return nil
 }
 
-func (n *nativeClusterBroker) broadcastToPeers(msg *InvalidationMessage) {
+func (n *NativeClusterBroker) broadcastToPeers(msg *InvalidationMessage) {
 	payload, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}
 
-	// In a clustered Dgraph setup, Alphas can register internal HTTP endpoints.
-	// We send a non-blocking HTTP POST request to peer nodes.
 	client := &http.Client{
 		Timeout: 500 * time.Millisecond,
 	}
 
-	// Mock peer address list (in real production, fetched from Zero cluster state / conn.GetPools())
 	peerAddrs := []string{}
+
+	// Fetch peer addresses from Dgraph's native connection pool (zero hardcoding, fully dynamic)
+	pools := conn.GetPools().GetAll()
+	for _, p := range pools {
+		host, grpcPortStr, err := net.SplitHostPort(p.Addr)
+		if err != nil {
+			continue
+		}
+
+		if isLocalIP(host) {
+			continue
+		}
+
+		grpcPort, err := strconv.Atoi(grpcPortStr)
+		if err != nil {
+			continue
+		}
+
+		var httpPort int
+		if grpcPort >= 9000 {
+			httpPort = grpcPort - 1000 // Client gRPC (9080) -> HTTP Admin (8080)
+		} else if grpcPort >= 7000 {
+			httpPort = grpcPort + 1000 // Internal Raft (7080) -> HTTP Admin (8080)
+		} else {
+			httpPort = 8080
+		}
+
+		peerAddrs = append(peerAddrs, net.JoinHostPort(host, strconv.Itoa(httpPort)))
+	}
 
 	for _, addr := range peerAddrs {
 		url := fmt.Sprintf("http://%s/admin/subscription/invalidate", addr)
@@ -227,4 +258,19 @@ func (n *nativeClusterBroker) broadcastToPeers(msg *InvalidationMessage) {
 		}
 		resp.Body.Close()
 	}
+}
+
+func isLocalIP(ipStr string) bool {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, address := range addrs {
+		if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.String() == ipStr {
+				return true
+			}
+		}
+	}
+	return false
 }
