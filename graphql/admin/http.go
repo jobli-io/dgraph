@@ -305,7 +305,19 @@ func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		subResp, err := poller.AddSubscriber(gqlReq)
 		if err != nil {
-			WriteErrorResponse(w, r, err)
+			if isSSE {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.WriteHeader(http.StatusOK)
+				_, _ = fmt.Fprintf(w, "event: next\ndata: {\"errors\":[{\"message\":%q}]}\n\n", err.Error())
+				_, _ = fmt.Fprintf(w, "event: complete\ndata: \n\n")
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+			} else {
+				WriteErrorResponse(w, r, err)
+			}
 			return
 		}
 
@@ -348,6 +360,10 @@ func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				flusher.Flush()
 			case data, ok := <-subResp.UpdateCh:
 				if !ok {
+					if isSSE {
+						_, _ = fmt.Fprintf(w, "event: complete\ndata: \n\n")
+						flusher.Flush()
+					}
 					return
 				}
 				jsonData, err := json.Marshal(data)
@@ -356,7 +372,7 @@ func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 
 				if isSSE {
-					_, _ = fmt.Fprintf(w, "data: %s\n\n", string(jsonData))
+					_, _ = fmt.Fprintf(w, "event: next\ndata: %s\n\n", string(jsonData))
 				} else {
 					_, _ = fmt.Fprintf(w, "\r\n---\r\nContent-Type: application/json\r\n\r\n%s\r\n", string(jsonData))
 				}
