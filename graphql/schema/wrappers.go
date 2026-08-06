@@ -224,6 +224,7 @@ type Field interface {
 	// GetAuthMeta returns the Dgraph.Authorization meta information stored in schema
 	GetAuthMeta() *authorization.AuthMeta
 	BypassAuth() bool
+	BypassAuthExcept() []string
 	LookupStrategy() string
 }
 
@@ -342,6 +343,7 @@ type FieldDefinition interface {
 	GetAuthMeta() *authorization.AuthMeta
 	LookupStrategy() string
 	BypassAuth() bool
+	BypassAuthExcept() []string
 }
 
 type astType struct {
@@ -1206,6 +1208,25 @@ func (f *field) BypassAuth() bool {
 	return f.field.Definition.Directives.ForName(bypassAuthDirective) != nil
 }
 
+func (f *field) BypassAuthExcept() []string {
+	if f.field == nil || f.field.Definition == nil {
+		return nil
+	}
+	dir := f.field.Definition.Directives.ForName(bypassAuthDirective)
+	if dir == nil {
+		return nil
+	}
+	v := dir.Arguments.ForName("except")
+	if v == nil {
+		return nil
+	}
+	var except []string
+	for _, item := range v.Value.Children {
+		except = append(except, item.Value.Raw)
+	}
+	return except
+}
+
 func (f *field) LookupStrategy() string {
 	if f.field == nil || f.field.Definition == nil {
 		return ""
@@ -1784,6 +1805,10 @@ func (q *query) GetAuthMeta() *authorization.AuthMeta {
 
 func (q *query) BypassAuth() bool {
 	return (*field)(q).BypassAuth()
+}
+
+func (q *query) BypassAuthExcept() []string {
+	return (*field)(q).BypassAuthExcept()
 }
 
 func (q *query) LookupStrategy() string {
@@ -2379,6 +2404,10 @@ func (m *mutation) GetAuthMeta() *authorization.AuthMeta {
 
 func (m *mutation) BypassAuth() bool {
 	return (*field)(m).BypassAuth()
+}
+
+func (m *mutation) BypassAuthExcept() []string {
+	return (*field)(m).BypassAuthExcept()
 }
 
 func (m *mutation) LookupStrategy() string {
@@ -4272,6 +4301,25 @@ func (fd *fieldDefinition) BypassAuth() bool {
 		return false
 	}
 	return fd.fieldDef.Directives.ForName(bypassAuthDirective) != nil
+}
+
+func (fd *fieldDefinition) BypassAuthExcept() []string {
+	if fd == nil || fd.fieldDef == nil {
+		return nil
+	}
+	dir := fd.fieldDef.Directives.ForName(bypassAuthDirective)
+	if dir == nil {
+		return nil
+	}
+	v := dir.Arguments.ForName("except")
+	if v == nil {
+		return nil
+	}
+	var except []string
+	for _, item := range v.Value.Children {
+		except = append(except, item.Value.Raw)
+	}
+	return except
 }
 
 func (t *astType) Name() string {

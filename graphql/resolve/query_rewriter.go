@@ -3581,9 +3581,17 @@ func addSelectionSetFrom(
 		addOrder(child, f)
 		addPagination(child, f)
 		addCascadeDirective(child, f)
+		oldSelector := auth.selector
 		rbac := auth.evaluateStaticRules(f.Type())
-		if f.BypassAuth() {
+		exceptRules := f.BypassAuthExcept()
+		if f.BypassAuth() && len(exceptRules) == 0 {
 			rbac = schema.Positive
+		}
+		if f.BypassAuth() && len(exceptRules) > 0 {
+			rbac = schema.Uncertain
+			auth.selector = func(t schema.Type) *schema.RuleNode {
+				return schema.FilterRuleNode(oldSelector(t), exceptRules)
+			}
 		}
 
 		// Since the recursion processes the query in bottom up way, we store the state of the so
@@ -3602,6 +3610,7 @@ func addSelectionSetFrom(
 		}
 
 		restoreAuthState := func() {
+			auth.selector = oldSelector
 			if len(f.SelectionSet()) > 0 && !auth.isWritingAuth && auth.hasAuthRules {
 				// Restore the auth state after processing is done.
 				auth.parentVarName = parentVarName
@@ -4271,9 +4280,18 @@ func buildFilter(typ schema.Type,
 						}
 
 						rbac := wr.evaluateStaticRules(fd.Type())
-						if fd.BypassAuth() {
+						exceptRules := fd.BypassAuthExcept()
+						if fd.BypassAuth() && len(exceptRules) == 0 {
 							rbac = schema.Positive
 						}
+						if fd.BypassAuth() && len(exceptRules) > 0 {
+							rbac = schema.Uncertain
+							originalSelector := wr.selector
+							wr.selector = func(t schema.Type) *schema.RuleNode {
+								return schema.FilterRuleNode(originalSelector(t), exceptRules)
+							}
+						}
+
 						if rbac == schema.Uncertain {
 							authQrys, nestedAuthVarSubst := wr.addAuthQueries(fd.Type(), nestedQrys, rbac)
 							if len(nestedAuthVarSubst) > 0 {
@@ -4342,9 +4360,18 @@ func buildFilter(typ schema.Type,
 						}
 
 						rbac := wr.evaluateStaticRules(fd.Type())
-						if fd.BypassAuth() {
+						exceptRules := fd.BypassAuthExcept()
+						if fd.BypassAuth() && len(exceptRules) == 0 {
 							rbac = schema.Positive
 						}
+						if fd.BypassAuth() && len(exceptRules) > 0 {
+							rbac = schema.Uncertain
+							originalSelector := wr.selector
+							wr.selector = func(t schema.Type) *schema.RuleNode {
+								return schema.FilterRuleNode(originalSelector(t), exceptRules)
+							}
+						}
+
 						if rbac == schema.Uncertain {
 							authQrys, nestedAuthVarSubst := wr.addAuthQueries(fd.Type(), nestedQrys, rbac)
 							if len(nestedAuthVarSubst) > 0 {

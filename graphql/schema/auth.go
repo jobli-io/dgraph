@@ -406,7 +406,7 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 
 				authRules[name].Rules = mergeAuthRulesWithPolicy(
 					authRules[name].Rules,
-					authRules[interfaceName].Rules,
+					cloneWithCascadeRootType(authRules[interfaceName].Rules, interfaceName),
 					defaultMergeOp,
 					entry, hasEntry,
 				)
@@ -581,7 +581,7 @@ func mergePostCascadeInterfaceAuth(sch *schema, authRules map[string]*TypeAuth) 
 				// applied regardless of the type's own cascadeAuthPolicy.
 				ta.Rules = mergeAuthRulesWithPolicy(
 					ta.Rules,
-					ifaceAuth.Rules,
+					cloneWithCascadeRootType(ifaceAuth.Rules, ifaceName),
 					"and",
 					interfacePolicyEntry{}, false,
 				)
@@ -750,6 +750,45 @@ func mergeAuthNodeWithAnd(objectAuth, interfaceAuth *RuleNode) *RuleNode {
 	ruleNode := &RuleNode{}
 	ruleNode.And = append(ruleNode.And, objectAuth, interfaceAuth)
 	return ruleNode
+}
+
+func cloneWithCascadeRootType(ac *AuthContainer, rootType string) *AuthContainer {
+	if ac == nil {
+		return nil
+	}
+	return &AuthContainer{
+		Password: setCascadeRootTypeOnNode(ac.Password, rootType),
+		Query:    setCascadeRootTypeOnNode(ac.Query, rootType),
+		Add:      setCascadeRootTypeOnNode(ac.Add, rootType),
+		Delete:   setCascadeRootTypeOnNode(ac.Delete, rootType),
+		Update:   setCascadeRootTypeOnNode(ac.Update, rootType),
+	}
+}
+
+func setCascadeRootTypeOnNode(rn *RuleNode, rootType string) *RuleNode {
+	if rn == nil {
+		return nil
+	}
+	cloned := cloneRuleNode(rn)
+	var walk func(*RuleNode)
+	walk = func(node *RuleNode) {
+		if node == nil {
+			return
+		}
+		if node.CascadeRootType == "" {
+			node.CascadeRootType = rootType
+		}
+		for _, child := range node.And {
+			walk(child)
+		}
+		for _, child := range node.Or {
+			walk(child)
+		}
+		walk(node.Not)
+		walk(node.CascadeWrapInner)
+	}
+	walk(cloned)
+	return cloned
 }
 
 // interfacePolicyEntry stores the per-interface merge policy parsed from
@@ -1342,4 +1381,130 @@ func gqlValidateRule(sch *schema, typ *ast.Definition, rule string, node *RuleNo
 		sel:   op.SelectionSet[0]}
 	node.Variables = op.VariableDefinitions
 	return nil
+}
+
+// FilterRuleNode clones and filters a RuleNode tree, retaining only the rules
+// matching the except criteria (by type, interface, or cascade edge predicate).
+func FilterRuleNode(rn *RuleNode, except []string) *RuleNode {
+	if rn == nil || len(except) == 0 {
+		return nil
+	}
+
+	matchesExcept := func(ex string) bool {
+		// 1. Leading Dot Shorthand (e.g., ".application" -> matches field only)
+		if strings.HasPrefix(ex, ".") {
+			fieldName := strings.TrimPrefix(ex, ".")
+			if rn.CascadeEdgePred != "" {
+				parts := strings.Split(rn.CascadeEdgePred, ".")
+				if len(parts) == 2 && parts[1] == fieldName {
+					return true
+				}
+			}
+			return false
+		}
+
+		// 2. Fully Qualified Path Match (e.g., "Candidate.application")
+		if strings.Contains(ex, ".") {
+			return rn.CascadeEdgePred == ex
+		}
+
+		// 3. Bare Type/Interface Name Match (e.g., "application")
+		if rn.CascadeRootType == ex || rn.CascadeWrapType == ex {
+			return true
+		}
+
+		// 4. Bare Field Name Match (e.g., "application" -> matches both type and field)
+		if rn.CascadeEdgePred != "" {
+			parts := strings.Split(rn.CascadeEdgePred, ".")
+			if len(parts) == 2 && parts[1] == ex {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	anyMatch := func() bool {
+		for _, ex := range except {
+			if matchesExcept(ex) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// If the current node matches, we preserve it (cloned to be safe against mutation of shared rule trees)
+	if anyMatch() {
+		return cloneRuleNode(rn)
+	}
+
+	// Recursively process composite AND/OR blocks
+	var keptAnd []*RuleNode
+	for _, child := range rn.And {
+		if filtered := FilterRuleNode(child, except); filtered != nil {
+			keptAnd = append(keptAnd, filtered)
+		}
+	}
+	if len(keptAnd) > 0 {
+		return &RuleNode{
+			And:                    keptAnd,
+			CascadeRootType:        rn.CascadeRootType,
+			CascadeAuthAggregation: rn.CascadeAuthAggregation,
+		}
+	}
+
+	var keptOr []*RuleNode
+	for _, child := range rn.Or {
+		if filtered := FilterRuleNode(child, except); filtered != nil {
+			keptOr = append(keptOr, filtered)
+		}
+	}
+	if len(keptOr) > 0 {
+		return &RuleNode{
+			Or:                     keptOr,
+			CascadeRootType:        rn.CascadeRootType,
+			CascadeAuthAggregation: rn.CascadeAuthAggregation,
+		}
+	}
+
+	// Process wrap inner rules
+	if rn.CascadeWrapInner != nil {
+		if filteredInner := FilterRuleNode(rn.CascadeWrapInner, except); filteredInner != nil {
+			return &RuleNode{
+				CascadeWrapPred:    rn.CascadeWrapPred,
+				CascadeWrapType:    rn.CascadeWrapType,
+				CascadeWrapInner:   filteredInner,
+				CascadeWrapReverse: rn.CascadeWrapReverse,
+			}
+		}
+	}
+
+	return nil
+}
+
+// cloneRuleNode deep-copies a RuleNode tree to prevent shared pointer mutation.
+func cloneRuleNode(rn *RuleNode) *RuleNode {
+	if rn == nil {
+		return nil
+	}
+	cloned := *rn
+	if rn.And != nil {
+		cloned.And = make([]*RuleNode, len(rn.And))
+		for i, child := range rn.And {
+			cloned.And[i] = cloneRuleNode(child)
+		}
+	}
+	if rn.Or != nil {
+		cloned.Or = make([]*RuleNode, len(rn.Or))
+		for i, child := range rn.Or {
+			cloned.Or[i] = cloneRuleNode(child)
+		}
+	}
+	if rn.Not != nil {
+		cloned.Not = cloneRuleNode(rn.Not)
+	}
+	if rn.CascadeWrapInner != nil {
+		cloned.CascadeWrapInner = cloneRuleNode(rn.CascadeWrapInner)
+	}
+	return &cloned
 }

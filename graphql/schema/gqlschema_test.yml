@@ -3831,6 +3831,57 @@ invalid_schemas:
         },
       ]
 
+  - name: "invalid @bypassAuth directive exceptions"
+    input: |
+      type Candidate @auth(query: { rule: "{$role: {eq: \"ADMIN\"}}" }) {
+        id: ID!
+        name: String!
+        application: [Application!]
+      }
+      type Application {
+        id: ID!
+        status: String!
+      }
+      type Query {
+        myCustomQuery: [Candidate!] @custom(http: { url: "https://api.example.com", method: GET }) @bypassAuth(except: [
+          "NonExistentType",
+          "Candidate.nonExistentField",
+          ".nonExistentField",
+          "Candidate.application.tooDeep"
+        ])
+      }
+    errlist:
+      [
+        {
+          "message":
+            "Type Query; Field myCustomQuery: @bypassAuth excepts 'NonExistentType', but
+            'NonExistentType' is not a valid type, interface, or field name on target type
+            'Candidate'.",
+          "locations": [{ "line": 11, "column": 95 }],
+        },
+        {
+          "message":
+            "Type Query; Field myCustomQuery: @bypassAuth excepts fully qualified path
+            'Candidate.nonExistentField', but it must follow the format 'Candidate.relation_field'
+            where field exists on target type.",
+          "locations": [{ "line": 11, "column": 95 }],
+        },
+        {
+          "message":
+            "Type Query; Field myCustomQuery: @bypassAuth excepts field shorthand
+            '.nonExistentField', but 'nonExistentField' is not a valid relationship field on target
+            type 'Candidate'.",
+          "locations": [{ "line": 11, "column": 95 }],
+        },
+        {
+          "message":
+            "Type Query; Field myCustomQuery: @bypassAuth excepts fully qualified path
+            'Candidate.application.tooDeep', but it must follow the format
+            'Candidate.relation_field' where field exists on target type.",
+          "locations": [{ "line": 11, "column": 95 }],
+        },
+      ]
+
 valid_schemas:
   - name: "@postValidate with valid callLambda expr is accepted"
     input: |
@@ -4419,4 +4470,23 @@ valid_schemas:
       type LibraryManager {
         name: String! @id
         manages: [LibraryMember]
+      }
+
+  - name: "valid @bypassAuth directive exceptions"
+    input: |
+      type Candidate @auth(query: { rule: "{$role: {eq: \"ADMIN\"}}" }) {
+        id: ID!
+        name: String!
+        application: [Application!]
+      }
+      type Application {
+        id: ID!
+        status: String!
+      }
+      type Query {
+        myCustomQuery: [Candidate!] @custom(http: { url: "https://api.example.com", method: GET }) @bypassAuth(except: [
+          "application",
+          ".application",
+          "Candidate.application"
+        ])
       }

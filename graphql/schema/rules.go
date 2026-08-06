@@ -3254,3 +3254,80 @@ func isQueryOrMutationType(typ *ast.Definition) bool {
 func isQueryOrMutation(name string) bool {
 	return name == "Query" || name == "Mutation"
 }
+
+func bypassAuthValidation(
+	sch *ast.Schema,
+	typ *ast.Definition,
+	field *ast.FieldDefinition,
+	dir *ast.Directive,
+	secrets map[string]x.Sensitive) gqlerror.List {
+
+	exceptArg := dir.Arguments.ForName("except")
+	if exceptArg == nil {
+		return nil
+	}
+
+	targetTypeName := field.Type.Name()
+	targetTypeDef := sch.Types[targetTypeName]
+	if targetTypeDef == nil {
+		return nil
+	}
+
+	validIdentifiers := make(map[string]bool)
+	validFields := make(map[string]bool)
+	validIdentifiers[targetTypeName] = true
+
+	// Add implemented interfaces (e.g., CommonWorkspaceMember)
+	for _, ifaceName := range targetTypeDef.Interfaces {
+		validIdentifiers[ifaceName] = true
+	}
+
+	// Add relationship fields carrying @cascadeAuth
+	for _, f := range targetTypeDef.Fields {
+		validIdentifiers[f.Name] = true
+		validFields[f.Name] = true
+	}
+
+	var errs []*gqlerror.Error
+	for _, item := range exceptArg.Value.Children {
+		exceptValue := item.Value.Raw
+
+		var pos *ast.Position
+		if item.Position != nil {
+			pos = item.Position
+		} else {
+			pos = dir.Position
+		}
+
+		// 1. Shorthand Match (".application")
+		if strings.HasPrefix(exceptValue, ".") {
+			fieldName := strings.TrimPrefix(exceptValue, ".")
+			if !validFields[fieldName] {
+				errs = append(errs, gqlerror.ErrorPosf(pos,
+					"Type %s; Field %s: @bypassAuth excepts field shorthand '%s', but '%s' is not a valid relationship field on target type '%s'.",
+					typ.Name, field.Name, exceptValue, fieldName, targetTypeName))
+			}
+			continue
+		}
+
+		// 2. Fully Qualified Path Match ("Candidate.application")
+		if strings.Contains(exceptValue, ".") {
+			parts := strings.Split(exceptValue, ".")
+			if len(parts) != 2 || parts[0] != targetTypeName || !validFields[parts[1]] {
+				errs = append(errs, gqlerror.ErrorPosf(pos,
+					"Type %s; Field %s: @bypassAuth excepts fully qualified path '%s', but it must follow the format '%s.relation_field' where field exists on target type.",
+					typ.Name, field.Name, exceptValue, targetTypeName))
+			}
+			continue
+		}
+
+		// 3. Bare Identifier Match ("application")
+		if !validIdentifiers[exceptValue] {
+			errs = append(errs, gqlerror.ErrorPosf(pos,
+				"Type %s; Field %s: @bypassAuth excepts '%s', but '%s' is not a valid type, interface, or field name on target type '%s'.",
+				typ.Name, field.Name, exceptValue, exceptValue, targetTypeName))
+		}
+	}
+
+	return errs
+}
