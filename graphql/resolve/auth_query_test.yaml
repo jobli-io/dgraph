@@ -1258,7 +1258,7 @@
       UserRoot as var(func: uid(User_4))
       User_4 as var(func: type(User))
       var(func: uid(UserRoot)) {
-        TicketAggregateResult_2 as User.tickets @filter((anyofterms(Ticket.title, "graphql") AND uid_in(Ticket.onColumn, uid(UserRoot))))
+        TicketAggregateResult_2 as User.tickets @filter((anyofterms(Ticket.title, "graphql") AND uid_in(Ticket.assignedTo, uid(UserRoot))))
       }
       Ticket_Auth3 as var(func: uid(TicketAggregateResult_2)) @cascade {
         Ticket.onColumn : Ticket.onColumn {
@@ -1314,7 +1314,7 @@
       UserRoot as var(func: uid(User_10))
       User_10 as var(func: type(User))
       var(func: uid(UserRoot)) {
-        TicketAggregateResult_2 as User.tickets @filter((anyofterms(Ticket.title, "graphql") AND uid_in(Ticket.onColumn, uid(UserRoot))))
+        TicketAggregateResult_2 as User.tickets @filter((anyofterms(Ticket.title, "graphql") AND uid_in(Ticket.assignedTo, uid(UserRoot))))
       }
       Ticket_Auth3 as var(func: uid(TicketAggregateResult_2)) @cascade {
         Ticket.onColumn : Ticket.onColumn {

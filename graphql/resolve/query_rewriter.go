@@ -3291,8 +3291,30 @@ func buildAggregateFields(
 			for _, fd := range f.ConstructedFor().Fields() {
 				if inv := fd.Inverse(); inv != nil {
 					if inv.Name() == parentFieldName {
-						invField = fd
-						break
+						// Ensure that the inverse field's parent type matches or is implemented by the current field's container type.
+						isMatch := false
+						invParent := inv.ParentType()
+						if invParent.Name() == f.GetObjectName() {
+							isMatch = true
+						} else if invParent.IsInterface() {
+							for _, impl := range invParent.ImplementingTypes() {
+								if impl.Name() == f.GetObjectName() {
+									isMatch = true
+									break
+								}
+							}
+						} else if invParent.IsUnion() {
+							for _, member := range invParent.UnionMembers(nil) {
+								if member.Name() == f.GetObjectName() {
+									isMatch = true
+									break
+								}
+							}
+						}
+						if isMatch {
+							invField = fd
+							break
+						}
 					}
 				}
 			}

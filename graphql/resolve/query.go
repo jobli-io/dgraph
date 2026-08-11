@@ -113,6 +113,17 @@ func (qr *queryResolver) rewriteAndExecute(ctx context.Context, query schema.Que
 		}
 	}
 
+	if query.QueryType() == schema.GetQuery {
+		xid, uid, err := query.IDArgValue()
+		if err == nil && len(xid) == 0 && uid == 0 {
+			return &Resolved{
+				Data:       query.NullResponse(),
+				Field:      query,
+				Extensions: ext,
+			}
+		}
+	}
+
 	dgQuery, err := qr.queryRewriter.Rewrite(ctx, query)
 	if err != nil {
 		return emptyResult(schema.GQLWrapf(err, "couldn't rewrite query %s",
