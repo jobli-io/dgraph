@@ -181,6 +181,8 @@ type Field interface {
 	// HasCustomHTTPChild tells whether any descendent of this field has @custom(http: {...}) on it.
 	HasCustomHTTPChild() bool
 	HasLambdaDirective() bool
+	HasPassiveSubscriptionSchema() bool
+	HasPassiveSubscriptionQuery() bool
 	Type() Type
 	IsExternal() bool
 	SelectionSet() []Field
@@ -1419,6 +1421,28 @@ func (f *field) IsCustomHTTP() bool {
 	return custom.Arguments.ForName(httpArg) != nil
 }
 
+func (f *field) HasPassiveSubscriptionSchema() bool {
+	if f.op == nil || f.op.inSchema == nil || f.op.inSchema.schema == nil {
+		return false
+	}
+	typ, ok := f.op.inSchema.schema.Types[f.GetObjectName()]
+	if !ok {
+		return false
+	}
+	fld := typ.Fields.ForName(f.Name())
+	if fld == nil {
+		return false
+	}
+	return fld.Directives.ForName("passiveSubscription") != nil
+}
+
+func (f *field) HasPassiveSubscriptionQuery() bool {
+	if f.field == nil {
+		return false
+	}
+	return f.field.Directives.ForName("passiveSubscription") != nil
+}
+
 func (f *field) HasCustomHTTPChild() bool {
 	// let's see if we have already calculated whether this field has any custom http children
 	if f.hasCustomHTTPChild != nil {
@@ -1968,6 +1992,14 @@ func (q *query) HasLambdaDirective() bool {
 	return (*field)(q).HasLambdaDirective()
 }
 
+func (q *query) HasPassiveSubscriptionSchema() bool {
+	return (*field)(q).HasPassiveSubscriptionSchema()
+}
+
+func (q *query) HasPassiveSubscriptionQuery() bool {
+	return (*field)(q).HasPassiveSubscriptionQuery()
+}
+
 func (q *query) IDArgValue() (map[string]string, uint64, error) {
 	return (*field)(q).IDArgValue()
 }
@@ -2247,6 +2279,14 @@ func (m *mutation) HasCustomHTTPChild() bool {
 
 func (m *mutation) HasLambdaDirective() bool {
 	return (*field)(m).HasLambdaDirective()
+}
+
+func (m *mutation) HasPassiveSubscriptionSchema() bool {
+	return (*field)(m).HasPassiveSubscriptionSchema()
+}
+
+func (m *mutation) HasPassiveSubscriptionQuery() bool {
+	return (*field)(m).HasPassiveSubscriptionQuery()
 }
 
 func (m *mutation) Type() Type {

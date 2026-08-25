@@ -29,26 +29,27 @@ const (
 	dgraphPredArg      = "pred"
 	embeddingDirective = "embedding"
 
-	idDirective                = "id"
-	idDirectiveInterfaceArg    = "interface"
-	subscriptionDirective      = "withSubscription"
-	secretDirective            = "secret"
-	authDirective              = "auth"
-	customDirective            = "custom"
-	remoteDirective            = "remote" // types with this directive are not stored in Dgraph.
-	remoteResponseDirective    = "remoteResponse"
-	lambdaDirective            = "lambda"
-	lambdaOnMutateDirective    = "lambdaOnMutate"
-	defaultDirective           = "default"
-	transformDirective         = "transform"
-	validateDirective          = "validate"
-	postValidateDirective      = "postValidate"
-	oldValueDirective          = "oldValue"
-	cascadeDeleteDirective     = "cascadeDelete"
-	cascadeAuthDirective       = "cascadeAuth"
-	cascadeAuthPolicyDirective = "cascadeAuthPolicy"
-	authVariablesDirective     = "authVariables"
-	bypassAuthDirective        = "bypassAuth"
+	idDirective                  = "id"
+	idDirectiveInterfaceArg      = "interface"
+	subscriptionDirective        = "withSubscription"
+	secretDirective              = "secret"
+	authDirective                = "auth"
+	customDirective              = "custom"
+	remoteDirective              = "remote" // types with this directive are not stored in Dgraph.
+	remoteResponseDirective      = "remoteResponse"
+	lambdaDirective              = "lambda"
+	lambdaOnMutateDirective      = "lambdaOnMutate"
+	defaultDirective             = "default"
+	transformDirective           = "transform"
+	validateDirective            = "validate"
+	postValidateDirective        = "postValidate"
+	oldValueDirective            = "oldValue"
+	cascadeDeleteDirective       = "cascadeDelete"
+	cascadeAuthDirective         = "cascadeAuth"
+	cascadeAuthPolicyDirective   = "cascadeAuthPolicy"
+	authVariablesDirective       = "authVariables"
+	bypassAuthDirective          = "bypassAuth"
+	passiveSubscriptionDirective = "passiveSubscription"
 
 	generateDirective       = "generate"
 	generateQueryArg        = "query"
@@ -362,6 +363,7 @@ directive @remoteResponse(name: String) on FIELD_DEFINITION
 directive @cascade(fields: [String]) on FIELD
 directive @lambda on FIELD_DEFINITION
 directive @lambdaOnMutate(add: Boolean, update: Boolean, delete: Boolean) on OBJECT | INTERFACE
+directive @passiveSubscription on FIELD_DEFINITION | FIELD
 directive @cacheControl(maxAge: Int!) on QUERY
 directive @generate(
 	query: GenerateQueryParams,
@@ -392,6 +394,7 @@ directive @remote on OBJECT | INTERFACE | UNION | INPUT_OBJECT | ENUM
 directive @remoteResponse(name: String) on FIELD_DEFINITION
 directive @lambda on FIELD_DEFINITION
 directive @lambdaOnMutate(add: Boolean, update: Boolean, delete: Boolean) on OBJECT | INTERFACE
+directive @passiveSubscription on FIELD_DEFINITION | FIELD
 `
 	filterInputs = `
 input IntFilter {
@@ -684,14 +687,15 @@ var directiveValidators = map[string]directiveValidator{
 	cascadeAuthPolicyDirective: ValidatorNoOp,
 	bypassAuthDirective:        bypassAuthValidation,
 
-	lambdaOnMutateDirective: ValidatorNoOp,
-	generateDirective:       ValidatorNoOp,
-	apolloKeyDirective:      ValidatorNoOp,
-	apolloExtendsDirective:  ValidatorNoOp,
-	apolloExternalDirective: apolloExternalValidation,
-	apolloRequiresDirective: apolloRequiresValidation,
-	apolloProvidesDirective: apolloProvidesValidation,
-	remoteResponseDirective: remoteResponseValidation,
+	lambdaOnMutateDirective:      ValidatorNoOp,
+	generateDirective:            ValidatorNoOp,
+	apolloKeyDirective:           ValidatorNoOp,
+	apolloExtendsDirective:       ValidatorNoOp,
+	apolloExternalDirective:      apolloExternalValidation,
+	apolloRequiresDirective:      apolloRequiresValidation,
+	apolloProvidesDirective:      apolloProvidesValidation,
+	remoteResponseDirective:      remoteResponseValidation,
+	passiveSubscriptionDirective: ValidatorNoOp,
 }
 
 // directiveLocationMap stores the directives and their locations for the ones which can be
@@ -707,19 +711,20 @@ var directiveLocationMap = map[string]map[ast.DefinitionKind]bool{
 	customDirective:       nil,
 	remoteDirective: {ast.Object: true, ast.Interface: true, ast.Union: true,
 		ast.InputObject: true, ast.Enum: true},
-	lambdaDirective:            nil,
-	lambdaOnMutateDirective:    {ast.Object: true, ast.Interface: true},
-	postValidateDirective:      {ast.Object: true, ast.Interface: true},
-	cascadeAuthPolicyDirective: {ast.Object: true, ast.Interface: true},
-	authVariablesDirective:     {ast.Object: true, ast.Interface: true},
-	generateDirective:          {ast.Object: true, ast.Interface: true},
-	apolloKeyDirective:         {ast.Object: true, ast.Interface: true},
-	apolloExtendsDirective:     {ast.Object: true, ast.Interface: true},
-	apolloExternalDirective:    nil,
-	apolloRequiresDirective:    nil,
-	apolloProvidesDirective:    nil,
-	remoteResponseDirective:    nil,
-	cascadeDirective:           nil,
+	lambdaDirective:              nil,
+	lambdaOnMutateDirective:      {ast.Object: true, ast.Interface: true},
+	postValidateDirective:        {ast.Object: true, ast.Interface: true},
+	cascadeAuthPolicyDirective:   {ast.Object: true, ast.Interface: true},
+	authVariablesDirective:       {ast.Object: true, ast.Interface: true},
+	generateDirective:            {ast.Object: true, ast.Interface: true},
+	apolloKeyDirective:           {ast.Object: true, ast.Interface: true},
+	apolloExtendsDirective:       {ast.Object: true, ast.Interface: true},
+	apolloExternalDirective:      nil,
+	apolloRequiresDirective:      nil,
+	apolloProvidesDirective:      nil,
+	remoteResponseDirective:      nil,
+	cascadeDirective:             nil,
+	passiveSubscriptionDirective: nil,
 }
 
 // Struct to store parameters of @generate directive

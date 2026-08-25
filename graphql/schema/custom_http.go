@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
@@ -118,8 +119,38 @@ func (fconf *FieldHTTPConfig) MakeAndDecodeHTTPRequest(client *http.Client, url 
 			// if we get unsuccessful response from the REST api, lets try to see if
 			// it sent any errors in the form expected for GraphQL errors.
 			if err = Unmarshal(b, &graphqlResp); err != nil {
-				err = fmt.Errorf("unexpected error with: %v", resp.StatusCode)
-				return nil, nil, x.GqlErrorList{externalRequestError(err, field)}
+				// Fallback: if body is plain-text (or not valid JSON), wrap the trimmed raw body as the error message.
+				rawBody := string(bytes.TrimSpace(b))
+				if strings.HasPrefix(rawBody, "<!DOCTYPE html>") {
+					preStart := strings.Index(rawBody, "<pre>")
+					preEnd := strings.Index(rawBody, "</pre>")
+					if preStart != -1 && preEnd != -1 && preEnd > preStart {
+						rawBody = rawBody[preStart+5 : preEnd]
+						rawBody = strings.ReplaceAll(rawBody, "&#39;", "'")
+						rawBody = strings.ReplaceAll(rawBody, "&quot;", "\"")
+						rawBody = strings.ReplaceAll(rawBody, "&lt;", "<")
+						rawBody = strings.ReplaceAll(rawBody, "&gt;", ">")
+						rawBody = strings.ReplaceAll(rawBody, "&amp;", "&")
+						rawBody = strings.ReplaceAll(rawBody, "&nbsp;", " ")
+						rawBody = strings.ReplaceAll(rawBody, "<br>", "\n")
+					}
+				}
+				rawBody = strings.TrimSpace(rawBody)
+				if rawBody == "" {
+					rawBody = fmt.Sprintf("unexpected error with: %v", resp.StatusCode)
+				} else {
+					// If the error message contains multiple lines (e.g. stack trace), isolate the first line.
+					if idx := strings.Index(rawBody, "\n"); idx != -1 {
+						rawBody = strings.TrimSpace(rawBody[:idx])
+					}
+					// Strip standard 'Error: ' JS prefix to clean up the message
+					rawBody = strings.TrimPrefix(rawBody, "Error: ")
+					rawBody = strings.TrimSpace(rawBody)
+				}
+				if len(rawBody) > 500 {
+					rawBody = rawBody[:500] + "..."
+				}
+				return nil, nil, x.GqlErrorList{field.GqlErrorf(nil, "%s", rawBody)}
 			} else {
 				return nil, nil, graphqlResp.Errors
 			}

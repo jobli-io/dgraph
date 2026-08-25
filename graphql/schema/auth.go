@@ -269,6 +269,7 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 		if auth != nil {
 			authRules[name].Rules, err = parseAuthDirective(sch, typ, auth)
 			errResult = AppendGQLErrs(errResult, err)
+			authRules[name].Rules = cloneWithCascadeRootType(authRules[name].Rules, name)
 		}
 
 		for _, field := range typ.Fields {
@@ -276,6 +277,7 @@ func authRules(sch *schema) (map[string]*TypeAuth, error) {
 			if auth != nil {
 				authRules[name].Fields[field.Name], err = parseAuthDirective(sch, typ, auth)
 				errResult = AppendGQLErrs(errResult, err)
+				authRules[name].Fields[field.Name] = cloneWithCascadeRootType(authRules[name].Fields[field.Name], name)
 			}
 		}
 	}
@@ -682,6 +684,7 @@ func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string]string, ty
 		// "query" keyword. Use HasPrefix on the trimmed string so that
 		// GQL query bodies (which contain many "{" characters) are not
 		// mistakenly routed through the RBAC parse path.
+		node := cloneRuleNode(rn)
 		if strings.HasPrefix(strings.TrimSpace(substituted), RBACQueryPrefix) {
 			// Became an RBAC rule — parse it.
 			typ := sch.schema.Types[typeName]
@@ -692,7 +695,8 @@ func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string]string, ty
 			if err != nil {
 				return rn // parse failed — leave as-is
 			}
-			return &RuleNode{RBACRule: rbac, RuleTemplate: rn.RuleTemplate}
+			node.RBACRule = rbac
+			return node
 		}
 		// Attempt GraphQL parse. gqlValidateRule populates ast.Field.Definition on
 		// every field via validator.Validate — this is required so that ArgumentMap()
@@ -703,7 +707,6 @@ func resolveTemplateLeaves(sch *schema, rn *RuleNode, vars map[string]string, ty
 		// strict validator, or the type's query name doesn't match), leave rn.Rule==nil.
 		// The resubstituteRuleNode fallback (rn.Rule != nil) handles this correctly:
 		// it skips re-substitution and returns nil for this cascade arm, which is safe.
-		node := &RuleNode{RuleTemplate: rn.RuleTemplate}
 		// Use inferQueriedTypeDef rather than sch.schema.Types[typeName] directly.
 		// Interface auth rules (e.g. IAMResource's "queryIAMResource(...)")
 		// query a different type than the concrete type they've been merged into.
@@ -1433,50 +1436,73 @@ func FilterRuleNode(rn *RuleNode, except []string) *RuleNode {
 		return false
 	}
 
-	// If the current node matches, we preserve it (cloned to be safe against mutation of shared rule trees)
-	if anyMatch() {
-		return cloneRuleNode(rn)
-	}
-
-	// Recursively process composite AND/OR blocks
-	var keptAnd []*RuleNode
-	for _, child := range rn.And {
-		if filtered := FilterRuleNode(child, except); filtered != nil {
-			keptAnd = append(keptAnd, filtered)
-		}
-	}
-	if len(keptAnd) > 0 {
-		return &RuleNode{
-			And:                    keptAnd,
-			CascadeRootType:        rn.CascadeRootType,
-			CascadeAuthAggregation: rn.CascadeAuthAggregation,
-		}
-	}
-
-	var keptOr []*RuleNode
-	for _, child := range rn.Or {
-		if filtered := FilterRuleNode(child, except); filtered != nil {
-			keptOr = append(keptOr, filtered)
-		}
-	}
-	if len(keptOr) > 0 {
-		return &RuleNode{
-			Or:                     keptOr,
-			CascadeRootType:        rn.CascadeRootType,
-			CascadeAuthAggregation: rn.CascadeAuthAggregation,
-		}
-	}
-
-	// Process wrap inner rules
-	if rn.CascadeWrapInner != nil {
-		if filteredInner := FilterRuleNode(rn.CascadeWrapInner, except); filteredInner != nil {
-			return &RuleNode{
-				CascadeWrapPred:    rn.CascadeWrapPred,
-				CascadeWrapType:    rn.CascadeWrapType,
-				CascadeWrapInner:   filteredInner,
-				CascadeWrapReverse: rn.CascadeWrapReverse,
+	// Recursively process composite AND/OR blocks so mixed-rule branches are individually filtered.
+	if len(rn.And) > 0 {
+		var keptAnd []*RuleNode
+		for _, child := range rn.And {
+			if filtered := FilterRuleNode(child, except); filtered != nil {
+				keptAnd = append(keptAnd, filtered)
 			}
 		}
+		if len(keptAnd) > 0 {
+			return &RuleNode{
+				And:                    keptAnd,
+				CascadeRootType:        rn.CascadeRootType,
+				CascadeAuthAggregation: rn.CascadeAuthAggregation,
+			}
+		}
+		return nil
+	}
+
+	if len(rn.Or) > 0 {
+		var keptOr []*RuleNode
+		for _, child := range rn.Or {
+			if filtered := FilterRuleNode(child, except); filtered != nil {
+				keptOr = append(keptOr, filtered)
+			}
+		}
+		if len(keptOr) > 0 {
+			return &RuleNode{
+				Or:                     keptOr,
+				CascadeRootType:        rn.CascadeRootType,
+				CascadeAuthAggregation: rn.CascadeAuthAggregation,
+			}
+		}
+		return nil
+	}
+
+	if rn.Not != nil {
+		if filteredNot := FilterRuleNode(rn.Not, except); filteredNot != nil {
+			return &RuleNode{
+				Not:                    filteredNot,
+				CascadeRootType:        rn.CascadeRootType,
+				CascadeAuthAggregation: rn.CascadeAuthAggregation,
+			}
+		}
+		return nil
+	}
+
+	// For wrap nodes, check if the wrap itself matches; if not, check inner rules.
+	if rn.CascadeWrapPred != "" {
+		if anyMatch() {
+			return cloneRuleNode(rn)
+		}
+		if rn.CascadeWrapInner != nil {
+			if filteredInner := FilterRuleNode(rn.CascadeWrapInner, except); filteredInner != nil {
+				return &RuleNode{
+					CascadeWrapPred:    rn.CascadeWrapPred,
+					CascadeWrapType:    rn.CascadeWrapType,
+					CascadeWrapInner:   filteredInner,
+					CascadeWrapReverse: rn.CascadeWrapReverse,
+				}
+			}
+		}
+		return nil
+	}
+
+	// Leaf nodes (Rule, DQLRule, RBACRule): check if matches except criteria.
+	if anyMatch() {
+		return cloneRuleNode(rn)
 	}
 
 	return nil

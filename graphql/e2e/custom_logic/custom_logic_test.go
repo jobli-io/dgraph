@@ -381,6 +381,55 @@ func TestSubscriptionInNestedCustomField(t *testing.T) {
 	require.Contains(t, err.Error(), "Custom field `anotherName` is not supported in graphql subscription")
 }
 
+func TestPassiveSubscription(t *testing.T) {
+	common.SafelyUpdateGQLSchemaOnAlpha1(t, `
+	type Teacher @withSubscription {
+		tid: ID!
+		age: Int!
+		name: String
+		  @custom(
+			http: {
+			  url: "http://mock:8888/teacherName"
+			  method: "POST"
+			  body: "{tid: $tid}"
+			  mode: SINGLE
+			}
+		  )
+		  @passiveSubscription
+	  }
+	`)
+
+	// 1. Query without @passiveSubscription -> should fail with specific query-level validation error
+	client1, err := common.NewGraphQLSubscription(subscriptionEndpoint, &schema.Request{
+		Query: `subscription {
+			getTeacher(tid: "0x2712") {
+			  name
+			}
+		  }`,
+	}, `{}`)
+	require.NoError(t, err)
+	_, err = client1.RecvMsg()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Field `name` is a custom/lambda field and requires the `@passiveSubscription` directive to be queried in a subscription.")
+
+	// 2. Query with @passiveSubscription -> validation should pass and connect/succeed!
+	client2, err := common.NewGraphQLSubscription(subscriptionEndpoint, &schema.Request{
+		Query: `subscription {
+			getTeacher(tid: "0x2712") {
+			  name @passiveSubscription
+			}
+		  }`,
+	}, `{}`)
+	require.NoError(t, err)
+	msg, err := client2.RecvMsg()
+	if err != nil {
+		require.NotContains(t, err.Error(), "requires the `@passiveSubscription` directive")
+		require.NotContains(t, err.Error(), "not supported in graphql subscription")
+	} else {
+		_ = msg
+	}
+}
+
 func addPerson(t *testing.T) *user {
 	addTeacherParams := &common.GraphQLParams{
 		Query: `mutation addPerson {

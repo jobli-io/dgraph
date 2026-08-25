@@ -639,8 +639,14 @@ func (r *RequestResolver) Schema() schema.Schema {
 // children is type of a custom field.
 func validateCustomFieldsRecursively(field schema.Field) error {
 	if field.IsCustomHTTP() {
-		return x.GqlErrorf("Custom field `%s` is not supported in graphql subscription",
-			field.Name()).WithLocations(field.Location())
+		if !field.HasPassiveSubscriptionSchema() {
+			return x.GqlErrorf("Custom field `%s` is not supported in graphql subscription",
+				field.Name()).WithLocations(field.Location())
+		}
+		if !field.HasPassiveSubscriptionQuery() {
+			return x.GqlErrorf("Field `%s` is a custom/lambda field and requires the `@passiveSubscription` directive to be queried in a subscription.",
+				field.Name()).WithLocations(field.Location())
+		}
 	}
 	for _, f := range field.SelectionSet() {
 		err := validateCustomFieldsRecursively(f)
