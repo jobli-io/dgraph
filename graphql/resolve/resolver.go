@@ -622,6 +622,16 @@ func (r *RequestResolver) ValidateSubscription(req *schema.Request) error {
 	}
 
 	for _, q := range op.Queries() {
+		if q.IsCustomHTTP() {
+			cfg, err := q.CustomHTTPConfig()
+			if err != nil {
+				return err
+			}
+			if cfg.Mode != schema.SSE {
+				return x.GqlErrorf("Custom field `%s` is not supported in graphql subscription",
+					q.Name()).WithLocations(q.Location())
+			}
+		}
 		for _, field := range q.SelectionSet() {
 			if err := validateCustomFieldsRecursively(field); err != nil {
 				return err

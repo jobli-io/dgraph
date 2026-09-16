@@ -6,10 +6,15 @@
 package subscription
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,9 +41,19 @@ type SubscriberResponse struct {
 }
 
 type subscriber struct {
-	expiry   time.Time
-	updateCh chan interface{}
-	timer    *time.Timer
+	expiry    time.Time
+	updateCh  chan interface{}
+	timer     *time.Timer
+	cancel    context.CancelFunc
+	closeOnce *sync.Once
+}
+
+func (s *subscriber) closeUpdateCh() {
+	if s.closeOnce != nil {
+		s.closeOnce.Do(func() {
+			close(s.updateCh)
+		})
+	}
 }
 
 // Poller manages active subscription queries, coordinating reactive re-evaluations.
@@ -124,6 +139,68 @@ func (p *Poller) AddSubscriber(req *schema.Request) (*SubscriberResponse, error)
 		customClaims.RegisteredClaims.ExpiresAt = jwt.NewNumericDate(time.Time{})
 	}
 
+	op, err := resolver.Schema().Operation(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if this subscription operation is an SSE pass-through custom query
+	var sseQuery schema.Query
+	var sseConfig *schema.FieldHTTPConfig
+	for _, q := range op.Queries() {
+		if q.IsCustomHTTP() {
+			cfg, err := q.CustomHTTPConfig()
+			if err == nil && cfg != nil && cfg.Mode == schema.SSE {
+				sseQuery = q
+				sseConfig = cfg
+				break
+			}
+		}
+	}
+
+	if sseQuery != nil && sseConfig != nil {
+		p.Lock()
+		subscriptionID := p.subscriptionID
+		p.subscriptionID++
+		bucketID := farm.Fingerprint64([]byte(fmt.Sprintf("sse-%d", subscriptionID)))
+
+		updateCh := make(chan interface{}, 100)
+		closeOnce := &sync.Once{}
+
+		streamCtx, cancelStream := context.WithCancel(context.Background())
+
+		var expiryTimer *time.Timer
+		expiryTime := customClaims.RegisteredClaims.ExpiresAt.Time
+		if !expiryTime.IsZero() {
+			duration := time.Until(expiryTime)
+			expiryTimer = time.AfterFunc(duration, func() {
+				p.TerminateSubscription(bucketID, subscriptionID)
+			})
+		}
+
+		sub := subscriber{
+			expiry:    expiryTime,
+			updateCh:  updateCh,
+			timer:     expiryTimer,
+			cancel:    cancelStream,
+			closeOnce: closeOnce,
+		}
+
+		subscriptions := make(map[uint64]subscriber)
+		subscriptions[subscriptionID] = sub
+		p.pollRegistry[bucketID] = subscriptions
+		p.Unlock()
+
+		glog.Infof("Started SSE pass-through subscription ID: %d", subscriptionID)
+		go p.streamCustomHTTPSubscription(streamCtx, sseQuery, sseConfig, req, updateCh, closeOnce)
+
+		return &SubscriberResponse{
+			BucketID:       bucketID,
+			SubscriptionID: subscriptionID,
+			UpdateCh:       updateCh,
+		}, nil
+	}
+
 	buf, err := json.Marshal(req)
 	x.Check(err)
 	var bucketID uint64
@@ -172,18 +249,16 @@ func (p *Poller) AddSubscriber(req *schema.Request) (*SubscriberResponse, error)
 	}
 
 	subscriptions[subscriptionID] = subscriber{
-		expiry:   expiryTime,
-		updateCh: updateCh,
-		timer:    expiryTimer,
+		expiry:    expiryTime,
+		updateCh:  updateCh,
+		timer:     expiryTimer,
+		closeOnce: &sync.Once{},
 	}
 	p.pollRegistry[bucketID] = subscriptions
 
 	// 3. Register GraphQL AST Dependencies and dynamically resolved entities
-	op, err := resolver.Schema().Operation(req)
-	if err == nil {
-		p.dependencyReg.Register(bucketID, subscriptionID, op)
-		p.dependencyReg.UpdateResolvedEntities(bucketID, subscriptionID, res.Data.Bytes())
-	}
+	p.dependencyReg.Register(bucketID, subscriptionID, op)
+	p.dependencyReg.UpdateResolvedEntities(bucketID, subscriptionID, res.Data.Bytes())
 
 	if ok {
 		// Existing reactive goroutine is already active for this bucket. Re-use it.
@@ -331,7 +406,10 @@ func (p *Poller) terminateSubscriptions(bucketID uint64) {
 		if subscriber.timer != nil {
 			subscriber.timer.Stop()
 		}
-		close(subscriber.updateCh)
+		if subscriber.cancel != nil {
+			subscriber.cancel()
+		}
+		subscriber.closeUpdateCh()
 		p.dependencyReg.Deregister(bucketID, subID)
 	}
 	delete(p.pollRegistry, bucketID)
@@ -359,7 +437,10 @@ func (p *Poller) terminateSubscription(bucketID, subscriptionID uint64) {
 		if subscriber.timer != nil {
 			subscriber.timer.Stop()
 		}
-		close(subscriber.updateCh)
+		if subscriber.cancel != nil {
+			subscriber.cancel()
+		}
+		subscriber.closeUpdateCh()
 		p.dependencyReg.Deregister(bucketID, subscriptionID)
 	}
 	delete(subscriptions, subscriptionID)
@@ -370,6 +451,211 @@ func (p *Poller) terminateSubscription(bucketID, subscriptionID uint64) {
 		if ch, ok := p.activePollers[bucketID]; ok {
 			close(ch)
 			delete(p.activePollers, bucketID)
+		}
+	}
+}
+
+var sseHttpClient = &http.Client{
+	Timeout: 0,
+	Transport: &http.Transport{
+		DisableCompression: true,
+	},
+}
+
+func (p *Poller) streamCustomHTTPSubscription(
+	ctx context.Context,
+	q schema.Query,
+	fconf *schema.FieldHTTPConfig,
+	req *schema.Request,
+	updateCh chan interface{},
+	closeOnce *sync.Once,
+) {
+	defer func() {
+		closeOnce.Do(func() {
+			close(updateCh)
+		})
+	}()
+
+	var reqBody io.Reader
+	if fconf.Template != nil {
+		bodyBytes, err := json.Marshal(fconf.Template)
+		if err == nil && len(bodyBytes) > 0 {
+			reqBody = bytes.NewReader(bodyBytes)
+		}
+	}
+	if reqBody == nil {
+		reqBody = http.NoBody
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, fconf.Method, fconf.URL, reqBody)
+	if err != nil {
+		errResp := &schema.Response{
+			Errors: []*x.GqlError{
+				x.GqlErrorf("failed to create upstream SSE request: %v", err),
+			},
+		}
+		select {
+		case <-ctx.Done():
+		case updateCh <- errResp.Output():
+		}
+		return
+	}
+
+	for k, vv := range fconf.ForwardHeaders {
+		for _, v := range vv {
+			httpReq.Header.Add(k, v)
+		}
+	}
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Cache-Control", "no-cache")
+
+	resp, err := sseHttpClient.Do(httpReq)
+	if err != nil {
+		if ctx.Err() == nil {
+			errResp := &schema.Response{
+				Errors: []*x.GqlError{
+					x.GqlErrorf("failed to connect to upstream SSE endpoint: %v", err),
+				},
+			}
+			select {
+			case <-ctx.Done():
+			case updateCh <- errResp.Output():
+			}
+		}
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		errResp := &schema.Response{
+			Errors: []*x.GqlError{
+				x.GqlErrorf("upstream SSE service returned status %d: %s", resp.StatusCode, string(body)),
+			},
+		}
+		select {
+		case <-ctx.Done():
+		case updateCh <- errResp.Output():
+		}
+		return
+	}
+
+	dispatchPayload := func(payload string) {
+		var decoded interface{}
+		if err := schema.Unmarshal([]byte(payload), &decoded); err != nil {
+			decoded = payload
+		}
+
+		var resMap map[string]interface{}
+		var extraErrors []*x.GqlError
+
+		if decodedMap, ok := decoded.(map[string]interface{}); ok {
+			if errsVal, hasErrs := decodedMap["errors"]; hasErrs {
+				if errList, isList := errsVal.([]interface{}); isList {
+					for _, item := range errList {
+						if errItem, isMap := item.(map[string]interface{}); isMap {
+							if msg, ok := errItem["message"].(string); ok {
+								extraErrors = append(extraErrors, x.GqlErrorf("%s", msg))
+							}
+						}
+					}
+				}
+			}
+
+			if dataVal, hasData := decodedMap["data"]; hasData {
+				if dataObj, isObj := dataVal.(map[string]interface{}); isObj {
+					if fieldVal, hasField := dataObj[q.Name()]; hasField {
+						resMap = map[string]interface{}{q.RemoteResponseName(): fieldVal}
+					} else if fieldVal, hasField := dataObj[q.RemoteResponseName()]; hasField {
+						resMap = map[string]interface{}{q.RemoteResponseName(): fieldVal}
+					} else {
+						resMap = map[string]interface{}{q.RemoteResponseName(): dataObj}
+					}
+				} else {
+					resMap = map[string]interface{}{q.RemoteResponseName(): dataVal}
+				}
+			} else {
+				resMap = map[string]interface{}{q.RemoteResponseName(): decodedMap}
+			}
+		} else {
+			resMap = map[string]interface{}{q.RemoteResponseName(): decoded}
+		}
+
+		completedBytes, compErrs := schema.CompleteObject(q.PreAllocatePathSlice(), []schema.Field{q}, resMap)
+		allErrors := append(compErrs, extraErrors...)
+		var outResp *schema.Response
+		if len(allErrors) > 0 {
+			outResp = &schema.Response{
+				Errors: allErrors,
+				Data:   *bytes.NewBuffer(completedBytes),
+			}
+		} else {
+			outResp = &schema.Response{
+				Data: *bytes.NewBuffer(completedBytes),
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case updateCh <- outResp.Output():
+		}
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	var currentData strings.Builder
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err != io.EOF && ctx.Err() == nil {
+				glog.Warningf("SSE stream read error: %v", err)
+			}
+			break
+		}
+
+		line = strings.TrimRight(line, "\r\n")
+
+		if strings.HasPrefix(line, ":") {
+			// SSE comment / heartbeat ping
+			continue
+		}
+
+		if line == "event: complete" {
+			break
+		}
+
+		if line == "" {
+			if currentData.Len() > 0 {
+				payload := currentData.String()
+				currentData.Reset()
+				if payload == "[DONE]" {
+					break
+				}
+				dispatchPayload(payload)
+			}
+			continue
+		}
+
+		if strings.HasPrefix(line, "data:") {
+			dataContent := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if currentData.Len() > 0 {
+				currentData.WriteString("\n")
+			}
+			currentData.WriteString(dataContent)
+		}
+	}
+
+	if currentData.Len() > 0 {
+		payload := currentData.String()
+		if payload != "[DONE]" {
+			dispatchPayload(payload)
 		}
 	}
 }

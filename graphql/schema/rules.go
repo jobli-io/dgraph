@@ -772,7 +772,15 @@ func fieldDirectiveCheck(typ *ast.Definition, field *ast.FieldDefinition) gqlerr
 	}
 
 	if subsDir != nil && typ.Name == "Query" && customDir != nil {
-		if customDir.Arguments.ForName("dql") == nil {
+		hasDql := customDir.Arguments.ForName("dql") != nil
+		var hasSSEMode bool
+		if httpArg := customDir.Arguments.ForName(httpArg); httpArg != nil && httpArg.Value != nil {
+			if modeChild := httpArg.Value.Children.ForName(mode); modeChild != nil && modeChild.Raw == SSE {
+				hasSSEMode = true
+			}
+		}
+
+		if !hasDql && !hasSSEMode {
 			return []*gqlerror.Error{gqlerror.ErrorPosf(
 				field.Position, "Type %s; Field %s: custom query should have dql argument if @withSubscription "+
 					"directive is set",
@@ -2495,15 +2503,17 @@ func customDirectiveValidation(sch *ast.Schema,
 	mode := httpArg.Value.Children.ForName(mode)
 	var isBatchMode bool
 	if mode != nil {
-		if isQueryOrMutationType(typ) {
+		op := mode.Raw
+		isSSEOnQuery := op == SSE && typ.Name == "Query" && field.Directives.ForName(subscriptionDirective) != nil
+
+		if isQueryOrMutationType(typ) && !isSSEOnQuery {
 			errs = append(errs, gqlerror.ErrorPosf(
 				mode.Position,
 				"Type %s; Field %s; mode field inside @custom directive can't be "+
 					"present on Query/Mutation.", typ.Name, field.Name))
 		}
 
-		op := mode.Raw
-		if op != SINGLE && op != BATCH {
+		if op != SINGLE && op != BATCH && !isSSEOnQuery {
 			errs = append(errs, gqlerror.ErrorPosf(
 				mode.Position,
 				"Type %s; Field %s; mode field inside @custom directive can only be "+

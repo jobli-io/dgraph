@@ -87,6 +87,7 @@ const (
 	mode        = "mode"
 	BATCH       = "BATCH"
 	SINGLE      = "SINGLE"
+	SSE         = "SSE"
 
 	// geo type names and fields
 	Point        = "Point"
@@ -183,7 +184,7 @@ enum HTTPMethod {
 
 enum Mode {
 	BATCH
-	SINGLE
+	SINGLE SSE
 }
 
 input CustomHTTP {

@@ -574,7 +574,8 @@ func buildValueVarBlock(
 				}
 			} else if rbac == schema.Uncertain {
 				oldVarName := auth.varName
-				auth.varName = auth.varGen.Next(edgeType, "", "", auth.isWritingAuth)
+				allocatedVar := auth.varGen.Next(edgeType, "", "", auth.isWritingAuth)
+				auth.varName = allocatedVar
 
 				oldCascadeAuthType := auth.cascadeAuthorityType
 				auth.cascadeAuthorityType = edgeType.Name()
@@ -584,6 +585,17 @@ func buildValueVarBlock(
 					wrapper.Filter = authFilter
 				}
 				if len(authQrys) > 0 {
+					if authQueriesReferenceVar(authQrys, allocatedVar) {
+						varQry := &dql.GraphQuery{
+							Attr: "var",
+							Var:  allocatedVar,
+							Func: &dql.Function{
+								Name: "type",
+								Args: []dql.Arg{{Value: edgeType.DgraphName()}},
+							},
+						}
+						*nestedAuthQrys = append(*nestedAuthQrys, varQry)
+					}
 					*nestedAuthQrys = append(*nestedAuthQrys, authQrys...)
 				}
 
@@ -2173,15 +2185,51 @@ func (authRw *authRewriter) getRootFunc(cascadeWrapType string) *dql.Function {
 // be emitted. If none of the auth queries reference varName, emitting the
 // type-scan block would produce a phantom variable that Dgraph rejects with
 // "Some variables are defined but not used".
-func authQueriesReferenceVar(queries []*dql.GraphQuery, varName string) bool {
-	for _, q := range queries {
-		if q == nil || q.Func == nil || q.Func.Name != "uid" {
-			continue
-		}
-		for _, arg := range q.Func.Args {
-			if arg.Value == varName {
+func filterTreeReferencesVar(ft *dql.FilterTree, varName string) bool {
+	if ft == nil {
+		return false
+	}
+	if ft.Func != nil {
+		for _, arg := range ft.Func.Args {
+			if arg.Value == varName || arg.Value == "uid("+varName+")" {
 				return true
 			}
+		}
+	}
+	for _, child := range ft.Child {
+		if filterTreeReferencesVar(child, varName) {
+			return true
+		}
+	}
+	return false
+}
+
+func queryReferencesVar(q *dql.GraphQuery, varName string) bool {
+	if q == nil {
+		return false
+	}
+	if q.Func != nil {
+		for _, arg := range q.Func.Args {
+			if arg.Value == varName || arg.Value == "uid("+varName+")" {
+				return true
+			}
+		}
+	}
+	if filterTreeReferencesVar(q.Filter, varName) {
+		return true
+	}
+	for _, child := range q.Children {
+		if queryReferencesVar(child, varName) {
+			return true
+		}
+	}
+	return false
+}
+
+func authQueriesReferenceVar(queries []*dql.GraphQuery, varName string) bool {
+	for _, q := range queries {
+		if queryReferencesVar(q, varName) {
+			return true
 		}
 	}
 	return false

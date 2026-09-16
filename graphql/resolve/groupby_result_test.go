@@ -125,10 +125,10 @@ func TestCompleteGroupByResult(t *testing.T) {
 			wantJSON:  `{"groupByJobAd":[]}`,
 		},
 		{
-			name:      "query name not present in response is passed through unchanged",
+			name:      "query name not present in response initializes empty array",
 			queryName: "groupByFoo",
-			raw:       `{"groupByBar": []}`,
-			wantJSON:  `{"groupByBar":[]}`,
+			raw:       `{}`,
+			wantJSON:  `{"groupByFoo":[]}`,
 		},
 		{
 			name:      "preserves other top-level fields (e.g. extensions)",

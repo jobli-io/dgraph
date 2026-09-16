@@ -382,7 +382,11 @@ func completeGroupByResult(
 
 	rawField, ok := top[dqlKey]
 	if !ok {
-		return rawData, nil
+		top[gqlKey] = json.RawMessage("[]")
+		if dqlKey != gqlKey {
+			delete(top, dqlKey)
+		}
+		return json.Marshal(top)
 	}
 
 	// Determine if groupKeys is selected in the GraphQL query.
