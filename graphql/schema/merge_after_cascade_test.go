@@ -393,3 +393,97 @@ type NormalImpl implements INormal @auth(
 		"NormalImpl with mergeInto:\"or\" must be OR(ownAuth, ifaceAuth) from Stage 2; got:\n%s",
 		formatRuleNode(rules.Query, 0))
 }
+
+// TestMergeAfterCascade_InterfacePolicy_OrOverride: when a concrete type specifies
+// @auth(interfacePolicy: [{ interface: "Manageable", merge: "or" }]), Stage 4 must
+// merge the post-cascade interface auth using OR instead of AND.
+func TestMergeAfterCascade_InterfacePolicy_OrOverride(t *testing.T) {
+	const orOverrideSchema = mergeAfterCascadeBase + `
+
+type Parent @auth(
+	query: { rule: """
+		query {
+			queryParent { __typename }
+		}
+	""" }
+) {
+	id: ID!
+	hasWidget: [Widget] @hasInverse(field: inParent)
+}
+
+type Widget implements Manageable @cascadeAuthPolicy(aggregation: "and") @auth(
+	interfacePolicy: [
+		{ interface: "Manageable", merge: "or" }
+	]
+	query: { rule: """
+		query {
+			queryWidget { __typename }
+		}
+	""" }
+) {
+	id: ID!
+	isManaged: Boolean @search
+	inParent: Parent @cascadeAuth(operations: [query]) @search
+}
+`
+	sch := buildSchema(t, orOverrideSchema)
+
+	widgetAuth := sch.authRules["Widget"]
+	require.NotNil(t, widgetAuth)
+	require.NotNil(t, widgetAuth.Rules)
+
+	q := widgetAuth.Rules.Query
+	require.NotNil(t, q)
+
+	// Outermost node must be OR because interfacePolicy overrides merge operator to "or".
+	assert.True(t, isOr(q),
+		"Widget.Rules.Query must have OR at the outermost level due to interfacePolicy; got:\n%s",
+		formatRuleNode(q, 0))
+}
+
+// TestMergeAfterCascade_InterfacePolicy_PerOperationOverride: an operation-specific override
+// (e.g. operations: ["query"]) must apply OR only to query, while add/update/delete default to AND.
+func TestMergeAfterCascade_InterfacePolicy_PerOperationOverride(t *testing.T) {
+	const perOpSchema = `
+interface IPostCascade
+	@generate(
+		query: { get: false, query: true, aggregate: false }
+		mutation: { add: false, update: false, delete: false }
+	)
+	@auth(
+		mergeAfterCascade: true
+		query: { rule: "query { queryIPostCascade { __typename } }" }
+		add: { rule: "query { queryIPostCascade { __typename } }" }
+	)
+{
+	id: ID!
+	name: String
+}
+
+type Item implements IPostCascade @auth(
+	interfacePolicy: [
+		{ interface: "IPostCascade", merge: "or", operations: ["query"] }
+	]
+	query: { rule: "query { queryItem { __typename } }" }
+	add: { rule: "query { queryItem { __typename } }" }
+) {
+	id: ID!
+	name: String
+}
+`
+	sch := buildSchema(t, perOpSchema)
+
+	itemAuth := sch.authRules["Item"]
+	require.NotNil(t, itemAuth)
+	require.NotNil(t, itemAuth.Rules)
+
+	// Query should be OR
+	assert.True(t, isOr(itemAuth.Rules.Query),
+		"Item.Rules.Query must be OR due to interfacePolicy operations: [\"query\"]; got:\n%s",
+		formatRuleNode(itemAuth.Rules.Query, 0))
+
+	// Add should be AND
+	assert.True(t, isAnd(itemAuth.Rules.Add),
+		"Item.Rules.Add must fall back to AND because interfacePolicy only targeted query; got:\n%s",
+		formatRuleNode(itemAuth.Rules.Add, 0))
+}

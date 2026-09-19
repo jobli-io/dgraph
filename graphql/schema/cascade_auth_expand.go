@@ -264,11 +264,16 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 			if len(perOpEdgeRules) == 0 {
 				continue
 			}
-			// Compose: AND-aggregate cascade edges first, then merge the cascade
-			// block into the child's existing (TypeAuth + InterfaceAuth) base rule.
-			// Aggregation is resolved from @cascadeAuthPolicy(aggregation:) on the
-			// child type; defaults to "and" when no type-level policy is set.
-			composeCascadeWithBase(authRules[childTypeName], op, perOpEdgeRules, policy.Aggregation)
+			var policyCondNode *RuleNode
+			if policy.Rule != "" {
+				childDef := sch.schema.Types[childTypeName]
+				var err error
+				policyCondNode, err = parseConditionRule(sch, childDef, policy.Rule)
+				if err != nil {
+					return err
+				}
+			}
+			composeCascadeWithBase(authRules[childTypeName], op, perOpEdgeRules, policy.Aggregation, policyCondNode)
 		}
 
 		// Bidirectional: reverse-visibility rules on parent (Pass 0).
@@ -661,13 +666,26 @@ func buildCascadeRule(
 		return nil, nil
 	}
 
-	return &RuleNode{
+	wrapNode := &RuleNode{
 		CascadeWrapPred:    edge.dgraphPred,
 		CascadeWrapType:    edge.parentTypeName,
 		CascadeWrapInner:   authorityFullAuth,
 		CascadeInversePred: edge.inverseDgraphPred,
 		CascadeWrapReverse: isReverseStrategy(edge),
-	}, nil
+	}
+
+	if edge.cfg.Rule != "" {
+		hostDef := sch.schema.Types[immediateChildTypeName]
+		condNode, err := parseConditionRule(sch, hostDef, edge.cfg.Rule)
+		if err != nil {
+			return nil, err
+		}
+		if condNode != nil {
+			return &RuleNode{And: []*RuleNode{condNode, wrapNode}}, nil
+		}
+	}
+
+	return wrapNode, nil
 }
 
 // cascadeAuthRuleForEdge builds the RuleNode for a single incoming cascade edge.
@@ -1534,7 +1552,7 @@ func mergeIntoOp(ta *TypeAuth, op string, rule *RuleNode, aggregation string) {
 // The aggregation value comes from @cascadeAuthPolicy(aggregation:) on the child
 // type. When no type-level policy is declared, CascadeAuthPolicyConfig defaults
 // to "and" — this is the effective per-edge fallback.
-func composeCascadeWithBase(ta *TypeAuth, op string, edgeRules []*RuleNode, aggregation string) {
+func composeCascadeWithBase(ta *TypeAuth, op string, edgeRules []*RuleNode, aggregation string, policyCondNode *RuleNode) {
 	if len(edgeRules) == 0 {
 		return
 	}
@@ -1550,6 +1568,11 @@ func composeCascadeWithBase(ta *TypeAuth, op string, edgeRules []*RuleNode, aggr
 		cascadeBlock = &RuleNode{Or: edgeRules}
 	default: // "and" — AND-aggregate first
 		cascadeBlock = &RuleNode{And: edgeRules}
+	}
+
+	// Step 1b — gate the cascade block with type-level policy rule condition if present.
+	if policyCondNode != nil {
+		cascadeBlock = &RuleNode{And: []*RuleNode{policyCondNode, cascadeBlock}}
 	}
 
 	// Step 2 — merge cascade block into the base rule per aggregation policy.
@@ -1880,4 +1903,35 @@ func isReverseStrategy(edge cascadeAuthIncomingEdge) bool {
 	default:
 		return false
 	}
+}
+
+// parseConditionRule parses a conditional rule string (RBAC JSON or GraphQL query)
+// on a @cascadeAuth or @cascadeAuthPolicy directive into a *RuleNode.
+func parseConditionRule(sch *schema, typ *ast.Definition, ruleStr string) (*RuleNode, error) {
+	ruleStr = strings.TrimSpace(ruleStr)
+	ruleStr = strings.TrimPrefix(ruleStr, `"`)
+	ruleStr = strings.TrimSuffix(ruleStr, `"`)
+	// Unescape possible escaped quotes if raw string came from SDL literal
+	if strings.Contains(ruleStr, `\"`) {
+		ruleStr = strings.ReplaceAll(ruleStr, `\"`, `"`)
+	}
+	ruleStr = strings.TrimSpace(ruleStr)
+	if ruleStr == "" {
+		return nil, nil
+	}
+
+	if strings.HasPrefix(ruleStr, RBACQueryPrefix) {
+		rbac, err := getRBACQuery(typ, ruleStr)
+		if err != nil {
+			return nil, fmt.Errorf("Type %s: invalid condition rule: %w", typ.Name, err)
+		}
+		return &RuleNode{RBACRule: rbac, RuleTemplate: ruleStr}, nil
+	}
+
+	node := &RuleNode{RuleTemplate: ruleStr}
+	targetDef := inferQueriedTypeDef(sch, ruleStr, typ.Name)
+	if err := gqlValidateRule(sch, targetDef, ruleStr, node); err != nil {
+		return nil, fmt.Errorf("Type %s: invalid condition rule: %w", typ.Name, err)
+	}
+	return node, nil
 }

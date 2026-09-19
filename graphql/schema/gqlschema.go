@@ -335,8 +335,8 @@ input FilterMetadata { lookup: LookupStrategy }
 enum DateTimeGranularity { year quarter month fortnight week day hour }
 type GroupByKeyValue { path: String! value: String }
 input InterfaceMergePolicy { interface: String! merge: String! operations: [CascadeAuthOperation!] }
-directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean, strategy: CascadeAuthStrategy) on FIELD_DEFINITION
-directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean) on OBJECT | INTERFACE
+directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirectional: Boolean, variableContext: CascadeAuthVariableContext, interfaceOnly: Boolean, strategy: CascadeAuthStrategy, rule: String) on FIELD_DEFINITION
+directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean, rule: String) on OBJECT | INTERFACE
 directive @bypassAuth(except: [String!]) on FIELD_DEFINITION
 
 directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION

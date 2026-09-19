@@ -1916,3 +1916,135 @@ type Group implements WorkspaceMember {
 			"adaptive fallback: 1 leaf expected; tree:\n%s", formatRuleNode(q, 1))
 	})
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conditional @cascadeAuth and @cascadeAuthPolicy tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestCascadeAuth_ConditionalPolicyRule(t *testing.T) {
+	input := `
+type Workspace
+  @auth(query: { rule: """
+    query($ws: String) {
+      queryWorkspace(filter: { name: { eq: $ws } }) { __typename }
+    }
+  """ })
+{
+  name: String! @id
+  hasUsers: [User] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth
+}
+
+type User implements WorkspaceMember
+  @cascadeAuthPolicy(
+    aggregation: "or"
+    rule: "{ $ws: { notIn: [\"*\", \"\"] } }"
+  )
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryUser(filter: { email: { eq: $sub } }) { __typename }
+    }
+  """ })
+{
+  id: ID!
+  email: String! @id
+}
+`
+	s := buildSchema(t, input)
+	userAuth := s.authRules["User"]
+	require.NotNil(t, userAuth)
+	require.NotNil(t, userAuth.Rules)
+	require.NotNil(t, userAuth.Rules.Query)
+
+	q := userAuth.Rules.Query
+	// Policy has aggregation: "or".
+	// The outer node should be OR between User's own auth rule and the gated cascadeBlock.
+	require.Len(t, q.Or, 2, "Expected OR with 2 arms: own auth and gated cascade block")
+
+	// Find the cascade arm (which should be an AND block containing the condition and the CascadeWrap)
+	var cascadeArm *RuleNode
+	for _, arm := range q.Or {
+		if len(arm.And) > 0 {
+			cascadeArm = arm
+			break
+		}
+	}
+	require.NotNil(t, cascadeArm, "Expected an AND block for gated cascade rule")
+	require.Len(t, cascadeArm.And, 2, "Expected condition rule AND CascadeWrap")
+
+	// Check condition rule
+	cond := cascadeArm.And[0]
+	require.NotNil(t, cond.RBACRule)
+	assert.Equal(t, "ws", cond.RBACRule.Variable)
+	assert.Equal(t, "notIn", cond.RBACRule.Operator)
+
+	// Check CascadeWrap
+	wrap := cascadeArm.And[1]
+	assert.NotEmpty(t, wrap.CascadeWrapPred)
+
+	// Verify static evaluation behavior:
+	// In discovery mode ($ws == "*"), the condition evaluates to Negative.
+	discoveryVars := map[string]interface{}{"$ws": "*"}
+	assert.Equal(t, Negative, cond.EvaluateStatic(discoveryVars), "Condition must evaluate to Negative in discovery mode (*)")
+
+	discoveryEmptyVars := map[string]interface{}{"$ws": ""}
+	assert.Equal(t, Negative, cond.EvaluateStatic(discoveryEmptyVars), "Condition must evaluate to Negative in discovery mode (empty)")
+
+	// In active tenant mode ($ws == "tenant-123"), the condition evaluates to Positive.
+	activeTenantVars := map[string]interface{}{"$ws": "tenant-123"}
+	assert.Equal(t, Positive, cond.EvaluateStatic(activeTenantVars), "Condition must evaluate to Positive in active tenant mode")
+}
+
+func TestCascadeAuth_ConditionalEdgeRule(t *testing.T) {
+	input := `
+type Workspace
+  @auth(query: { rule: """
+    query($ws: String) {
+      queryWorkspace(filter: { name: { eq: $ws } }) { __typename }
+    }
+  """ })
+{
+  name: String! @id
+  hasUsers: [User] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(rule: "{ $ws: { regexp: \"^[0-9a-f]{8}$\" } }")
+}
+
+type User implements WorkspaceMember
+  @cascadeAuthPolicy(aggregation: "or")
+{
+  id: ID!
+  email: String! @id
+}
+`
+	s := buildSchema(t, input)
+	userAuth := s.authRules["User"]
+	require.NotNil(t, userAuth)
+	require.NotNil(t, userAuth.Rules)
+	require.NotNil(t, userAuth.Rules.Query)
+
+	q := userAuth.Rules.Query
+	// The cascade rule on inWorkspace edge has the rule condition wrapped in AND
+	require.Len(t, q.And, 2, "Edge cascade rule should be wrapped in AND(condition, CascadeWrap)")
+
+	cond := q.And[0]
+	require.NotNil(t, cond.RBACRule)
+	assert.Equal(t, "ws", cond.RBACRule.Variable)
+	assert.Equal(t, "regexp", cond.RBACRule.Operator)
+
+	wrap := q.And[1]
+	assert.NotEmpty(t, wrap.CascadeWrapPred)
+
+	// In discovery mode ($ws == "*"), regex ^[0-9a-f]{8}$ evaluates to Negative.
+	discoveryVars := map[string]interface{}{"$ws": "*"}
+	assert.Equal(t, Negative, cond.EvaluateStatic(discoveryVars))
+
+	// In active tenant mode ($ws == "dc98a028"), regex evaluates to Positive.
+	tenantVars := map[string]interface{}{"$ws": "dc98a028"}
+	assert.Equal(t, Positive, cond.EvaluateStatic(tenantVars))
+}

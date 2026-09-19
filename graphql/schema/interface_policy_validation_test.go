@@ -147,10 +147,14 @@ func TestValidateInterfacePolicy_Merge_Valid_And(t *testing.T) {
 	buildSchemaOK(t, concreteWith(`{ interface: "IProtected", merge: "and" }`))
 }
 
+func TestValidateInterfacePolicy_Merge_Valid_None(t *testing.T) {
+	buildSchemaOK(t, concreteWith(`{ interface: "IProtected", merge: "none" }`))
+}
+
 func TestValidateInterfacePolicy_Merge_Invalid_Uppercase(t *testing.T) {
 	buildSchemaErr(t,
 		concreteWith(`{ interface: "IProtected", merge: "OR" }`),
-		"Widget", "IProtected", "merge", `"and" or "or"`, "OR",
+		"Widget", "IProtected", "merge", `"and", "or", or "none"`, "OR",
 	)
 }
 
@@ -377,5 +381,110 @@ type Widget implements IProtected
 	// query → "and" merge (not in operations — falls back to mergeInto: "and")
 	if r.Query == nil || len(r.Query.And) == 0 {
 		t.Fatalf("Widget.Query should be AND-merged; got: %s", formatRuleNode(r.Query, 0))
+	}
+}
+
+func TestValidateInterfacePolicy_Operations_MergeNone(t *testing.T) {
+	const sch = `
+interface IProtected
+  @auth(
+    mergeInto: "and"
+    add:    { rule: "{ $x: { eq: \"iface\" } }" }
+    update: { rule: "{ $x: { eq: \"iface\" } }" }
+    delete: { rule: "{ $x: { eq: \"iface\" } }" }
+    query:  { rule: "{ $x: { eq: \"iface\" } }" }
+  )
+{
+  name: String
+}
+
+type Widget implements IProtected
+  @auth(
+    interfacePolicy: [{ interface: "IProtected", merge: "none", operations: [query] }]
+    add:    { rule: "{ $w: { eq: \"widget\" } }" }
+    update: { rule: "{ $w: { eq: \"widget\" } }" }
+    delete: { rule: "{ $w: { eq: \"widget\" } }" }
+    query:  { rule: "{ $w: { eq: \"widget\" } }" }
+  )
+{
+  id: ID!
+  name: String
+}
+`
+	s := buildSchema(t, sch)
+	rules := s.authRules["Widget"]
+	if rules == nil || rules.Rules == nil {
+		t.Fatal("Widget has no auth rules after schema build")
+	}
+	r := rules.Rules
+
+	// query → "none" merge (interface rule skipped, only widget's own rule remains)
+	if r.Query == nil {
+		t.Fatal("Widget.Query should not be nil")
+	}
+	if len(r.Query.And) != 0 || len(r.Query.Or) != 0 {
+		t.Fatalf("Widget.Query should NOT be merged; got: %s", formatRuleNode(r.Query, 0))
+	}
+	if r.Query.RBACRule == nil || r.Query.RBACRule.Variable != "w" {
+		t.Fatalf("Widget.Query should have widget's own rule; got: %s", formatRuleNode(r.Query, 0))
+	}
+
+	// add/update/delete → "and" merge (falls back to default merge)
+	if r.Add == nil || len(r.Add.And) == 0 {
+		t.Fatalf("Widget.Add should be AND-merged; got: %s", formatRuleNode(r.Add, 0))
+	}
+	if r.Update == nil || len(r.Update.And) == 0 {
+		t.Fatalf("Widget.Update should be AND-merged; got: %s", formatRuleNode(r.Update, 0))
+	}
+	if r.Delete == nil || len(r.Delete.And) == 0 {
+		t.Fatalf("Widget.Delete should be AND-merged; got: %s", formatRuleNode(r.Delete, 0))
+	}
+}
+
+func TestValidateInterfacePolicy_MergeNone_AllOps(t *testing.T) {
+	const sch = `
+interface IProtected
+  @auth(
+    mergeInto: "and"
+    add:    { rule: "{ $x: { eq: \"iface\" } }" }
+    update: { rule: "{ $x: { eq: \"iface\" } }" }
+    delete: { rule: "{ $x: { eq: \"iface\" } }" }
+    query:  { rule: "{ $x: { eq: \"iface\" } }" }
+  )
+{
+  name: String
+}
+
+type Widget implements IProtected
+  @auth(
+    interfacePolicy: [{ interface: "IProtected", merge: "none" }]
+    add:    { rule: "{ $w: { eq: \"widget\" } }" }
+    update: { rule: "{ $w: { eq: \"widget\" } }" }
+    delete: { rule: "{ $w: { eq: \"widget\" } }" }
+    query:  { rule: "{ $w: { eq: \"widget\" } }" }
+  )
+{
+  id: ID!
+  name: String
+}
+`
+	s := buildSchema(t, sch)
+	rules := s.authRules["Widget"]
+	if rules == nil || rules.Rules == nil {
+		t.Fatal("Widget has no auth rules after schema build")
+	}
+	r := rules.Rules
+
+	// None of the operations should be merged with interface rules
+	for opName, node := range map[string]*RuleNode{"add": r.Add, "update": r.Update, "delete": r.Delete, "query": r.Query} {
+		if node == nil {
+			t.Fatalf("Widget.%s should not be nil", opName)
+		}
+		if len(node.And) != 0 || len(node.Or) != 0 {
+			t.Fatalf("Widget.%s should NOT be merged; got: %s", opName, formatRuleNode(node, 0))
+		}
+		if node.RBACRule == nil || node.RBACRule.Variable != "w" {
+			t.Fatalf("Widget.%s should retain widget's own rule; got: %s", opName, formatRuleNode(node, 0))
+		}
 	}
 }

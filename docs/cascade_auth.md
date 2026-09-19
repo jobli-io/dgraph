@@ -37,6 +37,8 @@ directive @cascadeAuth(
   bidirectional: Boolean # default: false
   variableContext: CascadeAuthVariableContext # default: adaptive
   interfaceOnly: Boolean # default: false; see §interfaceOnly below
+  strategy: CascadeAuthStrategy # default: AUTO
+  rule: String # conditional rule gate (RBAC or GQL query) for this cascade edge
 ) on FIELD_DEFINITION
 
 enum CascadeAuthOperation {
@@ -150,6 +152,7 @@ directive @cascadeAuthPolicy(
   aggregation: String # "and" (default) | "or"
   skipBidirectional: Boolean # default: false
   skip: Boolean # default: false
+  rule: String # conditional rule gate (RBAC or GQL query) for all cascaded rules on this type
 ) on OBJECT | INTERFACE
 ```
 
@@ -161,6 +164,42 @@ cascade auth at all.
 | `aggregation: "or"`       | Access via **any** authorized parent path is sufficient (default: `"and"` — all parent paths must be satisfied simultaneously)              |
 | `skipBidirectional: true` | This type will **not** contribute reverse-visibility rules back to its authority type (see [Bidirectional Pitfall](#bidirectional-pitfall)) |
 | `skip: true`              | Completely opt this type out of cascade auth expansion — it receives no auth rules from authority types                                     |
+| `rule: "..."`             | Gating condition for the aggregated cascaded auth block. If statically negative (e.g. discovery mode), the cascade branch is pruned cleanly |
+
+---
+
+### Conditional `@cascadeAuth` and `@cascadeAuthPolicy`
+
+Both `@cascadeAuth` (edge-level) and `@cascadeAuthPolicy` (type-level) support an optional
+`rule: String` condition gate:
+
+- **Edge-level rule** (`@cascadeAuth(rule: ...)`): Gates the specific cascade edge. Evaluated as
+  `AND [rule, edgeCascade]`.
+- **Type-level rule** (`@cascadeAuthPolicy(rule: ...)`): Gates the entire combined cascaded auth
+  block on the type. Evaluated as `AND [rule, cascadeBlock]`.
+
+#### Supported Rule Formats
+
+1. **RBAC Rule**: e.g., `"{ $ws: { notIn: [\"*\", \"\"] } }"` or `"{ $role: { eq: \"admin\" } }"`.
+2. **GraphQL Query Rule**: e.g.,
+   `"""query ($ws: String) { queryWorkspace(filter: { name: { eq: $ws } }) { __typename } }"""`.
+
+#### Native `notIn` RBAC Operator
+
+Dgraph's RBAC engine natively supports `notIn`:
+
+```graphql
+@cascadeAuthPolicy(
+  aggregation: "or"
+  rule: "{ $ws: { notIn: [\"*\", \"\"] } }"
+)
+```
+
+When `$ws` is `"*"` or `""` (e.g., during discovery queries), the condition evaluates statically to
+`Negative`. Because it is AND-joined with the cascade block, the entire cascaded path is pruned
+cleanly, preventing data leakage while preserving the type's own base auth rules. In tenant mode
+(e.g. `$ws == "dc98a028"`), the condition evaluates to `Positive` and cascade authorization proceeds
+as normal.
 
 ---
 

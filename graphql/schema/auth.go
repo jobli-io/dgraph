@@ -115,6 +115,17 @@ const (
 )
 
 func (rq *RBACQuery) checkIfMatchInArray(array []interface{}) RuleResult {
+	if rq.Operator == "notIn" {
+		// For notIn, if ANY element is in rq.Operand, it's Negative (forbidden).
+		// Must not match any in the array.
+		for _, v := range array {
+			if rq.checkIfMatch(v) == Negative {
+				return Negative
+			}
+		}
+		return Positive
+	}
+
 	for _, v := range array {
 		if rq.checkIfMatch(v) == Positive {
 			return Positive
@@ -127,6 +138,15 @@ func (rq *RBACQuery) checkIfMatch(value interface{}) RuleResult {
 	rules, ok := rq.Operand.([]interface{})
 	if ok {
 		// this means rule operand is array slice
+		if rq.Operator == "notIn" {
+			for _, r := range rules {
+				if evaluate(r, value, rq.regex) == Positive {
+					return Negative
+				}
+			}
+			return Positive
+		}
+
 		for _, r := range rules {
 			if evaluate(r, value, rq.regex) == Positive {
 				return Positive
@@ -162,13 +182,17 @@ func evaluate(operand interface{}, value interface{}, regex *regexp.Regexp) Rule
 // For example, Rule {$USER: { eq:"uid"}} and token $USER:["u", "id", "uid"] result in match.
 // Rule {$USER: { in: ["uid", "xid"]}} and token $USER:["u", "id", "uid"]  result in match
 func (rq *RBACQuery) EvaluateRBACRule(av map[string]interface{}) RuleResult {
-	tokenValues, tokenCastErr := cast.ToSliceE(av[rq.Variable])
+	val, ok := av[rq.Variable]
+	if !ok {
+		val = av["$"+rq.Variable]
+	}
+	tokenValues, tokenCastErr := cast.ToSliceE(val)
 	// if eq, auth rule value will be matched completely
 	// if regexp, auth rule value should always be string and so as token values
 	// if in, auth rule will only have array as the value check has to consider that
 	if tokenCastErr != nil {
 		// this means value for variable in token in not an array
-		return rq.checkIfMatch(av[rq.Variable])
+		return rq.checkIfMatch(val)
 	}
 	return rq.checkIfMatchInArray(tokenValues)
 }
@@ -564,7 +588,14 @@ func mergePostCascadeInterfaceAuth(sch *schema, authRules map[string]*TypeAuth) 
 		if ifaceAuth == nil || ifaceAuth.Rules == nil {
 			continue
 		}
-		// AND this interface's auth into every concrete type that implements it.
+		// Determine the interface-level default merge op (mergeInto or "and").
+		defaultMergeOp := "and"
+		if mi := auth.Arguments.ForName("mergeInto"); mi != nil && mi.Value != nil {
+			defaultMergeOp = mi.Value.Raw
+		}
+
+		// Merge this interface's auth into every concrete type that implements it,
+		// respecting each concrete type's @auth(interfacePolicy: [...]) overrides.
 		for _, typ := range s.Types {
 			if typ.Kind != ast.Object {
 				continue
@@ -579,13 +610,16 @@ func mergePostCascadeInterfaceAuth(sch *schema, authRules map[string]*TypeAuth) 
 					ta = &TypeAuth{Fields: make(map[string]*AuthContainer)}
 					authRules[name] = ta
 				}
-				// Always AND — the interface check is a universal restriction
-				// applied regardless of the type's own cascadeAuthPolicy.
+
+				// Per-(interface, operation) override from the concrete type's interfacePolicy.
+				concreteInterfacePolicy := parseInterfacePolicy(typ)
+				entry, hasEntry := concreteInterfacePolicy[ifaceName]
+
 				ta.Rules = mergeAuthRulesWithPolicy(
 					ta.Rules,
 					cloneWithCascadeRootType(ifaceAuth.Rules, ifaceName),
-					"and",
-					interfacePolicyEntry{}, false,
+					defaultMergeOp,
+					entry, hasEntry,
 				)
 				break
 			}
@@ -880,7 +914,7 @@ func parseInterfacePolicy(typDef *ast.Definition) map[string]interfacePolicyEntr
 //  1. mergeInto on an INTERFACE must be "and" or "or".
 //  2. interfacePolicy on an INTERFACE type is rejected — it is only meaningful
 //     on concrete (OBJECT) types.
-//  3. Each interfacePolicy entry's merge must be "and" or "or".
+//  3. Each interfacePolicy entry's merge must be "and", "or", or "none".
 //  4. Each interfacePolicy entry's interface must name a real interface type
 //     defined in the schema.
 //  5. The concrete type must actually implement the referenced interface.
@@ -991,10 +1025,10 @@ func validateInterfacePolicy(schema *ast.Schema, typ *ast.Definition) gqlerror.L
 		}
 		seen[iface] = true
 
-		// Rule 3: merge must be "and" or "or".
-		if mergeOp != "and" && mergeOp != "or" {
+		// Rule 3: merge must be "and", "or", or "none".
+		if mergeOp != "and" && mergeOp != "or" && mergeOp != "none" {
 			errs = append(errs, gqlerror.ErrorPosf(typ.Position,
-				`Type %s; @auth(interfacePolicy[%s].merge): must be "and" or "or", got %q`,
+				`Type %s; @auth(interfacePolicy[%s].merge): must be "and", "or", or "none", got %q`,
 				typ.Name, iface, mergeOp))
 		}
 
@@ -1052,6 +1086,9 @@ func mergeAuthRules(
 //   - If hasEntry AND (entry.operations is nil OR entry.operations[op]) → use entry.mergeOp.
 //   - Otherwise → use defaultMergeOp.
 //
+// When op evaluates to "none", the interface's auth rule is not merged for that
+// operation; the concrete type's existing rule remains unchanged.
+//
 // Password always uses defaultMergeOp; it is not a user-facing operation and
 // cannot be referenced by interfacePolicy.operations.
 func mergeAuthRulesWithPolicy(
@@ -1062,13 +1099,7 @@ func mergeAuthRulesWithPolicy(
 	hasEntry bool,
 ) *AuthContainer {
 	if objectAuthRules == nil {
-		return &AuthContainer{
-			Password: interfaceAuthRules.Password,
-			Query:    interfaceAuthRules.Query,
-			Add:      interfaceAuthRules.Add,
-			Delete:   interfaceAuthRules.Delete,
-			Update:   interfaceAuthRules.Update,
-		}
+		objectAuthRules = &AuthContainer{}
 	}
 
 	// mergeFnFor returns the appropriate merge function for one operation name.
@@ -1076,6 +1107,11 @@ func mergeAuthRulesWithPolicy(
 		op := defaultMergeOp
 		if hasEntry && (entry.operations == nil || entry.operations[opName]) {
 			op = entry.mergeOp
+		}
+		if op == "none" {
+			return func(objectRule, interfaceRule *RuleNode) *RuleNode {
+				return objectRule
+			}
 		}
 		if op == "or" {
 			return mergeAuthNodeWithOr
@@ -1302,7 +1338,7 @@ func validateRBACOperators(typ *ast.Definition, query *RBACQuery) (bool, string)
 			return false, fmt.Sprintf("Type %s: @auth: `%s` operator has invalid value `%v`."+
 				" Value should be of type String.", typ.Name, query.Operator, query.Operand)
 		}
-	case "in":
+	case "in", "notIn":
 		// auth rule value should be of array type
 		_, ok := query.Operand.([]interface{})
 		if !ok {

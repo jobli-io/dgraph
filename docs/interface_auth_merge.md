@@ -86,11 +86,15 @@ enum CascadeAuthOperation {
 
 input InterfaceMergePolicy {
   interface: String! # name of the interface to override
-  merge: String! # "and" | "or"
+  merge: String! # "and" | "or" | "none"
   operations: [CascadeAuthOperation!] # optional subset of operations this policy applies to
   # if absent, applies to all four operations
 }
 ```
+
+- **`merge: "none"`**: Skips merging the interface's `@auth` rules for the specified operations (or
+  all operations if `operations` is omitted). The implementing concrete type relies solely on its
+  own `@auth` rules without inheriting interface constraints.
 
 > **Syntax note:** `operations` values are unquoted enum identifiers, matching the same syntax as
 > `@cascadeAuth(operations: [...])`:

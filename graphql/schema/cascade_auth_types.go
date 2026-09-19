@@ -34,6 +34,10 @@ type CascadeAuthFieldConfig struct {
 	// Strategy defines whether the cascade-auth rule expansion should use a
 	// FORWARD or REVERSE lookup strategy (or AUTO to infer the best direction).
 	Strategy string
+	// Rule is an optional condition (RBAC or GraphQL rule) that gates whether
+	// cascade auth applies to this edge. If evaluated negatively, the edge's
+	// cascade rule is pruned.
+	Rule string
 }
 
 // CascadeAuthPolicyConfig holds the parsed @cascadeAuthPolicy directive for a type.
@@ -47,6 +51,10 @@ type CascadeAuthPolicyConfig struct {
 	// Use on audit/log types that implement a WorkspaceMember-style interface
 	// for the edge field only, without wanting auth enforcement from the authority.
 	Skip bool
+	// Rule is an optional condition (RBAC or GraphQL rule) that gates the entire
+	// cascaded auth block for this type. If evaluated negatively, the cascaded
+	// block is pruned (leaving base auth intact).
+	Rule string
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +92,9 @@ func (fd *fieldDefinition) CascadeAuthConfig() *CascadeAuthFieldConfig {
 	if v := dir.Arguments.ForName("strategy"); v != nil {
 		cfg.Strategy = v.Value.Raw
 	}
+	if v := dir.Arguments.ForName("rule"); v != nil {
+		cfg.Rule = v.Value.Raw
+	}
 	return cfg
 }
 
@@ -114,6 +125,9 @@ func (t *astType) CascadeAuthPolicyConfig() CascadeAuthPolicyConfig {
 	}
 	if v := dir.Arguments.ForName("skip"); v != nil {
 		cfg.Skip = v.Value.Raw == "true"
+	}
+	if v := dir.Arguments.ForName("rule"); v != nil {
+		cfg.Rule = v.Value.Raw
 	}
 	return cfg
 }
