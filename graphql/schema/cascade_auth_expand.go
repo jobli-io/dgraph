@@ -297,6 +297,19 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 					continue
 				}
 
+				// If edge declares a condition rule (e.g. { $ws: { notIn: ["*", ""] } }),
+				// wrap the bidirectional rule so the condition gates reverse visibility as well.
+				if edge.cfg.Rule != "" {
+					childDef := sch.schema.Types[childTypeName]
+					condNode, err := parseConditionRule(sch, childDef, edge.cfg.Rule)
+					if err != nil {
+						return err
+					}
+					if condNode != nil {
+						biDirRule = &RuleNode{And: []*RuleNode{condNode, biDirRule}}
+					}
+				}
+
 				if authRules[edge.parentTypeName] == nil {
 					authRules[edge.parentTypeName] = &TypeAuth{Fields: make(map[string]*AuthContainer)}
 				}
@@ -417,6 +430,18 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 				biDirRule := withCascadeEdgePred(preCascadeQueryAuth, edge.inverseDgraphPred)
 				if !hasNewLeaves(biDirRule, edge.inverseDgraphPred, biDirSeen) {
 					continue
+				}
+
+				// If edge declares a condition rule, wrap the bidirectional rule.
+				if edge.cfg.Rule != "" {
+					childDef := sch.schema.Types[childTypeName]
+					condNode, err := parseConditionRule(sch, childDef, edge.cfg.Rule)
+					if err != nil {
+						return err
+					}
+					if condNode != nil {
+						biDirRule = &RuleNode{And: []*RuleNode{condNode, biDirRule}}
+					}
 				}
 
 				// New leaves found — merge into parent in both maps.
