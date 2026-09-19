@@ -434,6 +434,11 @@ The reverse direction always uses the child's own **pre-cascade** `@auth` rule (
 expansion runs). It only generates `query` rules — it **never** grants add/update/delete access to
 the authority.
 
+If the edge declares a conditional gate via `rule: "..."` (e.g. `{ $ws: { notIn: ["*", ""] } }`),
+that gate is also attached to the synthesized reverse rule on the authority using `AND`. In
+discovery mode or when the condition evaluates statically to `Negative`, the reverse rule is cleanly
+pruned, preventing full-table database scans across child links.
+
 > **Note:** The rule fed back to the authority is the child's _own_ `@auth`, not the
 > cascade-substituted form. This prevents circular dependencies.
 
