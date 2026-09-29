@@ -222,3 +222,27 @@ func TestNilResponse(t *testing.T) {
 		"data": null}`,
 		buf.String())
 }
+
+func TestExtensions_DryRun(t *testing.T) {
+	resp := &Response{
+		Extensions: &Extensions{
+			DryRun: true,
+		},
+	}
+	resp.AddData([]byte(`{"updateUser":{"numUids":2}}`))
+
+	buf := new(bytes.Buffer)
+	_, err := resp.WriteTo(buf)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{
+		"data": {
+			"updateUser": {
+				"numUids": 2
+			}
+		},
+		"extensions": {
+			"dryRun": true
+		}
+	}`, buf.String())
+}

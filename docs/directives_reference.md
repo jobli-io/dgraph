@@ -197,8 +197,9 @@ compliance checks).
 - Stops immediately prior to Badger/Raft commit: aborts and rolls back the transaction, ensuring
   nothing is persisted to the database.
 - Webhook notifications (`@lambdaOnMutate`) are not dispatched.
-- Any validation, schema, or post-validation errors encountered are returned as usual.
 - Injects `isDryRun: true` into the expression evaluation context.
+- Returns `"dryRun": true` in the GraphQL response `"extensions"` payload
+  (`"extensions": { "dryRun": true, ... }`).
 - Supports GraphQL variables (e.g. `mutation ($dry: Boolean) @dryRun(enabled: $dry)`).
 
 ---

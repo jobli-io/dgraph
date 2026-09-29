@@ -186,7 +186,7 @@ func (r *Response) Output() interface{} {
 		Data:   r.Data.Bytes(),
 	}
 
-	if x.Config.GraphQL.GetBool("extensions") {
+	if x.Config.GraphQL.GetBool("extensions") || (r.Extensions != nil && r.Extensions.DryRun) {
 		res.Extensions = r.Extensions
 	}
 	return res
@@ -197,6 +197,7 @@ type Extensions struct {
 	TouchedUids uint64 `json:"touched_uids,omitempty"`
 	Tracing     *Trace `json:"tracing,omitempty"`
 	DQLQuery    string `json:"dql_query,omitempty"`
+	DryRun      bool   `json:"dryRun,omitempty"`
 }
 
 // GetTouchedUids returns TouchedUids
@@ -214,6 +215,10 @@ func (e *Extensions) Merge(ext *Extensions) {
 	}
 
 	e.TouchedUids += ext.TouchedUids
+
+	if ext.DryRun {
+		e.DryRun = true
+	}
 
 	if e.Tracing == nil {
 		e.Tracing = ext.Tracing

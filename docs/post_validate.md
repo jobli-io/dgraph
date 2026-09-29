@@ -503,4 +503,4 @@ The schema loader enforces at load time:
   prospective mutated data at the transaction's `StartTs` before rolling back the transaction
   immediately prior to the Badger/Raft commit. The returned GraphQL payload (`numUids`, selection
   set fields) matches what the committed mutation would return, while guaranteeing no writes are
-  persisted to the database.
+  persisted to the database. The GraphQL response `"extensions"` object includes `"dryRun": true`.

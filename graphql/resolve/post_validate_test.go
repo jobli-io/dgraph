@@ -1151,6 +1151,9 @@ type TestUser
 	u1 := users[0].(map[string]interface{})
 	require.Equal(t, "test@gorillajobs.app", u1["email"])
 	require.Equal(t, "xxxxxxzzz", u1["firstName"])
+
+	require.NotNil(t, resolved.Extensions)
+	require.True(t, resolved.Extensions.DryRun, "Extensions.DryRun must be true for dry-run mutations")
 }
 
 type dryRunQueryInspector struct {

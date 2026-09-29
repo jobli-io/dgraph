@@ -300,6 +300,7 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	dgraphMutationDuration := &schema.LabeledOffsetDuration{Label: "mutation"}
 	dgraphPostMutationQueryDuration := &schema.LabeledOffsetDuration{Label: "query"}
 	ext := &schema.Extensions{
+		DryRun: mutation.IsDryRun(),
 		Tracing: &schema.Trace{
 			Execution: &schema.ExecutionTrace{
 				Resolvers: []*schema.ResolverTrace{
