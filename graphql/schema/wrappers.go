@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/gqlparser/v2/ast"
+	"github.com/dgraph-io/gqlparser/v2/gqlerror"
 	"github.com/dgraph-io/gqlparser/v2/parser"
 	"github.com/expr-lang/expr" // For expression evaluation
 	"github.com/go-playground/validator/v10"
@@ -238,6 +239,7 @@ type Mutation interface {
 	QueryField() Field
 	NumUidsField() Field
 	HasLambdaOnMutate() bool
+	IsDryRun() bool
 }
 
 // A Query is a field (from the schema's Query type) from an Operation
@@ -266,6 +268,10 @@ type Type interface {
 	// given mutation action ("add" or "update"). Returns nil if no @postValidate
 	// directive is present on the type or if the directive has no expr for this action.
 	PostValidateConfig(action string) *PostValidateConfig
+	// PostValidateConfigs returns all applicable @postValidate configurations for the
+	// given mutation action, combining the type's own @postValidate directive (if any)
+	// with directives inherited from all interfaces the type implements.
+	PostValidateConfigs(action string) []*PostValidateConfig
 	IDField() FieldDefinition
 	XIDFields() []FieldDefinition
 	InterfaceImplHasAuthRules() bool
@@ -2341,6 +2347,46 @@ func (m *mutation) HasLambdaOnMutate() bool {
 	return m.op.inSchema.lambdaOnMutate[m.Name()]
 }
 
+func (m *mutation) IsDryRun() bool {
+	if m == nil || m.op == nil || m.op.op == nil {
+		return false
+	}
+	dir := m.op.op.Directives.ForName(dryRunDirective)
+	if dir == nil {
+		return false
+	}
+	arg := dir.Arguments.ForName("enabled")
+	if arg == nil {
+		// When @dryRun is specified without arguments, enabled defaults to true
+		// (explicit presence indicates the intent to dry run).
+		return true
+	}
+	// Check variable reference if arg value is a variable
+	if arg.Value != nil && arg.Value.Kind == ast.Variable {
+		if val, ok := m.op.vars[arg.Value.Raw]; ok {
+			if b, ok := val.(bool); ok {
+				return b
+			}
+		}
+	}
+	if dir.Definition != nil {
+		argMap := dir.ArgumentMap(m.op.vars)
+		if val, ok := argMap["enabled"]; ok {
+			if b, ok := val.(bool); ok {
+				return b
+			}
+		}
+	} else if arg.Value != nil {
+		if arg.Value.Raw == "true" {
+			return true
+		}
+		if arg.Value.Raw == "false" {
+			return false
+		}
+	}
+	return false
+}
+
 func (m *mutation) Location() x.Location {
 	return (*field)(m).Location()
 }
@@ -2747,46 +2793,140 @@ func (t *astType) GetOldValueFieldsForQuery() map[string]*OldValueSelection {
 	return result
 }
 
-// PostValidateConfig returns the resolved @postValidate directive configuration for the
-// given mutation action ("add" or "update"). Returns nil if the directive is absent,
-// or if no expression applies to this action.
-//
-// Resolution order for expr and reason:
-//  1. Operation-specific sub-arg (add/update) takes precedence.
-//  2. Top-level expr/reason applies to both operations.
-func (t *astType) PostValidateConfig(action string) *PostValidateConfig {
-	typeDef := t.inSchema.schema.Types[t.Name()]
-	if typeDef == nil {
+// parsePostValidateObject extracts a PostValidateConfig from an ObjectValue node.
+// If the object does not specify a reason, defaultReason is used.
+func parsePostValidateObject(val *ast.Value, defaultReason string) *PostValidateConfig {
+	if val == nil || val.Kind != ast.ObjectValue {
 		return nil
 	}
-	dir := typeDef.Directives.ForName(postValidateDirective)
+	exprChild := val.Children.ForName("expr")
+	if exprChild == nil || exprChild.Raw == "" {
+		return nil
+	}
+	reason := defaultReason
+	if reasonChild := val.Children.ForName("reason"); reasonChild != nil && reasonChild.Raw != "" {
+		reason = reasonChild.Raw
+	}
+	return &PostValidateConfig{
+		Expr:   exprChild.Raw,
+		Reason: reason,
+	}
+}
+
+// parsePostValidateListOrObject extracts configs from an argument that may be either
+// a ListValue (e.g. [{ expr: ... }, ...]) or an ObjectValue (e.g. { expr: ... }).
+func parsePostValidateListOrObject(arg *ast.Argument, defaultReason string) []*PostValidateConfig {
+	if arg == nil || arg.Value == nil {
+		return nil
+	}
+	var configs []*PostValidateConfig
+	switch arg.Value.Kind {
+	case ast.ListValue:
+		for _, child := range arg.Value.Children {
+			if child.Value != nil {
+				if cfg := parsePostValidateObject(child.Value, defaultReason); cfg != nil {
+					configs = append(configs, cfg)
+				}
+			}
+		}
+	case ast.ObjectValue:
+		if cfg := parsePostValidateObject(arg.Value, defaultReason); cfg != nil {
+			configs = append(configs, cfg)
+		}
+	}
+	return configs
+}
+
+// parsePostValidateDirective extracts all applicable @postValidate configurations
+// for the given mutation action ("add" or "update"). Operation-specific arguments
+// (add or update) take precedence over root-level arguments (rules or expr).
+func parsePostValidateDirective(dir *ast.Directive, action string) []*PostValidateConfig {
 	if dir == nil {
 		return nil
 	}
 
-	// Helper: resolve a named string arg with operation-specific precedence.
-	resolveArg := func(name string) string {
-		if opArg := dir.Arguments.ForName(action); opArg != nil {
-			if child := opArg.Value.Children.ForName(name); child != nil && child.Raw != "" {
-				return child.Raw
-			}
-		}
-		if rootArg := dir.Arguments.ForName(name); rootArg != nil && rootArg.Value.Raw != "" {
-			return rootArg.Value.Raw
-		}
-		return ""
+	defaultReason := ""
+	if rootReason := dir.Arguments.ForName("reason"); rootReason != nil && rootReason.Value.Raw != "" {
+		defaultReason = rootReason.Value.Raw
 	}
 
-	exprStr := resolveArg("expr")
-	if exprStr == "" {
-		// No expr applies to this operation — skip.
+	// 1. Operation-specific argument ("add" or "update") takes precedence.
+	if opArg := dir.Arguments.ForName(action); opArg != nil {
+		if opConfigs := parsePostValidateListOrObject(opArg, defaultReason); len(opConfigs) > 0 {
+			return opConfigs
+		}
+	}
+
+	// 2. Root-level arguments apply if no operation-specific config was found.
+	var configs []*PostValidateConfig
+	seenExprs := make(map[string]bool)
+
+	// 2a. root rules: [DgraphPostValidate]
+	if rulesArg := dir.Arguments.ForName("rules"); rulesArg != nil {
+		for _, cfg := range parsePostValidateListOrObject(rulesArg, defaultReason) {
+			if !seenExprs[cfg.Expr] {
+				configs = append(configs, cfg)
+				seenExprs[cfg.Expr] = true
+			}
+		}
+	}
+
+	// 2b. root expr: String
+	if rootExpr := dir.Arguments.ForName("expr"); rootExpr != nil && rootExpr.Value.Raw != "" {
+		if !seenExprs[rootExpr.Value.Raw] {
+			configs = append(configs, &PostValidateConfig{
+				Expr:   rootExpr.Value.Raw,
+				Reason: defaultReason,
+			})
+			seenExprs[rootExpr.Value.Raw] = true
+		}
+	}
+
+	return configs
+}
+
+// PostValidateConfigs returns all applicable @postValidate configurations for the
+// given mutation action ("add" or "update"). It checks the type's own @postValidate
+// directive first, followed by any @postValidate directives declared on interfaces
+// that the type implements.
+func (t *astType) PostValidateConfigs(action string) []*PostValidateConfig {
+	typeDef := t.inSchema.schema.Types[t.Name()]
+	if typeDef == nil {
 		return nil
 	}
 
-	return &PostValidateConfig{
-		Expr:   exprStr,
-		Reason: resolveArg("reason"),
+	var configs []*PostValidateConfig
+	seenExprs := make(map[string]bool)
+
+	// 1. Direct type directive
+	for _, cfg := range parsePostValidateDirective(typeDef.Directives.ForName(postValidateDirective), action) {
+		if !seenExprs[cfg.Expr] {
+			configs = append(configs, cfg)
+			seenExprs[cfg.Expr] = true
+		}
 	}
+
+	// 2. Directives inherited from implemented interfaces
+	for _, ifaceName := range typeDef.Interfaces {
+		if ifaceDef := t.inSchema.schema.Types[ifaceName]; ifaceDef != nil {
+			for _, cfg := range parsePostValidateDirective(ifaceDef.Directives.ForName(postValidateDirective), action) {
+				if !seenExprs[cfg.Expr] {
+					configs = append(configs, cfg)
+					seenExprs[cfg.Expr] = true
+				}
+			}
+		}
+	}
+
+	return configs
+}
+
+func (t *astType) PostValidateConfig(action string) *PostValidateConfig {
+	cfgs := t.PostValidateConfigs(action)
+	if len(cfgs) == 0 {
+		return nil
+	}
+	return cfgs[0]
 }
 
 // buildSelectionTree converts a list of dot-separated field paths into a nested
@@ -3356,12 +3496,36 @@ type ExprFuncs struct {
 	Error             func(interface{}) (interface{}, error)                                               `expr:"error"`
 }
 
-// ExprError is the typed error returned by the error() built-in function in
+// ExprErrors is the typed error returned by the error() built-in function in
 // expressions. Using a named type lets callers use errors.As to extract the
-// original message without parsing expr-lang's runtime error annotation format.
-type ExprError struct{ Message string }
+// original errors or message without parsing expr-lang's runtime error annotation format.
+type ExprErrors struct {
+	Message string
+	Errors  []gqlerror.Error
+}
 
-func (e *ExprError) Error() string { return e.Message }
+func (e *ExprErrors) Error() string {
+	if e == nil {
+		return ""
+	}
+	if len(e.Errors) == 0 {
+		if e.Message != "" {
+			return e.Message
+		}
+		return "expression error"
+	}
+	if len(e.Errors) == 1 {
+		return e.Errors[0].Message
+	}
+	msgs := make([]string, len(e.Errors))
+	for i, err := range e.Errors {
+		msgs[i] = err.Message
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// ExprError is retained as a type alias for backward compatibility.
+type ExprError = ExprErrors
 
 // NewExprFuncs returns the built-in helper function set wired to the given auth context.
 // Pass the returned value as the ExprFuncs embedded field when constructing any
@@ -3385,15 +3549,47 @@ func NewExprFuncs(auth AuthCtx) ExprFuncs {
 			return nil
 		},
 		Error: func(v interface{}) (interface{}, error) {
-			var msg string
-			switch s := v.(type) {
+			switch val := v.(type) {
 			case string:
-				msg = s
+				return nil, &ExprErrors{Message: val, Errors: []gqlerror.Error{{Message: val}}}
+			case []string:
+				var errs []gqlerror.Error
+				for _, s := range val {
+					errs = append(errs, gqlerror.Error{Message: s})
+				}
+				return nil, &ExprErrors{Message: strings.Join(val, "; "), Errors: errs}
+			case []interface{}:
+				// Support rich objects: [{ message: "...", code: "...", extensions: { ... } }]
+				var errs []gqlerror.Error
+				var msgs []string
+				for _, item := range val {
+					if m, ok := item.(map[string]interface{}); ok {
+						msg, _ := m["message"].(string)
+						err := gqlerror.Error{Message: msg, Extensions: m}
+						errs = append(errs, err)
+						msgs = append(msgs, msg)
+					} else {
+						str := fmt.Sprint(item)
+						errs = append(errs, gqlerror.Error{Message: str})
+						msgs = append(msgs, str)
+					}
+				}
+				return nil, &ExprErrors{Message: strings.Join(msgs, "; "), Errors: errs}
+			case map[string]interface{}:
+				msg, _ := val["message"].(string)
+				return nil, &ExprErrors{Message: msg, Errors: []gqlerror.Error{{Message: msg, Extensions: val}}}
+			case gqlerror.Error:
+				return nil, &ExprErrors{Message: val.Message, Errors: []gqlerror.Error{val}}
+			case []gqlerror.Error:
+				msgs := make([]string, len(val))
+				for i, e := range val {
+					msgs[i] = e.Message
+				}
+				return nil, &ExprErrors{Message: strings.Join(msgs, "; "), Errors: val}
 			default:
-				b, _ := json.Marshal(v)
-				msg = string(b)
+				str := fmt.Sprint(v)
+				return nil, &ExprErrors{Message: str, Errors: []gqlerror.Error{{Message: str}}}
 			}
-			return nil, &ExprError{Message: msg}
 		},
 	}
 }
@@ -3415,6 +3611,7 @@ type exprEvaluationContext struct {
 	Auth       map[string]interface{} `expr:"auth"`
 	Action     string                 `expr:"action"`
 	FieldValue interface{}            `expr:"value"` // set by WithValueField for @validate/@transform
+	IsDryRun   bool                   `expr:"isDryRun"`
 	// Shared built-in functions.
 	ExprFuncs
 	// Internal fields — not exposed to expr-lang (no expr: tag).
@@ -3479,6 +3676,7 @@ type AuthCtx struct {
 	// any @default expressions are evaluated. This is used to expose the
 	// true client input via `input` in @validate expressions.
 	RawInput map[string]interface{}
+	IsDryRun bool
 }
 
 func NewExprEvaluationContext(
@@ -3515,6 +3713,7 @@ func NewExprEvaluationContext(
 		Remove:    remove,
 		Auth:      auth.AuthVariables,
 		Action:    action,
+		IsDryRun:  auth.IsDryRun,
 		ExprFuncs: NewExprFuncs(auth),
 	}
 }
@@ -3707,9 +3906,9 @@ func (eec *exprEvaluationContext) validateExpr(exprString string) func(fl valida
 			// error() built-in returns &ExprError — extract the clean message and store
 			// it so ValidateValue can surface it via {{.error}} in the reason template.
 			// Other runtime errors (e.g. nil dereference) are panicked as before.
-			var exprErr *ExprError
+			var exprErr *ExprErrors
 			if errors.As(runErr, &exprErr) {
-				eec.exprErrorMsg = exprErr.Message // writes to original eev via pointer
+				eec.exprErrorMsg = exprErr.Error() // writes to original eev via pointer
 				return false
 			}
 			panic(fmt.Errorf("expression execution failed for field '%s' with rule '%s': %w", fl.FieldName(), exprString, runErr))
@@ -3752,115 +3951,245 @@ func (eec *exprEvaluationContext) validateExpr(exprString string) func(fl valida
 //
 // Returns `nil` if validation succeeds or if no '@validate' directive is present on the field.
 // Returns a slice of `error` if validation fails. Errors originating from panics are wrapped in `PanicWrappedError`.
-func validateValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (errs []error) {
-	// 1. Retrieve the @validate directive from the field definition.
-	dir := fd.Directives.ForName(validateDirective)
+// ValidateConfig holds the resolved configuration for a single @validate rule.
+type ValidateConfig struct {
+	Rule   string
+	Expr   string
+	Reason string
+}
+
+// parseValidateObject extracts a ValidateConfig from an ObjectValue node.
+// If the object does not specify a reason, defaultReason is used.
+func parseValidateObject(val *ast.Value, defaultReason string) *ValidateConfig {
+	if val == nil || val.Kind != ast.ObjectValue {
+		return nil
+	}
+	var rule, expr string
+	if ruleChild := val.Children.ForName("rule"); ruleChild != nil && ruleChild.Raw != "" {
+		rule = ruleChild.Raw
+	}
+	if exprChild := val.Children.ForName("expr"); exprChild != nil && exprChild.Raw != "" {
+		expr = exprChild.Raw
+	}
+	if rule == "" && expr == "" {
+		return nil
+	}
+	reason := defaultReason
+	if reasonChild := val.Children.ForName("reason"); reasonChild != nil && reasonChild.Raw != "" {
+		reason = reasonChild.Raw
+	}
+	return &ValidateConfig{
+		Rule:   rule,
+		Expr:   expr,
+		Reason: reason,
+	}
+}
+
+// parseValidateListOrObject extracts configs from an argument that may be either
+// a ListValue (e.g. [{ rule: ... }, ...]) or an ObjectValue (e.g. { rule: ... }).
+func parseValidateListOrObject(arg *ast.Argument, defaultReason string) []*ValidateConfig {
+	if arg == nil || arg.Value == nil {
+		return nil
+	}
+	var configs []*ValidateConfig
+	switch arg.Value.Kind {
+	case ast.ListValue:
+		for _, child := range arg.Value.Children {
+			if child.Value != nil {
+				if cfg := parseValidateObject(child.Value, defaultReason); cfg != nil {
+					configs = append(configs, cfg)
+				}
+			}
+		}
+	case ast.ObjectValue:
+		if cfg := parseValidateObject(arg.Value, defaultReason); cfg != nil {
+			configs = append(configs, cfg)
+		}
+	}
+	return configs
+}
+
+// parseValidateDirective extracts all applicable @validate configurations
+// for the given mutation action ("add" or "update"). Operation-specific arguments
+// (add or update) take precedence over root-level arguments (rules or rule/expr).
+func parseValidateDirective(dir *ast.Directive, action string) []*ValidateConfig {
 	if dir == nil {
-		// No @validate directive is present on this field, so no validation is required.
 		return nil
 	}
 
-	var validationTags []string
-	var reason string
-
-	// Resolve reason, rule, and expr with operation-specific precedence:
-	// 1. operation-specific arg (add/update) takes precedence
-	// 2. root-level arg applies to both operations
-	resolveStringArg := func(name string) (string, ast.ValueKind, bool) {
-		if opArg := dir.Arguments.ForName(action); opArg != nil {
-			if child := opArg.Value.Children.ForName(name); child != nil && child.Raw != "" {
-				return child.Raw, child.Kind, true
-			}
-		}
-		if rootArg := dir.Arguments.ForName(name); rootArg != nil {
-			return rootArg.Value.Raw, rootArg.Value.Kind, true
-		}
-		return "", 0, false
+	defaultReason := ""
+	if rootReason := dir.Arguments.ForName("reason"); rootReason != nil && rootReason.Value.Raw != "" {
+		defaultReason = rootReason.Value.Raw
 	}
 
-	if reasonRaw, reasonKind, ok := resolveStringArg("reason"); ok {
-		if reasonKind != ast.StringValue && reasonKind != ast.BlockValue && reasonKind != 0 {
-			return []error{errors.Errorf("reason argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, reasonKind)}
-		}
-		reason = reasonRaw
-	}
-
-	if ruleRaw, ruleKind, ok := resolveStringArg("rule"); ok {
-		if ruleKind != ast.StringValue && ruleKind != ast.BlockValue && ruleKind != 0 {
-			return []error{errors.Errorf("rule argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, ruleKind)}
-		}
-		if ruleRaw != "" {
-			validationTags = append(validationTags, ruleRaw)
+	// 1. Operation-specific argument ("add" or "update") takes precedence.
+	if opArg := dir.Arguments.ForName(action); opArg != nil {
+		if opConfigs := parseValidateListOrObject(opArg, defaultReason); len(opConfigs) > 0 {
+			return opConfigs
 		}
 	}
 
-	// Initialize validator here, before potential early returns based on validationTags
-	validate := validator.New(validator.WithRequiredStructEnabled())
-	// Initialize the expr evaluation context
-	eev := NewExprEvaluationContext(parentTypeName, parent, oldValue, removeValue, auth, action).
-		WithValueField(fd.Name)
+	// 2. Root-level arguments apply if no operation-specific config was found.
+	var configs []*ValidateConfig
+	seenKeys := make(map[string]bool)
 
-	// Process 'expr' argument only if the field value is not nil.
-	// If 'value' is nil, 'expr' validation will be skipped.
-	if eev.Value() != nil {
-		if exprRaw, exprKind, ok := resolveStringArg("expr"); ok {
-			if exprKind != ast.StringValue && exprKind != ast.BlockValue && exprKind != 0 {
-				return []error{errors.Errorf("expr argument for @validate directive on field '%s' must be a string literal, got %v", fd.Name, exprKind)}
-			}
-			if exprRaw != "" {
-				validationTags = append(validationTags, "expr")
-
-				// Only register the custom validator if the 'expr' tag was actually added.
-				validate.RegisterValidation("expr", eev.validateExpr(exprRaw), true)
+	// 2a. root rules: [DgraphValidate]
+	if rulesArg := dir.Arguments.ForName("rules"); rulesArg != nil {
+		for _, cfg := range parseValidateListOrObject(rulesArg, defaultReason) {
+			key := cfg.Rule + "\x00" + cfg.Expr
+			if !seenKeys[key] {
+				configs = append(configs, cfg)
+				seenKeys[key] = true
 			}
 		}
 	}
 
-	// After processing 'rule' and potentially 'expr' to populate validationTags,
-	// if no tags were added, then no validation is required for this field.
-	if len(validationTags) == 0 {
-		return nil
+	// 2b. root rule: String / expr: String
+	var rootRule, rootExpr string
+	if rArg := dir.Arguments.ForName("rule"); rArg != nil && rArg.Value.Raw != "" {
+		rootRule = rArg.Value.Raw
+	}
+	if eArg := dir.Arguments.ForName("expr"); eArg != nil && eArg.Value.Raw != "" {
+		rootExpr = eArg.Value.Raw
+	}
+	if rootRule != "" || rootExpr != "" {
+		key := rootRule + "\x00" + rootExpr
+		if !seenKeys[key] {
+			configs = append(configs, &ValidateConfig{
+				Rule:   rootRule,
+				Expr:   rootExpr,
+				Reason: defaultReason,
+			})
+			seenKeys[key] = true
+		}
 	}
 
-	ruleString := strings.Join(validationTags, ",")
+	return configs
+}
 
-	// Set up the deferred function to catch panics and wrap them in PanicWrappedError.
+func collectValidateConfigs(sch *ast.Schema, fd *ast.FieldDefinition, parentTypeName string, action string) []*ValidateConfig {
+	var configs []*ValidateConfig
+	seenKeys := make(map[string]bool)
+
+	addConfigs := func(cfgs []*ValidateConfig) {
+		for _, cfg := range cfgs {
+			key := cfg.Rule + "\x00" + cfg.Expr
+			if !seenKeys[key] {
+				configs = append(configs, cfg)
+				seenKeys[key] = true
+			}
+		}
+	}
+
+	// 1. Directives on the field itself
+	if dir := fd.Directives.ForName(validateDirective); dir != nil {
+		addConfigs(parseValidateDirective(dir, action))
+	}
+
+	// 2. Directives inherited from implemented interfaces
+	if sch != nil && parentTypeName != "" {
+		if parentType := sch.Types[parentTypeName]; parentType != nil {
+			for _, ifaceName := range parentType.Interfaces {
+				if iface := sch.Types[ifaceName]; iface != nil {
+					for _, ifaceField := range iface.Fields {
+						if ifaceField.Name == fd.Name {
+							if dir := ifaceField.Directives.ForName(validateDirective); dir != nil {
+								addConfigs(parseValidateDirective(dir, action))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return configs
+}
+
+func runValidation(validate *validator.Validate, eev *exprEvaluationContext, ruleString string, reason string, fieldName string) (errs []error, panicErr error) {
+	eev.exprErrorMsg = ""
+
 	defer func() {
 		if r := recover(); r != nil {
-			panicMsg := fmt.Errorf("validation for field '%s' with rule '%s' caused a panic: %v", fd.Name, ruleString, r)
-			// Assign a slice containing the PanicWrappedError to the named return `errs`.
-			errs = []error{&CompileError{Err: panicMsg}}
+			panicMsg := fmt.Errorf("validation for field '%s' with rule '%s' caused a panic: %v", fieldName, ruleString, r)
+			panicErr = &CompileError{Err: panicMsg}
 		}
 	}()
 
 	validationErr := validate.Var(eev.Value(), ruleString)
-
 	if validationErr != nil {
-		// `validationErr` will be of type `validator.ValidationErrors` if rules failed.
-		// Iterate through them and format, appending to the `errs` slice.
-		for _, e := range validationErr.(validator.ValidationErrors) {
-			var msg string
-			if reason != "" {
-				// Render reason as a Go text/template. Available variables:
-				// {{.value}}  — the field value being validated
-				// {{.field}}  — the field name
-				// {{.action}} — "add" or "update"
-				// {{.auth}}   — JWT claim map
-				// {{.error}}  — message from error() call; empty string when expr returned false
-				if rendered, tmplErr := renderValidateReason(reason, eev, e.ActualTag()); tmplErr == nil {
-					msg = rendered
+		if valErrs, ok := validationErr.(validator.ValidationErrors); ok {
+			for _, e := range valErrs {
+				var msg string
+				if reason != "" {
+					if rendered, tmplErr := renderValidateReason(reason, *eev, e.ActualTag()); tmplErr == nil {
+						msg = rendered
+					} else {
+						msg = reason
+					}
 				} else {
-					msg = reason // template failed — use raw string
+					msg = fmt.Sprintf("Field %s failed validation on %s", fieldName, e.ActualTag())
 				}
-			} else {
-				msg = fmt.Sprintf("Field %s failed validation on %s", fd.Name, e.ActualTag())
+				errs = append(errs, errors.New(msg))
 			}
-			errs = append(errs, errors.New(msg))
+		} else {
+			errs = append(errs, validationErr)
+		}
+	}
+	return errs, nil
+}
+
+func validateValue(sch *ast.Schema, fd *ast.FieldDefinition, action string, parentTypeName string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) (errs []error) {
+	// 1. Validate argument literal kinds if directive is present on the field
+	if dir := fd.Directives.ForName(validateDirective); dir != nil {
+		for _, argName := range []string{"reason", "rule", "expr"} {
+			if arg := dir.Arguments.ForName(argName); arg != nil && arg.Value != nil {
+				if arg.Value.Kind != ast.StringValue && arg.Value.Kind != ast.BlockValue && arg.Value.Kind != 0 {
+					return []error{&CompileError{Err: errors.Errorf("%s argument for @validate directive on field '%s' must be a string literal, got %v", argName, fd.Name, arg.Value.Kind)}}
+				}
+			}
 		}
 	}
 
-	// Returns nil if `errs` is empty (no validation failures and no panics).
-	// Otherwise, returns the collected slice of errors.
+	configs := collectValidateConfigs(sch, fd, parentTypeName, action)
+	if len(configs) == 0 {
+		return nil
+	}
+
+	// Initialize the expr evaluation context
+	eev := NewExprEvaluationContext(parentTypeName, parent, oldValue, removeValue, auth, action).
+		WithValueField(fd.Name)
+
+	for _, cfg := range configs {
+		var validationTags []string
+		if cfg.Rule != "" {
+			validationTags = append(validationTags, cfg.Rule)
+		}
+
+		validate := validator.New(validator.WithRequiredStructEnabled())
+
+		// Process 'expr' argument only if the field value is not nil.
+		// If 'value' is nil, 'expr' validation will be skipped.
+		if cfg.Expr != "" && eev.Value() != nil {
+			validationTags = append(validationTags, "expr")
+			validate.RegisterValidation("expr", eev.validateExpr(cfg.Expr), true)
+		}
+
+		if len(validationTags) == 0 {
+			continue
+		}
+
+		ruleString := strings.Join(validationTags, ",")
+
+		cfgErrs, panicErr := runValidation(validate, &eev, ruleString, cfg.Reason, fd.Name)
+		if panicErr != nil {
+			return []error{panicErr}
+		}
+		if len(cfgErrs) > 0 {
+			errs = append(errs, cfgErrs...)
+		}
+	}
+
 	return errs
 }
 

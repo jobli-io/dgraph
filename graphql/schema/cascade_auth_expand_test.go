@@ -2050,7 +2050,70 @@ type User implements WorkspaceMember
 }
 
 func TestCascadeAuth_ConditionalEdgeRule_Bidirectional(t *testing.T) {
-	input := `
+	t.Run("child with default AND policy gates bidirectional rule with edge condition", func(t *testing.T) {
+		input := `
+type Workspace
+  @auth(query: { rule: """
+    query($ws: String) {
+      queryWorkspace(filter: { name: { eq: $ws } }) { __typename }
+    }
+  """ })
+{
+  name: String! @id
+  hasUsers: [User] @hasInverse(field: inWorkspace)
+}
+
+interface WorkspaceMember {
+  inWorkspace: Workspace @cascadeAuth(bidirectional: true, rule: "{ $ws: { notIn: [\"*\", \"\"] } }")
+}
+
+type User implements WorkspaceMember
+  @auth(query: { rule: """
+    query($sub: String!) {
+      queryUser(filter: { userId: { eq: $sub } }) { __typename }
+    }
+  """ })
+{
+  id: ID!
+  userId: String! @id
+}
+`
+		s := buildSchema(t, input)
+		wsAuth := s.authRules["Workspace"]
+		require.NotNil(t, wsAuth)
+		require.NotNil(t, wsAuth.Rules)
+		require.NotNil(t, wsAuth.Rules.Query)
+
+		// Workspace query auth should be OR(ownAuth, biDirRule)
+		q := wsAuth.Rules.Query
+		require.NotEmpty(t, q.Or, "Workspace query auth should contain OR from bidirectional rule")
+
+		// Find the bidirectional rule arm: it should be wrapped in AND(condNode, biDirRule)
+		var biDirArm *RuleNode
+		for _, arm := range q.Or {
+			if len(arm.And) == 2 && arm.And[0].RBACRule != nil {
+				biDirArm = arm
+				break
+			}
+		}
+		require.NotNil(t, biDirArm, "Bidirectional arm on Workspace must be wrapped in AND with edge condition rule for AND policy")
+
+		cond := biDirArm.And[0]
+		require.NotNil(t, cond.RBACRule)
+		assert.Equal(t, "ws", cond.RBACRule.Variable)
+		assert.Equal(t, "notIn", cond.RBACRule.Operator)
+
+		// In discovery mode ($ws == "*"), condition evaluates to Negative, pruning bidirectional check!
+		discoveryVars := map[string]interface{}{"$ws": "*"}
+		assert.Equal(t, Negative, cond.EvaluateStatic(discoveryVars), "Bidirectional arm condition must evaluate to Negative in discovery mode (*)")
+
+		// In active tenant mode ($ws == "tenant-1"), condition evaluates to Positive.
+		tenantVars := map[string]interface{}{"$ws": "tenant-1"}
+		assert.Equal(t, Positive, cond.EvaluateStatic(tenantVars), "Bidirectional arm condition must evaluate to Positive in active tenant mode")
+	})
+
+	t.Run("child with OR policy preserves concrete auth on bidirectional rule without edge condition gate", func(t *testing.T) {
+		input := `
 type Workspace
   @auth(query: { rule: """
     query($ws: String) {
@@ -2078,36 +2141,24 @@ type User implements WorkspaceMember
   userId: String! @id
 }
 `
-	s := buildSchema(t, input)
-	wsAuth := s.authRules["Workspace"]
-	require.NotNil(t, wsAuth)
-	require.NotNil(t, wsAuth.Rules)
-	require.NotNil(t, wsAuth.Rules.Query)
+		s := buildSchema(t, input)
+		wsAuth := s.authRules["Workspace"]
+		require.NotNil(t, wsAuth)
+		require.NotNil(t, wsAuth.Rules)
+		require.NotNil(t, wsAuth.Rules.Query)
 
-	// Workspace query auth should be OR(ownAuth, biDirRule)
-	q := wsAuth.Rules.Query
-	require.NotEmpty(t, q.Or, "Workspace query auth should contain OR from bidirectional rule")
+		// Workspace query auth should be OR(ownAuth, biDirRule)
+		q := wsAuth.Rules.Query
+		require.NotEmpty(t, q.Or, "Workspace query auth should contain OR from bidirectional rule")
 
-	// Find the bidirectional rule arm: it should be wrapped in AND(condNode, biDirRule)
-	var biDirArm *RuleNode
-	for _, arm := range q.Or {
-		if len(arm.And) == 2 && arm.And[0].RBACRule != nil {
-			biDirArm = arm
-			break
+		// The bidirectional arm should NOT be gated by AND(condNode, ...), allowing discovery mode through concrete user auth
+		hasGatedArm := false
+		for _, arm := range q.Or {
+			if len(arm.And) == 2 && arm.And[0].RBACRule != nil {
+				hasGatedArm = true
+				break
+			}
 		}
-	}
-	require.NotNil(t, biDirArm, "Bidirectional arm on Workspace must be wrapped in AND with edge condition rule")
-
-	cond := biDirArm.And[0]
-	require.NotNil(t, cond.RBACRule)
-	assert.Equal(t, "ws", cond.RBACRule.Variable)
-	assert.Equal(t, "notIn", cond.RBACRule.Operator)
-
-	// In discovery mode ($ws == "*"), condition evaluates to Negative, pruning bidirectional check!
-	discoveryVars := map[string]interface{}{"$ws": "*"}
-	assert.Equal(t, Negative, cond.EvaluateStatic(discoveryVars), "Bidirectional arm condition must evaluate to Negative in discovery mode (*)")
-
-	// In active tenant mode ($ws == "tenant-1"), condition evaluates to Positive.
-	tenantVars := map[string]interface{}{"$ws": "tenant-1"}
-	assert.Equal(t, Positive, cond.EvaluateStatic(tenantVars), "Bidirectional arm condition must evaluate to Positive in active tenant mode")
+		assert.False(t, hasGatedArm, "Bidirectional arm for OR policy child should not be wrapped with edge condition gate")
+	})
 }

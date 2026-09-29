@@ -12,11 +12,12 @@ per-field guard.
 
 ```graphql
 directive @validate(
-  rule: String # go-playground/validator tag string
-  expr: String # expr-lang boolean expression
-  reason: String # human-readable message on failure
-  add: DgraphValidate
-  update: DgraphValidate
+  rule: String # go-playground/validator tag string (backward compatibility)
+  expr: String # expr-lang boolean expression (backward compatibility)
+  reason: String # human-readable message on failure / default fallback
+  rules: [DgraphValidate] # general rules for add and update (array or single object)
+  add: [DgraphValidate] # add-specific rules (array or single object)
+  update: [DgraphValidate] # update-specific rules (array or single object)
 ) on FIELD_DEFINITION
 
 input DgraphValidate {
@@ -131,6 +132,16 @@ quota: Int
 >
 > When `expr` calls `error(msg)`, the expression returns false and `{{.error}}` is populated with
 > `msg`. When `expr` simply returns `false`, `{{.error}}` is an empty string `""`.
+>
+> The built-in `error(v)` function accepts:
+>
+> - `string`: A single error message string.
+> - `[]string`: A list of strings, returned as multiple distinct GraphQL errors in the response.
+> - `[]map` or `map`: Rich error objects (e.g. `[{ message: "...", code: "...", ... }]`), preserving
+>   custom fields in GraphQL error `extensions`.
+>
+> Additionally, `isDryRun` (boolean) is available in the expr environment and indicates whether the
+> enclosing mutation is executing under `@dryRun`.
 
 > [!IMPORTANT] `{{.error}}` requires `expr:` to call `error()` explicitly. It is **not** populated
 > by runtime exceptions (nil dereference, etc.) — those panic and surface as a different error. Use
@@ -186,21 +197,81 @@ When the email hasn't changed (`before.email == input.email`), `res` is `nil`, `
 
 ---
 
-## Operation-Specific Arms
+## Operation-Specific Arms and Array of Rules
 
-By default, `rule`/`expr` apply to **both** add and update mutations. Use `add:` and `update:` to
-provide operation-specific validation:
+By default, `rule`/`expr` or `rules:` apply to **both** add and update mutations. Use `add:` and
+`update:` to provide operation-specific validation.
+
+### Array of Rules
+
+Each of `rules:`, `add:`, and `update:` accepts a list of `DgraphValidate` objects (or a single
+object via GraphQL list coercion):
 
 ```graphql
-status: String
+code: String
   @validate(
-    add:    { rule: "required", reason: "Status is required on creation" }
-    update: { expr: "value != 'DELETED' || auth.role == 'admin'", reason: "Only admins may set DELETED" }
+    rules: [
+      { rule: "required", reason: "Code is required" }
+    ]
+    add: [
+      { rule: "min=3", reason: "Code must be at least 3 characters" }
+      { expr: "!(value contains ' ')", reason: "Code cannot contain spaces" }
+    ]
+    update: [
+      { rule: "min=3", reason: "Code must be at least 3 characters" }
+      { expr: "before != nil ? value == before.code : true", reason: "Code is immutable once created" }
+    ]
   )
 ```
 
-When operation-specific arms are present, they take **precedence** over any root-level
-`rule`/`expr`.
+### Rule-Specific Reasons & Fallbacks
+
+Each rule in the array can specify its own `reason`. If an individual rule does not specify a
+`reason`, it inherits the top-level `reason` argument as a fallback:
+
+```graphql
+tag: String
+  @validate(
+    reason: "Invalid tag: {{.value}}"
+    rules: [
+      { rule: "min=2" }                                           # uses top-level reason fallback
+      { expr: "!contains(value, '#')", reason: "Tag cannot contain '#'" } # uses custom reason
+    ]
+  )
+```
+
+### Precedence
+
+When operation-specific arms (`add:` or `update:`) are provided, they take **precedence** over
+root-level `rules:` and root-level `rule`/`expr` for that operation.
+
+---
+
+## Interface Validation Inheritance
+
+Validation rules defined on interface fields are automatically inherited and composed with any
+validation rules declared on implementing concrete types.
+
+```graphql
+interface Contactable {
+  email: String @validate(rule: "email", reason: "Must be a valid email address")
+}
+
+type Employee implements Contactable {
+  id: ID!
+  email: String
+    @validate(
+      expr: "value endsWith '@company.com'"
+      reason: "Employee email must be on @company.com domain"
+    )
+}
+```
+
+When creating or updating an `Employee`:
+
+1. The interface rule (`rule: "email"`) is evaluated first.
+2. The concrete type rule (`expr: "value endsWith '@company.com'"`) is evaluated.
+3. Both must pass; failure of either rule reports its corresponding failure `reason`.
 
 ---
 
@@ -222,14 +293,17 @@ When operation-specific arms are present, they take **precedence** over any root
 
 ## Multiple Validators on One Field
 
-You can combine both `rule` and `expr` on the same field — both must pass:
+You can combine both `rule` and `expr` on the same rule object, or provide multiple rules in an
+array — all rules must pass:
 
 ```graphql
 name: String!
   @validate(
-    rule:   "required,max=150"
-    expr:   "!name.hasPrefix('_')"
-    reason: "Name must be ≤150 characters and must not start with underscore"
+    rules: [
+      { rule: "required", reason: "Name is required" }
+      { rule: "max=150", reason: "Name must be ≤150 characters" }
+      { expr: "!value.hasPrefix('_')", reason: "Name must not start with an underscore" }
+    ]
   )
 ```
 

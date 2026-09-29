@@ -123,6 +123,8 @@ type xidMetadata struct {
 	// Entries are removed when a full (non-XID-only) definition for the same XID is
 	// encountered, at which point the full definition handles node creation.
 	pendingForwardRefs map[string]*pendingForwardRef
+	// isDryRun indicates whether the mutation operation has the @dryRun directive enabled.
+	isDryRun bool
 }
 
 // A mutationBuilder can build a json mutation []byte from a mutationFragment
@@ -738,6 +740,9 @@ func (arw *AddRewriter) Rewrite(
 
 	varGen := arw.VarGen
 	xidMetadata := arw.XidMetadata
+	if xidMetadata != nil {
+		xidMetadata.isDryRun = m.IsDryRun()
+	}
 	// ret stores a slice of Upsert Mutations. These are used in executing upsert queries in graphql/resolve/mutation.go
 	var ret []*UpsertMutation
 	// queries contains queries which are performed along with mutations. These include
@@ -910,6 +915,9 @@ func (urw *UpdateRewriter) Rewrite(
 
 	varGen := urw.VarGen
 	xidMetadata := urw.XidMetadata
+	if xidMetadata != nil {
+		xidMetadata.isDryRun = m.IsDryRun()
+	}
 
 	inp := m.ArgValue(schema.InputArgName).(map[string]interface{})
 	setArg := inp["set"]
@@ -2582,6 +2590,9 @@ func rewriteObject(
 	if typ.IDField() != nil {
 		authCtx.AuthHeaderKey = typ.IDField().GetAuthMeta().GetHeader()
 		authCtx.AuthHeaderValue = authorization.GetJwtToken(ctx)
+	}
+	if xidMetadata != nil {
+		authCtx.IsDryRun = xidMetadata.isDryRun
 	}
 
 	// Snapshot the raw user-provided input before any @default values are merged

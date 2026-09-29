@@ -67,6 +67,7 @@ const (
 	cascadeArg       = "fields"
 
 	cacheControlDirective = "cacheControl"
+	dryRunDirective       = "dryRun"
 	CacheControlHeader    = "Cache-Control"
 
 	// Directives to support Apollo Federation
@@ -339,8 +340,8 @@ directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirect
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean, rule: String) on OBJECT | INTERFACE
 directive @bypassAuth(except: [String!]) on FIELD_DEFINITION
 
-directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
-directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
+directive @validate(rule: String, expr: String, reason: String, rules: [DgraphValidate], add: [DgraphValidate], update: [DgraphValidate]) on FIELD_DEFINITION
+directive @postValidate(expr: String, reason: String, rules: [DgraphPostValidate], add: [DgraphPostValidate], update: [DgraphPostValidate]) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
@@ -366,6 +367,7 @@ directive @lambda on FIELD_DEFINITION
 directive @lambdaOnMutate(add: Boolean, update: Boolean, delete: Boolean) on OBJECT | INTERFACE
 directive @passiveSubscription on FIELD_DEFINITION | FIELD
 directive @cacheControl(maxAge: Int!) on QUERY
+directive @dryRun(enabled: Boolean = false) on MUTATION
 directive @generate(
 	query: GenerateQueryParams,
 	mutation: GenerateMutationParams,
@@ -386,8 +388,8 @@ directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(value: String, expr: String, evaluationOrder: Int, refOnly: Boolean, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
 directive @transform(expr: String, add: DgraphTransform, update: DgraphTransform) on FIELD_DEFINITION
 directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filter: String, depth: Int) on FIELD_DEFINITION
-directive @validate(rule: String, expr: String, reason: String, add: DgraphValidate, update: DgraphValidate) on FIELD_DEFINITION
-directive @postValidate(expr: String, reason: String, add: DgraphPostValidate, update: DgraphPostValidate) on OBJECT | INTERFACE
+directive @validate(rule: String, expr: String, reason: String, rules: [DgraphValidate], add: [DgraphValidate], update: [DgraphValidate]) on FIELD_DEFINITION
+directive @postValidate(expr: String, reason: String, rules: [DgraphPostValidate], add: [DgraphPostValidate], update: [DgraphPostValidate]) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
@@ -872,8 +874,20 @@ func expandSchema(doc *ast.SchemaDocument) *gqlerror.Error {
 								" %s the field %s must have type %s", defn.Name, i.Name, field.Name, field.Type.String())
 						}
 						if fieldSeen[field.Name] == "" {
+							targetField := defn.Fields.ForName(field.Name)
+							typeDirectives := targetField.Directives
 							// Overwrite the existing field definition in type with the field definition of interface
-							*defn.Fields.ForName(field.Name) = *field
+							*targetField = *copyAstFieldDef(field)
+							if len(typeDirectives) > 0 {
+								merged := make(ast.DirectiveList, len(typeDirectives))
+								copy(merged, typeDirectives)
+								for _, ifaceDir := range field.Directives {
+									if merged.ForName(ifaceDir.Name) == nil {
+										merged = append(merged, ifaceDir)
+									}
+								}
+								targetField.Directives = merged
+							}
 						} else if field.Type.NamedType != IDType {
 							// If field definition is already written,just add interface definition in type
 							// It will later results in validation error because of repeated fields

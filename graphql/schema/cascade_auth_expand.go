@@ -298,8 +298,11 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 				}
 
 				// If edge declares a condition rule (e.g. { $ws: { notIn: ["*", ""] } }),
-				// wrap the bidirectional rule so the condition gates reverse visibility as well.
-				if edge.cfg.Rule != "" {
+				// wrap the bidirectional rule according to the child type's cascade policy aggregation.
+				// For "and" (default), both the edge condition and the child's own auth must hold.
+				// For "or", the child's own auth provides an independent access path so the edge
+				// condition only gates the cascade path, not the direct concrete path.
+				if edge.cfg.Rule != "" && policy.Aggregation != "or" {
 					childDef := sch.schema.Types[childTypeName]
 					condNode, err := parseConditionRule(sch, childDef, edge.cfg.Rule)
 					if err != nil {
@@ -432,8 +435,8 @@ func expandCascadeAuth(sch *schema, authRules map[string]*TypeAuth, authRulesOwn
 					continue
 				}
 
-				// If edge declares a condition rule, wrap the bidirectional rule.
-				if edge.cfg.Rule != "" {
+				// If edge declares a condition rule, wrap the bidirectional rule according to policy.Aggregation.
+				if edge.cfg.Rule != "" && policy.Aggregation != "or" {
 					childDef := sch.schema.Types[childTypeName]
 					condNode, err := parseConditionRule(sch, childDef, edge.cfg.Rule)
 					if err != nil {

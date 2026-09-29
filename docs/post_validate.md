@@ -16,8 +16,9 @@ This complements `@validate`, which runs at the **field level** before the mutat
 directive @postValidate(
   expr: String
   reason: String
-  add: DgraphPostValidate
-  update: DgraphPostValidate
+  rules: [DgraphPostValidate]
+  add: [DgraphPostValidate]
+  update: [DgraphPostValidate]
 ) on OBJECT | INTERFACE
 
 input DgraphPostValidate {
@@ -30,12 +31,18 @@ input DgraphPostValidate {
 
 ## Arguments
 
-| Argument | Type                 | Description                                                                                                                                                                                                                           |
-| -------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `expr`   | `String`             | expr-lang expression applied to **both** `add` and `update` mutations.                                                                                                                                                                |
-| `reason` | `String`             | Error message returned when validation fails. Supports Go [`text/template`](https://pkg.go.dev/text/template) syntax — embed `{{.count}}`, `{{.action}}`, `{{index (index .nodes 0) "after"}}` etc. Plain strings are returned as-is. |
-| `add`    | `DgraphPostValidate` | Operation-specific `expr`/`reason` for **add** only. Takes precedence over the top-level `expr`.                                                                                                                                      |
-| `update` | `DgraphPostValidate` | Operation-specific `expr`/`reason` for **update** only. Takes precedence over the top-level `expr`.                                                                                                                                   |
+| Argument | Type                   | Description                                                                                                                                                                                                                                         |
+| -------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `expr`   | `String`               | Single expr-lang expression applied to **both** `add` and `update` mutations. Backward-compatible shortcut.                                                                                                                                         |
+| `reason` | `String`               | Error message returned when validation fails (or default fallback for rules without a custom reason). Supports Go [`text/template`](https://pkg.go.dev/text/template) syntax (`{{.count}}`, `{{.action}}`, etc.). Plain strings are returned as-is. |
+| `rules`  | `[DgraphPostValidate]` | List of validation rules applied to **both** `add` and `update` mutations. Each rule has its own `expr` and optional `reason`.                                                                                                                      |
+| `add`    | `[DgraphPostValidate]` | Operation-specific rule or list of rules for **add** only. Takes precedence over top-level `rules` / `expr`.                                                                                                                                        |
+| `update` | `[DgraphPostValidate]` | Operation-specific rule or list of rules for **update** only. Takes precedence over top-level `rules` / `expr`.                                                                                                                                     |
+
+> [!NOTE] Under GraphQL list input coercion, `rules`, `add`, and `update` accept **either** a single
+> object (`add: { expr: "...", reason: "..." }`) or an array of objects
+> (`add: [{ expr: "...", reason: "..." }, ...]`). Existing schemas with single objects continue to
+> work without modification.
 
 ---
 
@@ -44,25 +51,30 @@ input DgraphPostValidate {
 The expression is evaluated **once per mutation** against the full batch of mutated nodes. Top-level
 variables available to every expression:
 
-| Variable | Type     | Description                                                                                                                                    |
-| -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `nodes`  | `[]map`  | Array of all mutated nodes of this type (root + nested, any depth). Each element has `uid`, `before`, `after`, and `new`. See structure below. |
-| `action` | `string` | `"add"` or `"update"` — same as `@validate`'s `action`.                                                                                        |
-| `auth`   | `map`    | JWT auth variables — same as `@validate`'s `auth`. Defaults to `{}` when no auth is configured or no JWT is present.                           |
+| Variable   | Type     | Description                                                                                                                                    |
+| ---------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nodes`    | `[]map`  | Array of all mutated nodes of this type (root + nested, any depth). Each element has `uid`, `before`, `after`, and `new`. See structure below. |
+| `before`   | `[]map`  | Array of pre-mutation maps across all mutated nodes.                                                                                           |
+| `after`    | `[]map`  | Array of post-mutation maps across all mutated nodes.                                                                                          |
+| `new`      | `[]map`  | Array of modified fields across all mutated nodes.                                                                                             |
+| `action`   | `string` | `"add"` or `"update"` — same as `@validate`'s `action`.                                                                                        |
+| `auth`     | `map`    | JWT auth variables — same as `@validate`'s `auth`. Defaults to `{}` when no auth is configured or no JWT is present.                           |
+| `isDryRun` | `bool`   | `true` when the mutation operation includes `@dryRun(enabled: true)` (or `@dryRun`).                                                           |
+| `txn`      | `map`    | Uncommitted transaction context (`{"startTs": <uint64>}`). Can be passed to `callLambda` to execute uncommitted queries against Dgraph.        |
 
 ### Helper functions
 
 The same set of helper functions available in `@validate` are also available:
 
-| Function               | Signature                                              | Description                                                      |
-| ---------------------- | ------------------------------------------------------ | ---------------------------------------------------------------- |
-| `callLambda`           | `(name string, payload map) (any, error)`              | Invoke a registered lambda by name, forwarding the caller's JWT. |
-| `uuid`                 | `() string`                                            | Generate a new UUIDv4 string.                                    |
-| `sha256`               | `(str string) string`                                  | Hex-encoded SHA-256 hash.                                        |
-| `generateEmbedding`    | `(provider, model, text string, params map) []float32` | Generate a vector embedding via the configured provider.         |
-| `diffMap`              | `(a, b map) (map, error)`                              | Returns keys present in `b` whose value differs from `a`.        |
-| `mapStringWithoutKeys` | `(m map, keys []string) map`                           | Returns `m` minus the specified keys.                            |
-| `error`                | `(v any) (any, error)`                                 | Immediately abort the expression with `v` as the error message.  |
+| Function               | Signature                                              | Description                                                                                                                                        |
+| ---------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `callLambda`           | `(name string, payload map) (any, error)`              | Invoke a registered lambda by name, forwarding the caller's JWT.                                                                                   |
+| `uuid`                 | `() string`                                            | Generate a new UUIDv4 string.                                                                                                                      |
+| `sha256`               | `(str string) string`                                  | Hex-encoded SHA-256 hash.                                                                                                                          |
+| `generateEmbedding`    | `(provider, model, text string, params map) []float32` | Generate a vector embedding via the configured provider.                                                                                           |
+| `diffMap`              | `(a, b map) (map, error)`                              | Returns keys present in `b` whose value differs from `a`.                                                                                          |
+| `mapStringWithoutKeys` | `(m map, keys []string) map`                           | Returns `m` minus the specified keys.                                                                                                              |
+| `error`                | `(v any) (any, error)`                                 | Abort expression evaluation with an error. Accepts string, `[]string` (multiple errors), or `[]map` (rich error objects with custom `extensions`). |
 
 ### `nodes` element structure
 
@@ -279,6 +291,32 @@ type Post
 }
 ```
 
+### Multiple validation rules with distinct error reasons
+
+You can specify an array of rules under `add`, `update`, or `rules`. Each rule is evaluated in
+sequence, and the first rule to evaluate to `false` (or return an error) halts the mutation with its
+specific reason:
+
+```graphql
+type JobAd
+  @postValidate(
+    # Root rules run for both add and update
+    rules: [{ expr: "all(nodes, {.after.title != \"\"})", reason: "Job title is required" }]
+    # Add-specific rules
+    add: [
+      {
+        expr: "all(nodes, {.after.salary >= 30000})"
+        reason: "Minimum salary must be at least 30,000"
+      }
+      { expr: "len(nodes) <= 50", reason: "Cannot add more than 50 jobs in a single batch" }
+    ]
+  ) {
+  id: ID!
+  title: String! @oldValue
+  salary: Int @oldValue
+}
+```
+
 ### Require a field to actually change on update (using `new`)
 
 ```graphql
@@ -449,3 +487,20 @@ The schema loader enforces at load time:
   `expr.AllowUndefinedVariables()` (allows chained `interface{}` field access on `.after.field`).
   `expr.Run` receives the same struct type — passing a `map` when `Env` is a struct causes a reflect
   panic.
+- **Interface Inheritance and Composition**: `@postValidate` directives placed on an `interface` are
+  automatically inherited by all implementing concrete types. If a concrete type declares its own
+  `@postValidate` directive in addition to implementing an interface with `@postValidate`, both
+  configurations are executed sequentially. If any configuration fails or returns `false`, the
+  transaction aborts and the corresponding failure reason is returned.
+- **Multiple Rules and List Input Coercion**: `@postValidate` supports an array of rules on `add`,
+  `update`, or `rules` (`[DgraphPostValidate]`). In accordance with the GraphQL specification, a
+  single input object is automatically coerced into a single-element list, maintaining 100% backward
+  compatibility with existing schemas. All configured rules for an operation execute sequentially,
+  and the first rule that fails aborts the mutation with its specific failure reason.
+- **`@dryRun` Prospective Execution & Abort**: When `@dryRun(enabled: true)` is applied to a
+  mutation, all schema validations, field defaults, prospective diff computations, `@postValidate`
+  rules (with `isDryRun: true`), and uncommitted graph reads are fully performed. Dgraph queries the
+  prospective mutated data at the transaction's `StartTs` before rolling back the transaction
+  immediately prior to the Badger/Raft commit. The returned GraphQL payload (`numUids`, selection
+  set fields) matches what the committed mutation would return, while guaranteeing no writes are
+  persisted to the database.

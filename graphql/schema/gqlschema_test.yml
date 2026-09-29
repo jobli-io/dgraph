@@ -3882,6 +3882,27 @@ invalid_schemas:
         },
       ]
 
+  - name: "@validate with malformed expr in array is rejected at schema load time"
+    input: |
+      type Product {
+        id: ID!
+        code: String @validate(
+          rules: [
+            { expr: "1 +", reason: "Invalid expression" }
+          ]
+        )
+      }
+    errlist:
+      [
+        {
+          "message":
+            "Type Product; Field code: malformed validation rule or expression. Reason: validation
+            for field 'code' with rule 'expr' caused a panic: expression compilation failed for
+            field '' with rule '1 +': unexpected token EOF (1:3)\n | 1 +\n | ..^",
+          "locations": [{ "line": 3, "column": 17 }],
+        },
+      ]
+
 valid_schemas:
   - name: "@postValidate with valid callLambda expr is accepted"
     input: |
@@ -3895,6 +3916,41 @@ valid_schemas:
         ) {
         id: ID!
         title: String!
+      }
+
+  - name: "@postValidate with array of rules on add and root rules is accepted"
+    input: |
+      type JobAd
+        @postValidate(
+          rules: [
+            { expr: "all(nodes, {.after.title != \"\"})", reason: "Title is required" }
+          ]
+          add: [
+            { expr: "all(nodes, {.after.quota > 0})", reason: "Quota must be positive" },
+            { expr: "all(nodes, {.after.quota <= 100})", reason: "Quota limit 100" }
+          ]
+        ) {
+        id: ID!
+        title: String!
+        quota: Int
+      }
+
+  - name: "@validate with array of rules on add, update, and root rules is accepted"
+    input: |
+      type Product {
+        id: ID!
+        code: String @validate(
+          rules: [
+            { rule: "required", reason: "Product code is required" }
+          ]
+          add: [
+            { rule: "min=3", reason: "Product code must be at least 3 characters" },
+            { expr: "!(value contains ' ')", reason: "Product code cannot contain spaces" }
+          ]
+          update: [
+            { rule: "min=3", reason: "Product code must be at least 3 characters" }
+          ]
+        )
       }
 
   - name: "@default allows non-scalar field type"

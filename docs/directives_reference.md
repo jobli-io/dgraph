@@ -19,6 +19,7 @@ are in addition to Dgraph's built-in directives (`@auth`, `@search`, `@id`, `@dg
 | [`@default`](#default)                             | `FIELD_DEFINITION`    | Set default field value on add/update                                                                          | [default_transform.md](default_transform.md)                         |
 | [`@transform`](#transform)                         | `FIELD_DEFINITION`    | Transform a field value via expr-lang on add/update; include `uid: #.uid` when forwarding `before.*` edge refs | [default_transform.md](default_transform.md)                         |
 | [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`    | Fetch pre-mutation field values for expr-lang expressions                                                      | [old_value.md](old_value.md)                                         |
+| [`@dryRun`](#dryrun)                               | `MUTATION`            | Test prospective mutations and post-validation rules without committing to Badger/Raft                         | [#dryrun](#dryrun)                                                   |
 | [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`    | Make a bidirectional edge write-once                                                                           | [immutable_inverse.md](immutable_inverse.md)                         |
 | `memberTypes` filter                               | Interface `XxxFilter` | Scope an interface query to a subset of implementing types                                                     | [interface_member_types_filter.md](interface_member_types_filter.md) |
 | `groupByXxx` query                                 | Root query (auto)     | Bucket-aggregate over filtered nodes; DateTime interval bucketing via `by`/`tz`                                | [groupby_queries.md](groupby_queries.md)                             |
@@ -90,8 +91,9 @@ directive @cascadeDelete(
 directive @postValidate(
   expr: String # top-level expr-lang (both add & update)
   reason: String
-  add: DgraphPostValidate # add-specific override
-  update: DgraphPostValidate # update-specific override
+  rules: [DgraphPostValidate] # top-level rules list (both add & update)
+  add: [DgraphPostValidate] # add-specific override (array or single object)
+  update: [DgraphPostValidate] # update-specific override (array or single object)
 ) on OBJECT | INTERFACE
 
 input DgraphPostValidate {
@@ -104,11 +106,12 @@ input DgraphPostValidate {
 
 ```graphql
 directive @validate(
-  rule: String # go-playground/validator tag
-  expr: String # expr-lang expression
-  reason: String
-  add: DgraphValidate
-  update: DgraphValidate
+  rule: String # go-playground/validator tag (backward compatibility)
+  expr: String # expr-lang expression (backward compatibility)
+  reason: String # default/fallback failure message
+  rules: [DgraphValidate] # general rules for add and update (array or single object)
+  add: [DgraphValidate] # add-specific rules (array or single object)
+  update: [DgraphValidate] # update-specific rules (array or single object)
 ) on FIELD_DEFINITION
 
 input DgraphValidate {
@@ -176,6 +179,30 @@ directive @hasInverse(
 
 ---
 
+### `@dryRun`
+
+```graphql
+directive @dryRun(enabled: Boolean = false) on MUTATION
+```
+
+Evaluates input schemas, field defaults, and `@validate` rules; resolves the prospective graph diff
+(`{ before, after, new }`); and runs the `@postValidate` rules array (including `callLambda`
+compliance checks).
+
+**Response Payload & Execution Semantics:**
+
+- Queries the uncommitted graph state using the transaction's `StartTs` so that the GraphQL response
+  payload (`numUids`, returned objects, selection set fields) returns the prospective result
+  identical to what a committed mutation would have returned.
+- Stops immediately prior to Badger/Raft commit: aborts and rolls back the transaction, ensuring
+  nothing is persisted to the database.
+- Webhook notifications (`@lambdaOnMutate`) are not dispatched.
+- Any validation, schema, or post-validation errors encountered are returned as usual.
+- Injects `isDryRun: true` into the expression evaluation context.
+- Supports GraphQL variables (e.g. `mutation ($dry: Boolean) @dryRun(enabled: $dry)`).
+
+---
+
 ## Shared expr-lang Evaluation Context
 
 All expr-lang expressions (in `@default`, `@transform`, `@validate`, `@postValidate`) share the same
@@ -191,24 +218,31 @@ evaluation environment. Variables available at expression evaluation time:
 | `remove`     | `map`    | Fields being removed in this mutation                                     |
 | `auth`       | `map`    | JWT claims (`auth.sub`, `auth.azp`, `auth.ws`, custom claims)             |
 | `action`     | `string` | `"add"` or `"update"`                                                     |
+| `isDryRun`   | `bool`   | `true` if the mutation has `@dryRun(enabled: true)`                       |
 | `__typename` | `string` | GraphQL type name                                                         |
 
 Built-in functions:
 
-| Function                                           | Description                                                |
-| -------------------------------------------------- | ---------------------------------------------------------- |
-| `uuid()`                                           | Generate a new UUID string                                 |
-| `sha256(s)`                                        | SHA-256 hash of string                                     |
-| `generateEmbedding(provider, model, text, params)` | Call OpenAI/Gemini embedding API                           |
-| `callLambda(name, payload)`                        | Call a registered lambda function (caller's JWT forwarded) |
-| `diffMap(obj1, obj2)`                              | Return map of changed keys between two maps                |
-| `mapStringWithoutKeys(map, keys)`                  | Return map with specified keys removed                     |
-| `error(v)`                                         | Abort expression evaluation with an error                  |
+| Function                                           | Description                                                                                                                                         |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `uuid()`                                           | Generate a new UUID string                                                                                                                          |
+| `sha256(s)`                                        | SHA-256 hash of string                                                                                                                              |
+| `generateEmbedding(provider, model, text, params)` | Call OpenAI/Gemini embedding API                                                                                                                    |
+| `callLambda(name, payload)`                        | Call a registered lambda function (caller's JWT forwarded)                                                                                          |
+| `diffMap(obj1, obj2)`                              | Return map of changed keys between two maps                                                                                                         |
+| `mapStringWithoutKeys(map, keys)`                  | Return map with specified keys removed                                                                                                              |
+| `error(v)`                                         | Abort with error. Accepts `string`, `[]string` (multiple errors), or `[]map` / object (rich error with `message`, `code`, and custom `extensions`). |
 
 > **`@postValidate` only** additionally provides:
 >
 > - `nodes` — array of `{uid, before, after, new}` maps for all written nodes
+> - `before` — array of pre-mutation maps across all nodes
+> - `after` — array of post-mutation maps across all nodes
+> - `new` — array of modified fields across all nodes
 > - `action` — `"add"` or `"update"` (always present)
+> - `isDryRun` — boolean flag indicating dry-run execution mode
+> - `txn` — uncommitted transaction context (`{"startTs": <uint64>}`) for passing to `callLambda` to
+>   execute uncommitted Dgraph queries
 
 ---
 

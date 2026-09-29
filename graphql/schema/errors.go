@@ -6,6 +6,7 @@
 package schema
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/dgraph-io/gqlparser/v2/ast"
@@ -31,16 +32,31 @@ func AsGQLErrors(err error) x.GqlErrorList {
 		return toGqlErrorList(e)
 	case x.GqlErrorList:
 		return e
+	case *ExprErrors:
+		var result x.GqlErrorList
+		for i := range e.Errors {
+			result = append(result, toGqlError(&e.Errors[i]))
+		}
+		return result
 	default:
+		var exprErrs *ExprErrors
+		if errors.As(err, &exprErrs) {
+			var result x.GqlErrorList
+			for i := range exprErrs.Errors {
+				result = append(result, toGqlError(&exprErrs.Errors[i]))
+			}
+			return result
+		}
 		return x.GqlErrorList{&x.GqlError{Message: e.Error()}}
 	}
 }
 
 func toGqlError(err *gqlerror.Error) *x.GqlError {
 	return &x.GqlError{
-		Message:   err.Message,
-		Locations: convertLocations(err.Locations),
-		Path:      convertPath(err.Path),
+		Message:    err.Message,
+		Locations:  convertLocations(err.Locations),
+		Path:       convertPath(err.Path),
+		Extensions: err.Extensions,
 	}
 }
 
@@ -82,16 +98,32 @@ func GQLWrapf(err error, format string, args ...interface{}) error {
 
 	switch err := err.(type) {
 	case *x.GqlError:
-		return x.GqlErrorf("%s because %s", fmt.Sprintf(format, args...), err.Message).
+		wrapped := x.GqlErrorf("%s because %s", fmt.Sprintf(format, args...), err.Message).
 			WithLocations(err.Locations...).
 			WithPath(err.Path)
+		wrapped.Extensions = err.Extensions
+		return wrapped
 	case x.GqlErrorList:
 		var errs x.GqlErrorList
 		for _, e := range err {
 			errs = append(errs, GQLWrapf(e, format, args...).(*x.GqlError))
 		}
 		return errs
+	case *ExprErrors:
+		var errs x.GqlErrorList
+		for i := range err.Errors {
+			errs = append(errs, toGqlError(&err.Errors[i]))
+		}
+		return errs
 	default:
+		var exprErrs *ExprErrors
+		if errors.As(err, &exprErrs) {
+			var errs x.GqlErrorList
+			for i := range exprErrs.Errors {
+				errs = append(errs, toGqlError(&exprErrs.Errors[i]))
+			}
+			return errs
+		}
 		return x.GqlErrorf("%s because %s", fmt.Sprintf(format, args...), err.Error())
 	}
 }

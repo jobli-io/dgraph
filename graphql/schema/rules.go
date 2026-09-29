@@ -1861,16 +1861,19 @@ func validateDirectiveValidation(sch *ast.Schema,
 	// The `auth` context is `nil` as it's not relevant for schema validation.
 	// Run a dry-run for both operations so operation-specific add/update args are also validated.
 	parentForTest := map[string]interface{}{field.Name: testValue}
+	seenErrors := make(map[string]bool)
 	for _, dryRunAction := range []string{"add", "update"} {
 		for _, err := range validateValue(sch, field, dryRunAction, typ.Name, parentForTest, AuthCtx{}, nil, nil) {
 			// Check if the error returned by ValidateValue is a PanicWrappedError.
 			// This specifically indicates a schema definition problem (malformed rule/expression).
 			var ce *CompileError
 			if errors.As(err, &ce) {
-				combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(
-					dir.Position,
-					"Type %s; Field %s: malformed validation rule or expression. Reason: %v",
-					typ.Name, field.Name, ce.Unwrap()))
+				msg := fmt.Sprintf("Type %s; Field %s: malformed validation rule or expression. Reason: %v",
+					typ.Name, field.Name, ce.Unwrap())
+				if !seenErrors[msg] {
+					seenErrors[msg] = true
+					combinedErrors = append(combinedErrors, gqlerror.ErrorPosf(dir.Position, "%s", msg))
+				}
 			}
 		}
 	}
@@ -1893,22 +1896,39 @@ func postValidateDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqler
 		return nil
 	}
 
-	// Collect all expr strings from: top-level expr, add.expr, update.expr.
+	// Collect all expr strings from: top-level expr, rules, add, update.
 	type exprEntry struct {
 		raw string
-		arm string // "" | "add" | "update"
+		arm string // "" | "rules" | "add" | "update"
 	}
 	var exprs []exprEntry
+
+	collectFromArg := func(arg *ast.Argument, arm string) {
+		if arg == nil || arg.Value == nil {
+			return
+		}
+		switch arg.Value.Kind {
+		case ast.ListValue:
+			for _, child := range arg.Value.Children {
+				if child.Value != nil && child.Value.Kind == ast.ObjectValue {
+					if exprVal := child.Value.Children.ForName("expr"); exprVal != nil && exprVal.Raw != "" {
+						exprs = append(exprs, exprEntry{exprVal.Raw, arm})
+					}
+				}
+			}
+		case ast.ObjectValue:
+			if exprVal := arg.Value.Children.ForName("expr"); exprVal != nil && exprVal.Raw != "" {
+				exprs = append(exprs, exprEntry{exprVal.Raw, arm})
+			}
+		}
+	}
 
 	if topExpr := dir.Arguments.ForName("expr"); topExpr != nil && topExpr.Value.Raw != "" {
 		exprs = append(exprs, exprEntry{topExpr.Value.Raw, ""})
 	}
+	collectFromArg(dir.Arguments.ForName("rules"), "rules")
 	for _, arm := range []string{"add", "update"} {
-		if armArg := dir.Arguments.ForName(arm); armArg != nil {
-			if exprVal := armArg.Value.Children.ForName("expr"); exprVal != nil && exprVal.Raw != "" {
-				exprs = append(exprs, exprEntry{exprVal.Raw, arm})
-			}
-		}
+		collectFromArg(dir.Arguments.ForName(arm), arm)
 	}
 
 	if len(exprs) == 0 {
@@ -1918,12 +1938,21 @@ func postValidateDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqler
 	// Zero-value environment mirrors the struct used in runPostValidate.
 	// AllowUndefinedVariables lets jwt/node fields be absent at compile time.
 	type postValidateEnv struct {
-		Nodes  []map[string]interface{} `expr:"nodes"`
-		Action string                   `expr:"action"`
-		Auth   map[string]interface{}   `expr:"auth"`
+		Nodes    []map[string]interface{} `expr:"nodes"`
+		Before   []map[string]interface{} `expr:"before"`
+		After    []map[string]interface{} `expr:"after"`
+		New      []map[string]interface{} `expr:"new"`
+		Action   string                   `expr:"action"`
+		Auth     map[string]interface{}   `expr:"auth"`
+		IsDryRun bool                     `expr:"isDryRun"`
+		Txn      map[string]interface{}   `expr:"txn"`
 		ExprFuncs
 	}
-	env := postValidateEnv{}
+	env := postValidateEnv{
+		Txn: map[string]interface{}{
+			"startTs": uint64(0),
+		},
+	}
 
 	var errs gqlerror.List
 	for _, e := range exprs {

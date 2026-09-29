@@ -435,9 +435,12 @@ expansion runs). It only generates `query` rules — it **never** grants add/upd
 the authority.
 
 If the edge declares a conditional gate via `rule: "..."` (e.g. `{ $ws: { notIn: ["*", ""] } }`),
-that gate is also attached to the synthesized reverse rule on the authority using `AND`. In
-discovery mode or when the condition evaluates statically to `Negative`, the reverse rule is cleanly
-pruned, preventing full-table database scans across child links.
+that gate is attached to the synthesized reverse rule on the authority using `AND` for child types
+with the default `AND` aggregation policy. In discovery mode or when the condition evaluates
+statically to `Negative`, the reverse rule is cleanly pruned, preventing full-table database scans
+across child links. For child types declaring `@cascadeAuthPolicy(aggregation: "or")`, the child's
+own declared auth provides an independent access path, allowing discovery mode to function without
+being gated by the cascade edge rule.
 
 > **Note:** The rule fed back to the authority is the child's _own_ `@auth`, not the
 > cascade-substituted form. This prevents circular dependencies.

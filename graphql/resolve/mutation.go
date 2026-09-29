@@ -696,6 +696,10 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	// @postValidate: run type-level post-mutation validation within the same
 	// uncommitted transaction. If validation fails the deferred abort fires.
 	if pvErr := runPostValidate(ctx, mutation, mr.executor, mr.mutationRewriter, mutResp, result); pvErr != nil {
+		var exprErrors *schema.ExprErrors
+		if errors.As(pvErr, &exprErrors) {
+			return emptyResult(exprErrors), resolverFailed
+		}
 		return emptyResult(schema.GQLWrapf(pvErr, "post-mutation validation failed")), resolverFailed
 	}
 
@@ -705,6 +709,42 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		"couldn't rewrite query for mutation %s", mutation.Name()))
 	if err != nil {
 		return emptyResult(queryErrs), resolverFailed
+	}
+
+	if mutation.IsDryRun() {
+		// In dry-run mode, query the uncommitted graph state using the transaction's StartTs
+		// so that the returned payload (numUids, returned nodes, fields) matches what the
+		// committed mutation would have returned.
+		if mutation.MutationType() != schema.DeleteMutation {
+			queryTimer := newtimer(ctx, &dgraphPostMutationQueryDuration.OffsetDuration)
+			queryTimer.Start()
+			qryResp, err = mr.executor.Execute(ctx, &dgoapi.Request{
+				Query:    dgraph.AsString(dgQuery),
+				ReadOnly: false,
+				StartTs:  mutResp.Txn.GetStartTs(),
+			}, mutation.QueryField())
+			queryTimer.Stop()
+
+			if !x.IsGqlErrorList(err) {
+				err = schema.GQLWrapf(err, "couldn't execute query for mutation %s", mutation.Name())
+			}
+			queryErrs = schema.AppendGQLErrs(queryErrs, err)
+			ext.TouchedUids += qryResp.GetMetrics().GetNumUids()[touchedUidsKey]
+		}
+
+		if mutResp != nil && mutResp.Txn != nil {
+			mutResp.Txn.Aborted = true
+			_, _ = mr.executor.CommitOrAbort(ctx, mutResp.Txn)
+			mutResp.Txn = nil
+		}
+
+		numUids := getNumUids(mutation, mutResp.Uids, result)
+		return &Resolved{
+			Data:       completeMutationResult(mutation, qryResp.GetJson(), numUids),
+			Field:      mutation,
+			Err:        schema.PrependPath(queryErrs, mutation.ResponseName()),
+			Extensions: ext,
+		}, resolverSucceeded
 	}
 
 	txnCtx, err := mr.executor.CommitOrAbort(ctx, mutResp.Txn)
@@ -1042,8 +1082,8 @@ func runPostValidate(
 
 	// 2. Check if @postValidate applies for this action.
 	typ := mutation.MutatedType()
-	cfg := typ.PostValidateConfig(action)
-	if cfg == nil {
+	cfgs := typ.PostValidateConfigs(action)
+	if len(cfgs) == 0 {
 		return nil
 	}
 
@@ -1206,18 +1246,31 @@ func runPostValidate(
 	// "reflect: call of reflect.Value.Field on map Value" panic.
 	type postValidateNode = map[string]interface{}
 	type postValidateEnv struct {
-		Nodes  []postValidateNode     `expr:"nodes"`
-		Action string                 `expr:"action"`
-		Auth   map[string]interface{} `expr:"auth"`
+		Nodes    []postValidateNode     `expr:"nodes"`
+		Before   []postValidateNode     `expr:"before"`
+		After    []postValidateNode     `expr:"after"`
+		New      []postValidateNode     `expr:"new"`
+		Action   string                 `expr:"action"`
+		Auth     map[string]interface{} `expr:"auth"`
+		IsDryRun bool                   `expr:"isDryRun"`
+		Txn      map[string]interface{} `expr:"txn"`
 		// Built-in functions via shared ExprFuncs embedding — same set as @validate.
 		schema.ExprFuncs
 	}
-	prog, err := expr.Compile(cfg.Expr,
-		expr.Env(postValidateEnv{}),
-		expr.AllowUndefinedVariables(),
-	)
-	if err != nil {
-		return errors.Wrapf(err, "@postValidate on type %s: failed to compile expression %q", typ.Name(), cfg.Expr)
+
+	beforeNodes := make([]postValidateNode, 0, len(nodes))
+	afterNodes := make([]postValidateNode, 0, len(nodes))
+	newNodesList := make([]postValidateNode, 0, len(nodes))
+	for _, n := range nodes {
+		if b, ok := n["before"].(map[string]interface{}); ok {
+			beforeNodes = append(beforeNodes, b)
+		}
+		if a, ok := n["after"].(map[string]interface{}); ok {
+			afterNodes = append(afterNodes, a)
+		}
+		if nw, ok := n["new"].(map[string]interface{}); ok {
+			newNodesList = append(newNodesList, nw)
+		}
 	}
 
 	// Build the full AuthCtx — same pattern as mutation_rewriter.go — so that
@@ -1235,47 +1288,82 @@ func runPostValidate(
 	if authCtx.AuthVariables == nil {
 		authCtx.AuthVariables = map[string]interface{}{}
 	}
+	authCtx.IsDryRun = mutation.IsDryRun()
+
+	var startTs uint64
+	if mutResp != nil && mutResp.Txn != nil {
+		startTs = mutResp.Txn.StartTs
+	}
+	txnMap := map[string]interface{}{
+		"startTs": startTs,
+	}
+	if mutResp != nil && mutResp.Txn != nil {
+		if len(mutResp.Txn.Keys) > 0 {
+			txnMap["keys"] = mutResp.Txn.Keys
+		}
+		if len(mutResp.Txn.Preds) > 0 {
+			txnMap["preds"] = mutResp.Txn.Preds
+		}
+	}
 
 	// Pass the populated struct — must match the postValidateEnv type used at compile time.
 	evalEnv := postValidateEnv{
 		Nodes:     nodes,
+		Before:    beforeNodes,
+		After:     afterNodes,
+		New:       newNodesList,
 		Action:    action,
 		Auth:      authCtx.AuthVariables,
+		IsDryRun:  mutation.IsDryRun(),
+		Txn:       txnMap,
 		ExprFuncs: schema.NewExprFuncs(authCtx),
 	}
 
-	exprResult, runErr := expr.Run(prog, evalEnv)
-	if runErr != nil {
-		// When reason is set, render it as a template and use it as the client-facing
-		// message instead of the raw CEL stack-trace-style error string.
-		if cfg.Reason != "" {
-			// Use errors.As to extract the clean message from error() calls without
-			// parsing expr-lang's runtime annotation format.
-			errMsg := runErr.Error()
-			var exprErr *schema.ExprError
-			if errors.As(runErr, &exprErr) {
-				errMsg = exprErr.Message
-			}
-			if rendered, tmplErr := renderPostValidateReason(cfg.Reason, nodes, action,
-				authCtx.AuthVariables, errMsg); tmplErr == nil {
-				return errors.New(rendered)
-			}
+	for _, cfg := range cfgs {
+		prog, err := expr.Compile(cfg.Expr,
+			expr.Env(postValidateEnv{}),
+			expr.AllowUndefinedVariables(),
+		)
+		if err != nil {
+			return errors.Wrapf(err, "@postValidate on type %s: failed to compile expression %q", typ.Name(), cfg.Expr)
 		}
-		return errors.Wrapf(runErr, "@postValidate on type %s: expression error", typ.Name())
-	}
 
-	passed, ok := exprResult.(bool)
-	if !ok || !passed {
-		msg := fmt.Sprintf("@postValidate on type %s failed", typ.Name())
-		if cfg.Reason != "" {
-			if rendered, tmplErr := renderPostValidateReason(cfg.Reason, nodes, action,
-				authCtx.AuthVariables, ""); tmplErr == nil {
-				msg = rendered
-			} else {
-				msg = cfg.Reason // template failed — use raw string
+		exprResult, runErr := expr.Run(prog, evalEnv)
+		if runErr != nil {
+			var exprErr *schema.ExprErrors
+			if errors.As(runErr, &exprErr) {
+				if cfg.Reason != "" {
+					if rendered, tmplErr := renderPostValidateReason(cfg.Reason, nodes, action,
+						authCtx.AuthVariables, exprErr.Error()); tmplErr == nil {
+						return errors.New(rendered)
+					}
+				}
+				return exprErr
 			}
+			// When reason is set, render it as a template and use it as the client-facing
+			// message instead of the raw CEL stack-trace-style error string.
+			if cfg.Reason != "" {
+				if rendered, tmplErr := renderPostValidateReason(cfg.Reason, nodes, action,
+					authCtx.AuthVariables, runErr.Error()); tmplErr == nil {
+					return errors.New(rendered)
+				}
+			}
+			return errors.Wrapf(runErr, "@postValidate on type %s: expression error", typ.Name())
 		}
-		return errors.New(msg)
+
+		passed, ok := exprResult.(bool)
+		if !ok || !passed {
+			msg := fmt.Sprintf("@postValidate on type %s failed", typ.Name())
+			if cfg.Reason != "" {
+				if rendered, tmplErr := renderPostValidateReason(cfg.Reason, nodes, action,
+					authCtx.AuthVariables, ""); tmplErr == nil {
+					msg = rendered
+				} else {
+					msg = cfg.Reason // template failed — use raw string
+				}
+			}
+			return errors.New(msg)
+		}
 	}
 	return nil
 }

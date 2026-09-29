@@ -15,11 +15,14 @@ package resolve
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
 	"github.com/hypermodeinc/dgraph/v25/graphql/test"
+	"github.com/hypermodeinc/dgraph/v25/x"
 	"github.com/stretchr/testify/require"
 )
 
@@ -589,4 +592,625 @@ type Review
 	// {{.error}} must be the clean message, not the CEL annotation.
 	require.Contains(t, err.Error(), "Validation failed: quota exceeded: used 10 of 10")
 	require.NotContains(t, err.Error(), "(1:", "CEL line:col annotation must not appear")
+}
+
+// TestPostValidate_InheritedFromInterface verifies that @postValidate directives declared
+// on an interface are inherited and evaluated when mutating an implementing concrete type.
+func TestPostValidate_InheritedFromInterface(t *testing.T) {
+	schemaStr := `
+interface FormDataIfc
+  @generate(query: { get: false, query: false }, mutation: { add: false, update: false })
+  @postValidate(
+    add: {
+      expr:   "all(nodes, {.after.data != \"invalid\"})"
+      reason: "Interface validation rejected invalid data"
+    }
+  ) {
+  id:   ID!
+  data: String @oldValue
+}
+
+type SettingsForm implements FormDataIfc
+  @generate(query: { get: true, query: true }, mutation: { add: true, update: true }) {
+  id:   ID!
+  data: String @oldValue
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	// 1. Valid data -> passes
+	mutPass := makeAddMutation(t, gqlSchema, `mutation {
+		addSettingsForm(input: [{data: "valid"}]) { settingsForm { id } }
+	}`)
+	rewriterPass := NewAddRewriter()
+	mutRespPass := &dgoapi.Response{Uids: map[string]string{"SettingsForm_1": "0xe1"}}
+	exPass := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0xe1","SettingsForm.data":"valid"}]}`}
+
+	err := runPostValidate(context.Background(), mutPass, exPass, rewriterPass, mutRespPass, nil)
+	require.NoError(t, err, "valid data should pass inherited @postValidate")
+
+	// 2. Invalid data -> fails with interface reason
+	mutFail := makeAddMutation(t, gqlSchema, `mutation {
+		addSettingsForm(input: [{data: "invalid"}]) { settingsForm { id } }
+	}`)
+	rewriterFail := NewAddRewriter()
+	mutRespFail := &dgoapi.Response{Uids: map[string]string{"SettingsForm_1": "0xe2"}}
+	exFail := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0xe2","SettingsForm.data":"invalid"}]}`}
+
+	errFail := runPostValidate(context.Background(), mutFail, exFail, rewriterFail, mutRespFail, nil)
+	require.Error(t, errFail)
+	require.Contains(t, errFail.Error(), "Interface validation rejected invalid data")
+}
+
+// TestPostValidate_InheritedAndDirectComposed verifies that when both a concrete type and
+// an implemented interface declare @postValidate, both are evaluated in sequence.
+func TestPostValidate_InheritedAndDirectComposed(t *testing.T) {
+	schemaStr := `
+interface FormDataIfc
+  @generate(query: { get: false, query: false }, mutation: { add: false, update: false })
+  @postValidate(
+    add: {
+      expr:   "all(nodes, {.after.data != \"bad_format\"})"
+      reason: "Interface: bad format"
+    }
+  ) {
+  id:   ID!
+  data: String @oldValue
+}
+
+type PortalForm implements FormDataIfc
+  @generate(query: { get: true, query: true }, mutation: { add: true, update: true })
+  @postValidate(
+    add: {
+      expr:   "all(nodes, {.after.data != \"unauthorized\"})"
+      reason: "PortalForm: unauthorized"
+    }
+  ) {
+  id:   ID!
+  data: String @oldValue
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	// 1. Both pass
+	mutPass := makeAddMutation(t, gqlSchema, `mutation {
+		addPortalForm(input: [{data: "ok"}]) { portalForm { id } }
+	}`)
+	rewriterPass := NewAddRewriter()
+	mutRespPass := &dgoapi.Response{Uids: map[string]string{"PortalForm_1": "0xf1"}}
+	exPass := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0xf1","PortalForm.data":"ok"}]}`}
+	err := runPostValidate(context.Background(), mutPass, exPass, rewriterPass, mutRespPass, nil)
+	require.NoError(t, err)
+
+	// 2. Concrete type rule fails
+	mutFailDirect := makeAddMutation(t, gqlSchema, `mutation {
+		addPortalForm(input: [{data: "unauthorized"}]) { portalForm { id } }
+	}`)
+	rewriterFailDirect := NewAddRewriter()
+	mutRespFailDirect := &dgoapi.Response{Uids: map[string]string{"PortalForm_1": "0xf2"}}
+	exFailDirect := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0xf2","PortalForm.data":"unauthorized"}]}`}
+	errFailDirect := runPostValidate(context.Background(), mutFailDirect, exFailDirect, rewriterFailDirect, mutRespFailDirect, nil)
+	require.Error(t, errFailDirect)
+	require.Contains(t, errFailDirect.Error(), "PortalForm: unauthorized")
+
+	// 3. Inherited interface rule fails
+	mutFailIface := makeAddMutation(t, gqlSchema, `mutation {
+		addPortalForm(input: [{data: "bad_format"}]) { portalForm { id } }
+	}`)
+	rewriterFailIface := NewAddRewriter()
+	mutRespFailIface := &dgoapi.Response{Uids: map[string]string{"PortalForm_1": "0xf3"}}
+	exFailIface := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0xf3","PortalForm.data":"bad_format"}]}`}
+	errFailIface := runPostValidate(context.Background(), mutFailIface, exFailIface, rewriterFailIface, mutRespFailIface, nil)
+	require.Error(t, errFailIface)
+	require.Contains(t, errFailIface.Error(), "Interface: bad format")
+}
+
+// TestPostValidate_ArrayOfRules_Add verifies that @postValidate accepts an array of
+// rules under add: [ { expr, reason }, ... ] and executes them sequentially.
+func TestPostValidate_ArrayOfRules_Add(t *testing.T) {
+	schemaStr := `
+type Product
+  @generate(query: { get: true, query: true }, mutation: { add: true, update: true })
+  @postValidate(
+    add: [
+      {
+        expr:   "all(nodes, {.after.price > 0})"
+        reason: "Product price must be positive"
+      },
+      {
+        expr:   "all(nodes, {.after.stock >= 0})"
+        reason: "Stock cannot be negative"
+      }
+    ]
+  ) {
+  id:    ID!
+  price: Float @oldValue
+  stock: Int   @oldValue
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	// 1. All pass
+	mutPass := makeAddMutation(t, gqlSchema, `mutation {
+		addProduct(input: [{price: 19.99, stock: 10}]) { product { id } }
+	}`)
+	rewriterPass := NewAddRewriter()
+	mutRespPass := &dgoapi.Response{Uids: map[string]string{"Product_1": "0x101"}}
+	exPass := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x101","Product.price":19.99,"Product.stock":10}]}`}
+	err := runPostValidate(context.Background(), mutPass, exPass, rewriterPass, mutRespPass, nil)
+	require.NoError(t, err)
+
+	// 2. First rule fails (price <= 0)
+	mutFail1 := makeAddMutation(t, gqlSchema, `mutation {
+		addProduct(input: [{price: -5.0, stock: 10}]) { product { id } }
+	}`)
+	rewriterFail1 := NewAddRewriter()
+	mutRespFail1 := &dgoapi.Response{Uids: map[string]string{"Product_1": "0x102"}}
+	exFail1 := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x102","Product.price":-5.0,"Product.stock":10}]}`}
+	errFail1 := runPostValidate(context.Background(), mutFail1, exFail1, rewriterFail1, mutRespFail1, nil)
+	require.Error(t, errFail1)
+	require.Contains(t, errFail1.Error(), "Product price must be positive")
+
+	// 3. Second rule fails (stock < 0)
+	mutFail2 := makeAddMutation(t, gqlSchema, `mutation {
+		addProduct(input: [{price: 15.0, stock: -2}]) { product { id } }
+	}`)
+	rewriterFail2 := NewAddRewriter()
+	mutRespFail2 := &dgoapi.Response{Uids: map[string]string{"Product_1": "0x103"}}
+	exFail2 := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x103","Product.price":15.0,"Product.stock":-2}]}`}
+	errFail2 := runPostValidate(context.Background(), mutFail2, exFail2, rewriterFail2, mutRespFail2, nil)
+	require.Error(t, errFail2)
+	require.Contains(t, errFail2.Error(), "Stock cannot be negative")
+}
+
+// TestPostValidate_ArrayOfRules_RootRules verifies that @postValidate accepts an array of
+// rules under rules: [ { expr, reason }, ... ] that applies across operations.
+func TestPostValidate_ArrayOfRules_RootRules(t *testing.T) {
+	schemaStr := `
+type Account
+  @generate(query: { get: true, query: true }, mutation: { add: true, update: true })
+  @postValidate(
+    reason: "Default account error"
+    rules: [
+      {
+        expr:   "all(nodes, {.after.name != \"\"})"
+        reason: "Name is required"
+      },
+      {
+        expr:   "all(nodes, {.after.limit >= 100})"
+      }
+    ]
+  ) {
+  id:    ID!
+  name:  String @oldValue
+  limit: Int    @oldValue
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	// 1. Both pass
+	mutPass := makeAddMutation(t, gqlSchema, `mutation {
+		addAccount(input: [{name: "Alice", limit: 500}]) { account { id } }
+	}`)
+	rewriterPass := NewAddRewriter()
+	mutRespPass := &dgoapi.Response{Uids: map[string]string{"Account_1": "0x201"}}
+	exPass := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x201","Account.name":"Alice","Account.limit":500}]}`}
+	err := runPostValidate(context.Background(), mutPass, exPass, rewriterPass, mutRespPass, nil)
+	require.NoError(t, err)
+
+	// 2. First rule fails (custom reason)
+	mutFail1 := makeAddMutation(t, gqlSchema, `mutation {
+		addAccount(input: [{name: "", limit: 500}]) { account { id } }
+	}`)
+	rewriterFail1 := NewAddRewriter()
+	mutRespFail1 := &dgoapi.Response{Uids: map[string]string{"Account_1": "0x202"}}
+	exFail1 := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x202","Account.name":"","Account.limit":500}]}`}
+	errFail1 := runPostValidate(context.Background(), mutFail1, exFail1, rewriterFail1, mutRespFail1, nil)
+	require.Error(t, errFail1)
+	require.Contains(t, errFail1.Error(), "Name is required")
+
+	// 3. Second rule fails (falls back to default root reason)
+	mutFail2 := makeAddMutation(t, gqlSchema, `mutation {
+		addAccount(input: [{name: "Bob", limit: 50}]) { account { id } }
+	}`)
+	rewriterFail2 := NewAddRewriter()
+	mutRespFail2 := &dgoapi.Response{Uids: map[string]string{"Account_1": "0x203"}}
+	exFail2 := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x203","Account.name":"Bob","Account.limit":50}]}`}
+	errFail2 := runPostValidate(context.Background(), mutFail2, exFail2, rewriterFail2, mutRespFail2, nil)
+	require.Error(t, errFail2)
+	require.Contains(t, errFail2.Error(), "Default account error")
+}
+
+func makeAddMutationWithVars(t *testing.T, gqlSchema schema.Schema, gqlMut string, vars map[string]interface{}) schema.Mutation {
+	t.Helper()
+	op, err := gqlSchema.Operation(&schema.Request{Query: gqlMut, Variables: vars})
+	require.NoError(t, err)
+	return test.GetMutation(t, op)
+}
+
+// TestExprError_MultiAndRichErrors tests error(v) supporting single string, list of strings,
+// and rich error objects with message, code, and extensions.
+func TestExprError_MultiAndRichErrors(t *testing.T) {
+	schemaStr := `
+type Item
+  @generate(query: { get: true, query: true }, mutation: { add: true })
+  @postValidate(
+    rules: [
+      {
+        expr: "all(nodes, {.after.code != \"MULTI\" ? true : error([\"err1: code is multi\", \"err2: cannot proceed\"])})"
+      },
+      {
+        expr: "all(nodes, {.after.code != \"RICH\" ? true : error([{message: \"rich error occurred\", code: \"ERR_INVALID_CODE\", severity: \"critical\"}])})"
+      }
+    ]
+  ) {
+  id:   ID!
+  code: String @oldValue
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	// 1. Multi-error list of strings: error(["err1...", "err2..."])
+	mutMulti := makeAddMutation(t, gqlSchema, `mutation {
+		addItem(input: [{code: "MULTI"}]) { item { id } }
+	}`)
+	rewriterMulti := NewAddRewriter()
+	mutRespMulti := &dgoapi.Response{Uids: map[string]string{"Item_1": "0x301"}}
+	exMulti := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x301","Item.code":"MULTI"}]}`}
+	errMulti := runPostValidate(context.Background(), mutMulti, exMulti, rewriterMulti, mutRespMulti, nil)
+	require.Error(t, errMulti)
+
+	var exprErrors *schema.ExprErrors
+	require.True(t, errors.As(errMulti, &exprErrors), "error should be *schema.ExprErrors")
+	require.Len(t, exprErrors.Errors, 2)
+	require.Equal(t, "err1: code is multi", exprErrors.Errors[0].Message)
+	require.Equal(t, "err2: cannot proceed", exprErrors.Errors[1].Message)
+
+	// Verify schema.AsGQLErrors unpacks both errors
+	gqlErrs := schema.AsGQLErrors(errMulti)
+	require.Len(t, gqlErrs, 2)
+	require.Equal(t, "err1: code is multi", gqlErrs[0].Message)
+	require.Equal(t, "err2: cannot proceed", gqlErrs[1].Message)
+
+	// 2. Rich error object: error([{message: "...", code: "...", severity: "..."}])
+	mutRich := makeAddMutation(t, gqlSchema, `mutation {
+		addItem(input: [{code: "RICH"}]) { item { id } }
+	}`)
+	rewriterRich := NewAddRewriter()
+	mutRespRich := &dgoapi.Response{Uids: map[string]string{"Item_1": "0x302"}}
+	exRich := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x302","Item.code":"RICH"}]}`}
+	errRich := runPostValidate(context.Background(), mutRich, exRich, rewriterRich, mutRespRich, nil)
+	require.Error(t, errRich)
+
+	var richErrors *schema.ExprErrors
+	require.True(t, errors.As(errRich, &richErrors))
+	require.Len(t, richErrors.Errors, 1)
+	require.Equal(t, "rich error occurred", richErrors.Errors[0].Message)
+	require.Equal(t, "ERR_INVALID_CODE", richErrors.Errors[0].Extensions["code"])
+	require.Equal(t, "critical", richErrors.Errors[0].Extensions["severity"])
+
+	// Verify extensions are preserved in x.GqlErrorList via AsGQLErrors and PrependPath
+	prepended := schema.PrependPath(errRich, "addItem")
+	gqlRichList, ok := prepended.(x.GqlErrorList)
+	require.True(t, ok)
+	require.Len(t, gqlRichList, 1)
+	require.Equal(t, "rich error occurred", gqlRichList[0].Message)
+	require.Equal(t, "ERR_INVALID_CODE", gqlRichList[0].Extensions["code"])
+	require.Equal(t, []interface{}{"addItem"}, gqlRichList[0].Path)
+}
+
+// TestDryRun_DirectiveParsing verifies that @dryRun directive is correctly parsed
+// with boolean literals, omitted arguments, and GraphQL variables.
+func TestDryRun_DirectiveParsing(t *testing.T) {
+	schemaStr := `
+type Entity
+  @generate(query: { get: true }, mutation: { add: true }) {
+  id:   ID!
+  name: String
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	// 1. @dryRun(enabled: true)
+	mutTrue := makeAddMutation(t, gqlSchema, `mutation @dryRun(enabled: true) {
+		addEntity(input: [{name: "Test"}]) { entity { id } }
+	}`)
+	require.True(t, mutTrue.IsDryRun())
+
+	// 2. @dryRun (without arguments, explicit directive present)
+	mutDefault := makeAddMutation(t, gqlSchema, `mutation @dryRun {
+		addEntity(input: [{name: "Test"}]) { entity { id } }
+	}`)
+	require.True(t, mutDefault.IsDryRun())
+
+	// 3. @dryRun(enabled: false)
+	mutFalse := makeAddMutation(t, gqlSchema, `mutation @dryRun(enabled: false) {
+		addEntity(input: [{name: "Test"}]) { entity { id } }
+	}`)
+	require.False(t, mutFalse.IsDryRun())
+
+	// 4. No @dryRun directive
+	mutNone := makeAddMutation(t, gqlSchema, `mutation {
+		addEntity(input: [{name: "Test"}]) { entity { id } }
+	}`)
+	require.False(t, mutNone.IsDryRun())
+
+	// 5. GraphQL variables: $dry = true
+	mutVarTrue := makeAddMutationWithVars(t, gqlSchema, `mutation ($dry: Boolean = false) @dryRun(enabled: $dry) {
+		addEntity(input: [{name: "Test"}]) { entity { id } }
+	}`, map[string]interface{}{"dry": true})
+	require.True(t, mutVarTrue.IsDryRun())
+
+	// 6. GraphQL variables: $dry = false
+	mutVarFalse := makeAddMutationWithVars(t, gqlSchema, `mutation ($dry: Boolean = true) @dryRun(enabled: $dry) {
+		addEntity(input: [{name: "Test"}]) { entity { id } }
+	}`, map[string]interface{}{"dry": false})
+	require.False(t, mutVarFalse.IsDryRun())
+
+	// 7. GraphQL variables default value ($dry not provided)
+	mutVarOmitted := makeAddMutationWithVars(t, gqlSchema, `mutation ($dry: Boolean = false) @dryRun(enabled: $dry) {
+		addEntity(input: [{name: "Test"}]) { entity { id } }
+	}`, map[string]interface{}{})
+	require.False(t, mutVarOmitted.IsDryRun())
+}
+
+// TestDryRun_IsDryRunInExprContext verifies that isDryRun boolean is injected into
+// postValidateEnv and accessible inside CEL @postValidate expressions.
+func TestDryRun_IsDryRunInExprContext(t *testing.T) {
+	schemaStr := `
+type DryEntity
+  @generate(query: { get: true }, mutation: { add: true })
+  @postValidate(
+    add: {
+      expr: "!isDryRun || error(\"intercepted by dry run rule\")"
+    }
+  ) {
+  id:   ID!
+  name: String @oldValue
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	// 1. Dry run enabled: isDryRun == true -> triggers error("intercepted by dry run rule")
+	mutDry := makeAddMutation(t, gqlSchema, `mutation @dryRun(enabled: true) {
+		addDryEntity(input: [{name: "Test"}]) { dryEntity { id } }
+	}`)
+	require.True(t, mutDry.IsDryRun())
+
+	rewriterDry := NewAddRewriter()
+	mutRespDry := &dgoapi.Response{Uids: map[string]string{"DryEntity_1": "0x401"}}
+	exDry := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x401","DryEntity.name":"Test"}]}`}
+	errDry := runPostValidate(context.Background(), mutDry, exDry, rewriterDry, mutRespDry, nil)
+	require.Error(t, errDry)
+	require.Contains(t, errDry.Error(), "intercepted by dry run rule")
+
+	// 2. Normal run: isDryRun == false -> !isDryRun is true, passes without error
+	mutNormal := makeAddMutation(t, gqlSchema, `mutation @dryRun(enabled: false) {
+		addDryEntity(input: [{name: "Test"}]) { dryEntity { id } }
+	}`)
+	require.False(t, mutNormal.IsDryRun())
+
+	rewriterNormal := NewAddRewriter()
+	mutRespNormal := &dgoapi.Response{Uids: map[string]string{"DryEntity_1": "0x402"}}
+	exNormal := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x402","DryEntity.name":"Test"}]}`}
+	errNormal := runPostValidate(context.Background(), mutNormal, exNormal, rewriterNormal, mutRespNormal, nil)
+	require.NoError(t, errNormal)
+}
+
+// TestDryRun_ResolverCommitAbort verifies that mutation resolver aborts the transaction
+// and rolls back immediately prior to Badger/Raft commit when @dryRun(enabled: true) is set.
+func TestDryRun_ResolverCommitAbort(t *testing.T) {
+	schemaStr := `
+type TestAudit
+  @generate(query: { get: true }, mutation: { add: true })
+  @postValidate(
+    add: {
+      expr: "all(nodes, {.after.title != \"\"})"
+    }
+  ) {
+  id:    ID!
+  title: String @oldValue
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	type trackingExecutor struct {
+		fakeExecutor
+		commitOrAbortCalled bool
+		txnAborted          bool
+	}
+
+	exec := &trackingExecutor{
+		fakeExecutor: fakeExecutor{
+			queryResp: `{"postValidateNodes": [{"uid":"0x501","TestAudit.title":"Audit 1"}]}`,
+		},
+	}
+
+	// Override CommitOrAbort to record invocation
+	var commitCalled bool
+	var aborted bool
+	mockExec := &mockExecutorWithCommit{
+		fakeExecutor: exec.fakeExecutor,
+		onCommitOrAbort: func(tc *dgoapi.TxnContext) {
+			commitCalled = true
+			if tc != nil && tc.Aborted {
+				aborted = true
+			}
+		},
+	}
+
+	resolver := NewDgraphResolver(NewAddRewriter(), mockExec)
+
+	mut := makeAddMutation(t, gqlSchema, `mutation @dryRun(enabled: true) {
+		addTestAudit(input: [{title: "Audit 1"}]) { testAudit { id } }
+	}`)
+
+	resolved, success := resolver.Resolve(context.Background(), mut)
+	require.True(t, success)
+	require.Nil(t, resolved.Err)
+	require.True(t, commitCalled, "CommitOrAbort should be called to abort the transaction")
+	require.True(t, aborted, "Transaction should be marked Aborted before Badger/Raft commit")
+
+	// Payload data should return empty result (numUids = 0)
+	require.NotNil(t, resolved.Data)
+}
+
+type mockExecutorWithCommit struct {
+	fakeExecutor
+	onCommitOrAbort func(tc *dgoapi.TxnContext)
+}
+
+func (m *mockExecutorWithCommit) Execute(ctx context.Context, req *dgoapi.Request, f schema.Field) (*dgoapi.Response, error) {
+	if len(req.Mutations) > 0 {
+		return &dgoapi.Response{
+			Json: []byte(`{"updateTestUser": [{"uid":"0x1"},{"uid":"0x2"}]}`),
+			Uids: map[string]string{"TestAudit_1": "0x501"},
+			Txn:  &dgoapi.TxnContext{StartTs: 5555},
+		}, nil
+	}
+	return m.fakeExecutor.Execute(ctx, req, f)
+}
+
+func (m *mockExecutorWithCommit) CommitOrAbort(ctx context.Context, tc *dgoapi.TxnContext) (*dgoapi.TxnContext, error) {
+	if m.onCommitOrAbort != nil {
+		m.onCommitOrAbort(tc)
+	}
+	return &dgoapi.TxnContext{}, nil
+}
+
+// TestDryRun_ProspectiveResultMatchesCommitted verifies that @dryRun(enabled: true)
+// returns the prospective GraphQL payload (numUids, returned fields) matching what
+// a committed mutation would return, while aborting the transaction before commit.
+func TestDryRun_ProspectiveResultMatchesCommitted(t *testing.T) {
+	schemaStr := `
+type TestUser
+  @generate(query: { get: true }, mutation: { add: true, update: true }) {
+  id:        ID!
+  email:     String!
+  firstName: String
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	var queryReq *dgoapi.Request
+	var commitCalled bool
+	var aborted bool
+
+	mockExec := &mockExecutorWithCommit{
+		fakeExecutor: fakeExecutor{
+			queryResp: `{"testUser": [{"email":"test@gorillajobs.app","firstName":"xxxxxxzzz"},{"email":"chat-user2@gorillajobs.app","firstName":"xxxxxxzzz"}]}`,
+		},
+		onCommitOrAbort: func(tc *dgoapi.TxnContext) {
+			commitCalled = true
+			if tc != nil && tc.Aborted {
+				aborted = true
+			}
+		},
+	}
+
+	exec := &dryRunQueryInspector{
+		mock: mockExec,
+		onExecute: func(req *dgoapi.Request) {
+			if len(req.Mutations) == 0 {
+				queryReq = req
+			}
+		},
+	}
+
+	resolver := NewDgraphResolver(NewUpdateRewriter(), exec)
+
+	mut := makeAddMutation(t, gqlSchema, `mutation @dryRun(enabled: true) {
+		updateTestUser(input: {
+			filter: {}
+			set: { firstName: "xxxxxxzzz" }
+		}) {
+			numUids
+			testUser {
+				email
+				firstName
+			}
+		}
+	}`)
+
+	resolved, success := resolver.Resolve(context.Background(), mut)
+	require.True(t, success)
+	require.Nil(t, resolved.Err)
+	require.True(t, commitCalled, "CommitOrAbort should be called to abort the transaction")
+	require.True(t, aborted, "Transaction should be marked Aborted before commit")
+	require.NotNil(t, queryReq, "Prospective query should be executed")
+	require.False(t, queryReq.ReadOnly, "Prospective query must have ReadOnly: false to read uncommitted txn")
+	require.Equal(t, uint64(5555), queryReq.StartTs, "Prospective query must pass StartTs to read uncommitted state")
+
+	// Payload data should reflect returned users and numUids
+	var res map[string]interface{}
+	require.NoError(t, json.Unmarshal(resolved.Data, &res))
+	updatePayload := res["updateTestUser"].(map[string]interface{})
+	require.EqualValues(t, 2, updatePayload["numUids"])
+	users := updatePayload["testUser"].([]interface{})
+	require.Len(t, users, 2)
+	u1 := users[0].(map[string]interface{})
+	require.Equal(t, "test@gorillajobs.app", u1["email"])
+	require.Equal(t, "xxxxxxzzz", u1["firstName"])
+}
+
+type dryRunQueryInspector struct {
+	mock      *mockExecutorWithCommit
+	onExecute func(req *dgoapi.Request)
+}
+
+func (d *dryRunQueryInspector) Execute(ctx context.Context, req *dgoapi.Request, f schema.Field) (*dgoapi.Response, error) {
+	if d.onExecute != nil {
+		d.onExecute(req)
+	}
+	return d.mock.Execute(ctx, req, f)
+}
+
+func (d *dryRunQueryInspector) CommitOrAbort(ctx context.Context, tc *dgoapi.TxnContext) (*dgoapi.TxnContext, error) {
+	return d.mock.CommitOrAbort(ctx, tc)
+}
+
+// TestPostValidate_TxnStartTsInContext verifies that mutResp.Txn.StartTs is passed
+// into the postValidate context as txn.startTs, allowing expressions and lambdas
+// to query Dgraph within the uncommitted transaction.
+func TestPostValidate_TxnStartTsInContext(t *testing.T) {
+	schemaStr := `
+type Placement
+  @generate(query: { get: true }, mutation: { add: true })
+  @postValidate(
+    add: {
+      expr: "txn.startTs > 0 ? true : error(\"txn.startTs missing or zero\")"
+    }
+  ) {
+  id:     ID!
+  status: String @oldValue
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+
+	// 1. With non-zero StartTs: should pass
+	mutPass := makeAddMutation(t, gqlSchema, `mutation {
+		addPlacement(input: [{status: "PENDING"}]) { placement { id } }
+	}`)
+	rewriterPass := NewAddRewriter()
+	mutRespPass := &dgoapi.Response{
+		Uids: map[string]string{"Placement_1": "0x601"},
+		Txn:  &dgoapi.TxnContext{StartTs: 42001},
+	}
+	exPass := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x601","Placement.status":"PENDING"}]}`}
+	errPass := runPostValidate(context.Background(), mutPass, exPass, rewriterPass, mutRespPass, nil)
+	require.NoError(t, errPass)
+
+	// 2. With zero StartTs: should fail with custom error
+	mutFail := makeAddMutation(t, gqlSchema, `mutation {
+		addPlacement(input: [{status: "PENDING"}]) { placement { id } }
+	}`)
+	rewriterFail := NewAddRewriter()
+	mutRespFail := &dgoapi.Response{
+		Uids: map[string]string{"Placement_1": "0x602"},
+		Txn:  &dgoapi.TxnContext{StartTs: 0},
+	}
+	exFail := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x602","Placement.status":"PENDING"}]}`}
+	errFail := runPostValidate(context.Background(), mutFail, exFail, rewriterFail, mutRespFail, nil)
+	require.Error(t, errFail)
+	require.Contains(t, errFail.Error(), "txn.startTs missing or zero")
 }
