@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	texttemplate "text/template"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/dgraph-io/gqlparser/v2/gqlerror"
 	"github.com/dgraph-io/gqlparser/v2/parser"
 	"github.com/expr-lang/expr" // For expression evaluation
+	"github.com/expr-lang/expr/vm"
 	"github.com/go-playground/validator/v10"
 	"github.com/golang/glog"
 	"github.com/google/uuid"
@@ -227,7 +229,9 @@ type Field interface {
 	// GetAuthMeta returns the Dgraph.Authorization meta information stored in schema
 	GetAuthMeta() *authorization.AuthMeta
 	BypassAuth() bool
+	BypassAuthIf() string
 	BypassAuthExcept() []string
+	EvaluateBypassAuth(authVariables map[string]interface{}) bool
 	LookupStrategy() string
 }
 
@@ -351,7 +355,9 @@ type FieldDefinition interface {
 	GetAuthMeta() *authorization.AuthMeta
 	LookupStrategy() string
 	BypassAuth() bool
+	BypassAuthIf() string
 	BypassAuthExcept() []string
+	EvaluateBypassAuth(authVariables map[string]interface{}) bool
 }
 
 type astType struct {
@@ -1216,6 +1222,20 @@ func (f *field) BypassAuth() bool {
 	return f.field.Definition.Directives.ForName(bypassAuthDirective) != nil
 }
 
+func (f *field) BypassAuthIf() string {
+	if f.field == nil || f.field.Definition == nil {
+		return ""
+	}
+	dir := f.field.Definition.Directives.ForName(bypassAuthDirective)
+	if dir == nil {
+		return ""
+	}
+	if v := dir.Arguments.ForName("if"); v != nil && v.Value != nil {
+		return strings.TrimSpace(v.Value.Raw)
+	}
+	return ""
+}
+
 func (f *field) BypassAuthExcept() []string {
 	if f.field == nil || f.field.Definition == nil {
 		return nil
@@ -1233,6 +1253,67 @@ func (f *field) BypassAuthExcept() []string {
 		except = append(except, item.Value.Raw)
 	}
 	return except
+}
+
+var bypassAuthPrograms sync.Map // map[string]*vm.Program
+
+func evaluateBypassAuthCondition(targetTypeName string, exprStr string, authVariables map[string]interface{}) (res bool) {
+	if exprStr == "" {
+		return true
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			res = false
+		}
+	}()
+
+	var prog *vm.Program
+	if cached, ok := bypassAuthPrograms.Load(exprStr); ok {
+		prog = cached.(*vm.Program)
+	} else {
+		env := NewExprEvaluationContext(targetTypeName, map[string]interface{}{}, nil, nil, AuthCtx{}, "query")
+		compiled, err := expr.Compile(exprStr, expr.Env(env.As()))
+		if err != nil {
+			return false
+		}
+		prog = compiled
+		bypassAuthPrograms.Store(exprStr, prog)
+	}
+
+	authCtx := AuthCtx{
+		AuthVariables: authVariables,
+	}
+	env := NewExprEvaluationContext(targetTypeName, nil, nil, nil, authCtx, "query")
+	result, err := expr.Run(prog, env.As())
+	if err != nil {
+		return false
+	}
+	if b, ok := result.(bool); ok {
+		return b
+	}
+	if result == nil {
+		return false
+	}
+	return true
+}
+
+func (f *field) EvaluateBypassAuth(authVariables map[string]interface{}) bool {
+	if f.field == nil || f.field.Definition == nil {
+		return false
+	}
+	dir := f.field.Definition.Directives.ForName(bypassAuthDirective)
+	if dir == nil {
+		return false
+	}
+	cond := f.BypassAuthIf()
+	if cond == "" {
+		return true
+	}
+	targetTypeName := ""
+	if f.Type() != nil {
+		targetTypeName = f.Type().Name()
+	}
+	return evaluateBypassAuthCondition(targetTypeName, cond, authVariables)
 }
 
 func (f *field) LookupStrategy() string {
@@ -1837,8 +1918,16 @@ func (q *query) BypassAuth() bool {
 	return (*field)(q).BypassAuth()
 }
 
+func (q *query) BypassAuthIf() string {
+	return (*field)(q).BypassAuthIf()
+}
+
 func (q *query) BypassAuthExcept() []string {
 	return (*field)(q).BypassAuthExcept()
+}
+
+func (q *query) EvaluateBypassAuth(authVariables map[string]interface{}) bool {
+	return (*field)(q).EvaluateBypassAuth(authVariables)
 }
 
 func (q *query) LookupStrategy() string {
@@ -2492,8 +2581,16 @@ func (m *mutation) BypassAuth() bool {
 	return (*field)(m).BypassAuth()
 }
 
+func (m *mutation) BypassAuthIf() string {
+	return (*field)(m).BypassAuthIf()
+}
+
 func (m *mutation) BypassAuthExcept() []string {
 	return (*field)(m).BypassAuthExcept()
+}
+
+func (m *mutation) EvaluateBypassAuth(authVariables map[string]interface{}) bool {
+	return (*field)(m).EvaluateBypassAuth(authVariables)
 }
 
 func (m *mutation) LookupStrategy() string {
@@ -4672,6 +4769,20 @@ func (fd *fieldDefinition) BypassAuth() bool {
 	return fd.fieldDef.Directives.ForName(bypassAuthDirective) != nil
 }
 
+func (fd *fieldDefinition) BypassAuthIf() string {
+	if fd == nil || fd.fieldDef == nil {
+		return ""
+	}
+	dir := fd.fieldDef.Directives.ForName(bypassAuthDirective)
+	if dir == nil {
+		return ""
+	}
+	if v := dir.Arguments.ForName("if"); v != nil && v.Value != nil {
+		return strings.TrimSpace(v.Value.Raw)
+	}
+	return ""
+}
+
 func (fd *fieldDefinition) BypassAuthExcept() []string {
 	if fd == nil || fd.fieldDef == nil {
 		return nil
@@ -4689,6 +4800,25 @@ func (fd *fieldDefinition) BypassAuthExcept() []string {
 		except = append(except, item.Value.Raw)
 	}
 	return except
+}
+
+func (fd *fieldDefinition) EvaluateBypassAuth(authVariables map[string]interface{}) bool {
+	if fd == nil || fd.fieldDef == nil {
+		return false
+	}
+	dir := fd.fieldDef.Directives.ForName(bypassAuthDirective)
+	if dir == nil {
+		return false
+	}
+	cond := fd.BypassAuthIf()
+	if cond == "" {
+		return true
+	}
+	targetTypeName := ""
+	if fd.Type() != nil {
+		targetTypeName = fd.Type().Name()
+	}
+	return evaluateBypassAuthCondition(targetTypeName, cond, authVariables)
 }
 
 func (t *astType) Name() string {

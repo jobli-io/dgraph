@@ -3301,15 +3301,35 @@ func bypassAuthValidation(
 	dir *ast.Directive,
 	secrets map[string]x.Sensitive) gqlerror.List {
 
-	exceptArg := dir.Arguments.ForName("except")
-	if exceptArg == nil {
-		return nil
-	}
+	var errs []*gqlerror.Error
 
 	targetTypeName := field.Type.Name()
+
+	// 1. Validate 'if' expression if present
+	if ifArg := dir.Arguments.ForName("if"); ifArg != nil && ifArg.Value != nil && strings.TrimSpace(ifArg.Value.Raw) != "" {
+		exprVal := strings.TrimSpace(ifArg.Value.Raw)
+		env := NewExprEvaluationContext(targetTypeName, map[string]interface{}{}, nil, nil, AuthCtx{}, "query")
+		if _, compErr := expr.Compile(exprVal, expr.Env(env.As())); compErr != nil {
+			var pos *ast.Position
+			if ifArg.Position != nil {
+				pos = ifArg.Position
+			} else {
+				pos = dir.Position
+			}
+			errs = append(errs, gqlerror.ErrorPosf(pos,
+				"Type %s; Field %s: @bypassAuth if expr %q cannot be compiled: %s",
+				typ.Name, field.Name, exprVal, compErr.Error()))
+		}
+	}
+
+	exceptArg := dir.Arguments.ForName("except")
+	if exceptArg == nil {
+		return errs
+	}
+
 	targetTypeDef := sch.Types[targetTypeName]
 	if targetTypeDef == nil {
-		return nil
+		return errs
 	}
 
 	validIdentifiers := make(map[string]bool)
@@ -3326,8 +3346,6 @@ func bypassAuthValidation(
 		validIdentifiers[f.Name] = true
 		validFields[f.Name] = true
 	}
-
-	var errs []*gqlerror.Error
 	for _, item := range exceptArg.Value.Children {
 		exceptValue := item.Value.Raw
 

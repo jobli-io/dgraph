@@ -20,6 +20,7 @@ are in addition to Dgraph's built-in directives (`@auth`, `@search`, `@id`, `@dg
 | [`@transform`](#transform)                         | `FIELD_DEFINITION`    | Transform a field value via expr-lang on add/update; include `uid: #.uid` when forwarding `before.*` edge refs | [default_transform.md](default_transform.md)                         |
 | [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`    | Fetch pre-mutation field values for expr-lang expressions                                                      | [old_value.md](old_value.md)                                         |
 | [`@dryRun`](#dryrun)                               | `MUTATION`            | Test prospective mutations and post-validation rules without committing to Badger/Raft                         | [#dryrun](#dryrun)                                                   |
+| [`@bypassAuth`](#bypassauth)                       | `FIELD_DEFINITION`    | Conditionally or selectively bypass auth checks on a child edge                                                | [bypass_auth.md](bypass_auth.md)                                     |
 | [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`    | Make a bidirectional edge write-once                                                                           | [immutable_inverse.md](immutable_inverse.md)                         |
 | `memberTypes` filter                               | Interface `XxxFilter` | Scope an interface query to a subset of implementing types                                                     | [interface_member_types_filter.md](interface_member_types_filter.md) |
 | `groupByXxx` query                                 | Root query (auto)     | Bucket-aggregate over filtered nodes; DateTime interval bucketing via `by`/`tz`                                | [groupby_queries.md](groupby_queries.md)                             |
@@ -201,6 +202,24 @@ compliance checks).
 - Returns `"dryRun": true` in the GraphQL response `"extensions"` payload
   (`"extensions": { "dryRun": true, ... }`).
 - Supports GraphQL variables (e.g. `mutation ($dry: Boolean) @dryRun(enabled: $dry)`).
+
+---
+
+### `@bypassAuth`
+
+```graphql
+directive @bypassAuth(except: [String!], if: String) on FIELD_DEFINITION
+```
+
+Bypasses authorization rules (both standard `@auth` and cascade `@cascadeAuth`) when traversing a
+child edge in queries.
+
+- `if`: Optional boolean expression evaluated with [expr-lang](https://expr-lang.org) against `auth`
+  claims. Bypass is only active if condition evaluates to `true`.
+- `except`: Optional list of types, interfaces, or field paths on the child type that remain
+  enforced even when bypass is active.
+
+See [bypass_auth.md](bypass_auth.md) for complete documentation and examples.
 
 ---
 

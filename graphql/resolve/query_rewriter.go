@@ -3654,10 +3654,11 @@ func addSelectionSetFrom(
 		oldSelector := auth.selector
 		rbac := auth.evaluateStaticRules(f.Type())
 		exceptRules := f.BypassAuthExcept()
-		if f.BypassAuth() && len(exceptRules) == 0 {
+		shouldBypass := f.EvaluateBypassAuth(auth.authVariables)
+		if shouldBypass && len(exceptRules) == 0 {
 			rbac = schema.Positive
 		}
-		if f.BypassAuth() && len(exceptRules) > 0 {
+		if shouldBypass && len(exceptRules) > 0 {
 			rbac = schema.Uncertain
 			auth.selector = func(t schema.Type) *schema.RuleNode {
 				return schema.FilterRuleNode(oldSelector(t), exceptRules)
@@ -4351,10 +4352,11 @@ func buildFilter(typ schema.Type,
 
 						rbac := wr.evaluateStaticRules(fd.Type())
 						exceptRules := fd.BypassAuthExcept()
-						if fd.BypassAuth() && len(exceptRules) == 0 {
+						shouldBypass := fd.EvaluateBypassAuth(wr.authVariables)
+						if shouldBypass && len(exceptRules) == 0 {
 							rbac = schema.Positive
 						}
-						if fd.BypassAuth() && len(exceptRules) > 0 {
+						if shouldBypass && len(exceptRules) > 0 {
 							rbac = schema.Uncertain
 							originalSelector := wr.selector
 							wr.selector = func(t schema.Type) *schema.RuleNode {
@@ -4431,10 +4433,11 @@ func buildFilter(typ schema.Type,
 
 						rbac := wr.evaluateStaticRules(fd.Type())
 						exceptRules := fd.BypassAuthExcept()
-						if fd.BypassAuth() && len(exceptRules) == 0 {
+						shouldBypass := fd.EvaluateBypassAuth(wr.authVariables)
+						if shouldBypass && len(exceptRules) == 0 {
 							rbac = schema.Positive
 						}
-						if fd.BypassAuth() && len(exceptRules) > 0 {
+						if shouldBypass && len(exceptRules) > 0 {
 							rbac = schema.Uncertain
 							originalSelector := wr.selector
 							wr.selector = func(t schema.Type) *schema.RuleNode {

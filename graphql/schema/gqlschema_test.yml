@@ -3882,6 +3882,25 @@ invalid_schemas:
         },
       ]
 
+  - name: "invalid @bypassAuth if expr is rejected at schema load time"
+    input: |
+      type Candidate @auth(query: { rule: "{$role: {eq: \"ADMIN\"}}" }) {
+        id: ID!
+        name: String!
+      }
+      type Query {
+        myCustomQuery: [Candidate!] @custom(http: { url: "https://api.example.com", method: GET }) @bypassAuth(if: "auth.role ==")
+      }
+    errlist:
+      [
+        {
+          "message":
+            "Type Query; Field myCustomQuery: @bypassAuth if expr \"auth.role ==\" cannot be
+            compiled: unexpected token EOF (1:12)\n | auth.role ==\n | ...........^",
+          "locations": [{ "line": 6, "column": 106 }],
+        },
+      ]
+
   - name: "@validate with malformed expr in array is rejected at schema load time"
     input: |
       type Product {
@@ -4545,4 +4564,19 @@ valid_schemas:
           ".application",
           "Candidate.application"
         ])
+      }
+
+  - name: "valid @bypassAuth directive with if condition"
+    input: |
+      type Candidate @auth(query: { rule: "{$role: {eq: \"ADMIN\"}}" }) {
+        id: ID!
+        name: String!
+        application: [Application!]
+      }
+      type Application {
+        id: ID!
+        status: String!
+      }
+      type Query {
+        myCustomQuery: [Candidate!] @custom(http: { url: "https://api.example.com", method: GET }) @bypassAuth(if: "auth.role == 'ADMIN'", except: ["application"])
       }
