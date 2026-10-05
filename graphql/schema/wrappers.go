@@ -189,6 +189,7 @@ type Field interface {
 	Type() Type
 	IsExternal() bool
 	SelectionSet() []Field
+	SelectionSetString() string
 	Location() x.Location
 	DgraphPredicate() string
 	Operation() Operation
@@ -1813,6 +1814,163 @@ func (f *field) SelectionSet() (flds []Field) {
 	return
 }
 
+func (f *field) SelectionSetString() string {
+	if f == nil || f.field == nil {
+		return ""
+	}
+	var vars map[string]interface{}
+	if f.op != nil {
+		vars = f.op.vars
+	}
+	return formatSelectionSet(f.field.SelectionSet, vars)
+}
+
+func formatSelectionSet(selSet ast.SelectionSet, vars map[string]interface{}) string {
+	if len(selSet) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("{\n")
+	formatSelections(&sb, selSet, vars, 1)
+	sb.WriteString("}")
+	return sb.String()
+}
+
+func formatSelections(sb *strings.Builder, selSet ast.SelectionSet, vars map[string]interface{}, indent int) {
+	indentStr := strings.Repeat("  ", indent)
+	for _, s := range selSet {
+		switch f := s.(type) {
+		case *ast.Field:
+			sb.WriteString(indentStr)
+			if f.Alias != "" && f.Alias != f.Name {
+				sb.WriteString(f.Alias)
+				sb.WriteString(": ")
+			}
+			sb.WriteString(f.Name)
+			if len(f.Arguments) > 0 {
+				sb.WriteString("(")
+				for i, arg := range f.Arguments {
+					if i > 0 {
+						sb.WriteString(", ")
+					}
+					sb.WriteString(arg.Name)
+					sb.WriteString(": ")
+					sb.WriteString(formatASTValue(arg.Value, vars))
+				}
+				sb.WriteString(")")
+			}
+			if len(f.SelectionSet) > 0 {
+				sb.WriteString(" {\n")
+				formatSelections(sb, f.SelectionSet, vars, indent+1)
+				sb.WriteString(indentStr)
+				sb.WriteString("}")
+			}
+			sb.WriteString("\n")
+		case *ast.InlineFragment:
+			sb.WriteString(indentStr)
+			sb.WriteString("... on ")
+			sb.WriteString(f.TypeCondition)
+			sb.WriteString(" {\n")
+			formatSelections(sb, f.SelectionSet, vars, indent+1)
+			sb.WriteString(indentStr)
+			sb.WriteString("}\n")
+		case *ast.FragmentSpread:
+			sb.WriteString(indentStr)
+			sb.WriteString("...")
+			sb.WriteString(f.Name)
+			sb.WriteString("\n")
+		}
+	}
+}
+
+func formatASTValue(val *ast.Value, vars map[string]interface{}) string {
+	if val == nil {
+		return "null"
+	}
+	if !hasASTVariable(val) {
+		return val.String()
+	}
+	if vars != nil {
+		if evaluated, err := val.Value(vars); err == nil {
+			return formatGoValueAsGraphQL(evaluated)
+		}
+	}
+	return val.String()
+}
+
+func hasASTVariable(val *ast.Value) bool {
+	if val == nil {
+		return false
+	}
+	if val.Kind == ast.Variable {
+		return true
+	}
+	for _, child := range val.Children {
+		if hasASTVariable(child.Value) {
+			return true
+		}
+	}
+	return false
+}
+
+func formatGoValueAsGraphQL(v interface{}) string {
+	if v == nil {
+		return "null"
+	}
+	switch val := v.(type) {
+	case string:
+		b, err := json.Marshal(val)
+		if err != nil {
+			return fmt.Sprintf("%q", val)
+		}
+		return string(b)
+	case bool:
+		if val {
+			return "true"
+		}
+		return "false"
+	case int:
+		return strconv.Itoa(val)
+	case int8, int16, int32, int64:
+		return fmt.Sprintf("%d", val)
+	case uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%d", val)
+	case float32, float64:
+		return fmt.Sprintf("%v", val)
+	case map[string]interface{}:
+		var sb strings.Builder
+		sb.WriteString("{")
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for i, k := range keys {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(k)
+			sb.WriteString(": ")
+			sb.WriteString(formatGoValueAsGraphQL(val[k]))
+		}
+		sb.WriteString("}")
+		return sb.String()
+	case []interface{}:
+		var sb strings.Builder
+		sb.WriteString("[")
+		for i, item := range val {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(formatGoValueAsGraphQL(item))
+		}
+		sb.WriteString("]")
+		return sb.String()
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
 func (f *field) Location() x.Location {
 	return x.Location{
 		Line:   f.field.Position.Line,
@@ -2111,6 +2269,10 @@ func (q *query) SelectionSet() []Field {
 	return (*field)(q).SelectionSet()
 }
 
+func (q *query) SelectionSetString() string {
+	return (*field)(q).SelectionSetString()
+}
+
 func (q *query) Location() x.Location {
 	return (*field)(q).Location()
 }
@@ -2402,6 +2564,10 @@ func (m *mutation) IDArgValue() (map[string]string, uint64, error) {
 
 func (m *mutation) SelectionSet() []Field {
 	return (*field)(m).SelectionSet()
+}
+
+func (m *mutation) SelectionSetString() string {
+	return (*field)(m).SelectionSetString()
 }
 
 func (m *mutation) QueryField() Field {

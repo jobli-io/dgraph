@@ -202,5 +202,14 @@ func GetBodyForLambda(ctx context.Context, field Field, parents,
 	} else {
 		body["args"] = field.Arguments()
 	}
+	if field != nil {
+		selSet := field.SelectionSetString()
+		if selSet != "" {
+			body["info"] = map[string]interface{}{
+				"fieldName":    field.Name(),
+				"selectionSet": selSet,
+			}
+		}
+	}
 	return body
 }
