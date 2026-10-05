@@ -98,6 +98,7 @@ func parseUpsertBlock(it *lex.ItemIterator) (*api.Request, error) {
 
 		// upsert { ===>mutation<=== {...} query{...}}
 		case item.Typ == itemUpsertBlockOp && item.Val == "mutation":
+			condText = ""
 			if !it.Next() {
 				return nil, it.Errorf("Unexpected end of upsert block")
 			}

@@ -1290,6 +1290,7 @@ func runPostValidate(
 		authCtx.AuthVariables = map[string]interface{}{}
 	}
 	authCtx.IsDryRun = mutation.IsDryRun()
+	authCtx.TxnCollector = &schema.TxnCollector{}
 
 	var startTs uint64
 	if mutResp != nil && mutResp.Txn != nil {
@@ -1366,6 +1367,20 @@ func runPostValidate(
 			return errors.New(msg)
 		}
 	}
+
+	if mutResp != nil && mutResp.Txn != nil && authCtx.TxnCollector != nil {
+		authCtx.TxnCollector.Lock()
+		if len(authCtx.TxnCollector.Keys) > 0 {
+			mutResp.Txn.Keys = append(mutResp.Txn.Keys, authCtx.TxnCollector.Keys...)
+			mutResp.Txn.Keys = x.Unique(mutResp.Txn.Keys)
+		}
+		if len(authCtx.TxnCollector.Preds) > 0 {
+			mutResp.Txn.Preds = append(mutResp.Txn.Preds, authCtx.TxnCollector.Preds...)
+			mutResp.Txn.Preds = x.Unique(mutResp.Txn.Preds)
+		}
+		authCtx.TxnCollector.Unlock()
+	}
+
 	return nil
 }
 

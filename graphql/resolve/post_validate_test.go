@@ -17,9 +17,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/dgraph-io/ristretto/v2/z"
 	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
 	"github.com/hypermodeinc/dgraph/v25/graphql/test"
 	"github.com/hypermodeinc/dgraph/v25/x"
@@ -1216,4 +1220,68 @@ type Placement
 	errFail := runPostValidate(context.Background(), mutFail, exFail, rewriterFail, mutRespFail, nil)
 	require.Error(t, errFail)
 	require.Contains(t, errFail.Error(), "txn.startTs missing or zero")
+}
+
+// TestPostValidate_InFlightTxnDeltaMerged verifies that when callLambda is invoked
+// inside @postValidate and returns a txn delta (keys and preds), runPostValidate
+// merges those keys and preds into mutResp.Txn before returning, so they are included
+// in the final commit proposal.
+func TestPostValidate_InFlightTxnDeltaMerged(t *testing.T) {
+	// 1. Mock lambda HTTP server returning txn delta
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"allowed": true,
+			"txn": map[string]interface{}{
+				"keys":  []interface{}{"childKey1", "childKey2"},
+				"preds": []interface{}{"Child.name", "Child.status"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	oldConfig := x.Config.GraphQL
+	x.Config.GraphQL = z.NewSuperFlag(fmt.Sprintf("lambda-url=%s;", server.URL)).
+		MergeAndCheckDefault("lambda-url=;")
+	defer func() { x.Config.GraphQL = oldConfig }()
+
+	schemaStr := `
+type TestPlugin
+  @generate(query: { get: true }, mutation: { add: true })
+  @postValidate(
+    add: {
+      expr: "callLambda(\"Plugin.testInFlight\", {\"txn\": txn}).allowed"
+    }
+  ) {
+  id:   ID!
+  name: String
+}
+`
+	gqlSchema := test.LoadSchemaFromString(t, schemaStr)
+	mut := makeAddMutation(t, gqlSchema, `mutation {
+		addTestPlugin(input: [{name: "Plugin-1"}]) { testPlugin { id } }
+	}`)
+	rewriter := NewAddRewriter()
+	mutResp := &dgoapi.Response{
+		Uids: map[string]string{"TestPlugin_1": "0x901"},
+		Txn: &dgoapi.TxnContext{
+			StartTs: 42001,
+			Keys:    []string{"rootKey1"},
+			Preds:   []string{"TestPlugin.name"},
+		},
+	}
+	ex := &fakeExecutor{queryResp: `{"postValidateNodes": [{"uid":"0x901","TestPlugin.name":"Plugin-1"}]}`}
+
+	err := runPostValidate(context.Background(), mut, ex, rewriter, mutResp, nil)
+	require.NoError(t, err)
+
+	// Verify mutResp.Txn was enriched with child keys and preds
+	require.Contains(t, mutResp.Txn.Keys, "rootKey1")
+	require.Contains(t, mutResp.Txn.Keys, "childKey1")
+	require.Contains(t, mutResp.Txn.Keys, "childKey2")
+	require.Contains(t, mutResp.Txn.Preds, "TestPlugin.name")
+	require.Contains(t, mutResp.Txn.Preds, "Child.name")
+	require.Contains(t, mutResp.Txn.Preds, "Child.status")
 }

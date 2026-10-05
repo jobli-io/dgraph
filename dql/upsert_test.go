@@ -485,6 +485,7 @@ upsert {
 	req, err := ParseDQL(query)
 	require.NoError(t, err)
 	require.Equal(t, 3, len(req.Mutations))
+	require.Empty(t, req.Mutations[2].Cond)
 }
 
 func TestMultipleMutationDifferentOrder(t *testing.T) {
@@ -517,4 +518,5 @@ upsert {
 	req, err := ParseDQL(query)
 	require.NoError(t, err)
 	require.Equal(t, 3, len(req.Mutations))
+	require.Empty(t, req.Mutations[2].Cond)
 }

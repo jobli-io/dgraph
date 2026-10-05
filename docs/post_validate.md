@@ -51,16 +51,16 @@ input DgraphPostValidate {
 The expression is evaluated **once per mutation** against the full batch of mutated nodes. Top-level
 variables available to every expression:
 
-| Variable   | Type     | Description                                                                                                                                    |
-| ---------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `nodes`    | `[]map`  | Array of all mutated nodes of this type (root + nested, any depth). Each element has `uid`, `before`, `after`, and `new`. See structure below. |
-| `before`   | `[]map`  | Array of pre-mutation maps across all mutated nodes.                                                                                           |
-| `after`    | `[]map`  | Array of post-mutation maps across all mutated nodes.                                                                                          |
-| `new`      | `[]map`  | Array of modified fields across all mutated nodes.                                                                                             |
-| `action`   | `string` | `"add"` or `"update"` — same as `@validate`'s `action`.                                                                                        |
-| `auth`     | `map`    | JWT auth variables — same as `@validate`'s `auth`. Defaults to `{}` when no auth is configured or no JWT is present.                           |
-| `isDryRun` | `bool`   | `true` when the mutation operation includes `@dryRun(enabled: true)` (or `@dryRun`).                                                           |
-| `txn`      | `map`    | Uncommitted transaction context (`{"startTs": <uint64>}`). Can be passed to `callLambda` to execute uncommitted queries against Dgraph.        |
+| Variable   | Type     | Description                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nodes`    | `[]map`  | Array of all mutated nodes of this type (root + nested, any depth). Each element has `uid`, `before`, `after`, and `new`. See structure below.                                                                                                                                                                                                                                                |
+| `before`   | `[]map`  | Array of pre-mutation maps across all mutated nodes.                                                                                                                                                                                                                                                                                                                                          |
+| `after`    | `[]map`  | Array of post-mutation maps across all mutated nodes.                                                                                                                                                                                                                                                                                                                                         |
+| `new`      | `[]map`  | Array of modified fields across all mutated nodes.                                                                                                                                                                                                                                                                                                                                            |
+| `action`   | `string` | `"add"` or `"update"` — same as `@validate`'s `action`.                                                                                                                                                                                                                                                                                                                                       |
+| `auth`     | `map`    | JWT auth variables — same as `@validate`'s `auth`. Defaults to `{}` when no auth is configured or no JWT is present.                                                                                                                                                                                                                                                                          |
+| `isDryRun` | `bool`   | `true` when the mutation operation includes `@dryRun(enabled: true)` (or `@dryRun`).                                                                                                                                                                                                                                                                                                          |
+| `txn`      | `map`    | Uncommitted transaction context (`{"startTs": <uint64>}`). Can be passed to `callLambda` to query Dgraph or execute in-flight DQL mutations (`/mutate?startTs=...`). If the lambda returns `{ txn: { keys: [...], preds: [...] } }`, Dgraph automatically merges these keys and predicates into the active transaction proposal before commit, enabling atomic subordinate node provisioning. |
 
 ### Helper functions
 
@@ -425,6 +425,60 @@ reason: "{{if .error}}Lambda error: {{.error}}{{else}}{{.count}} groups exceeds 
 The lambda receives the full `nodes` batch (with `uid`, `before`, `after`, `new`), can query
 external systems or Dgraph directly, and must return a response that the expression can evaluate.
 The caller's JWT is forwarded automatically.
+
+#### In-Flight Transactional Mutations via `txn`
+
+When `@postValidate` executes, the root mutation is already written to storage under an uncommitted
+transaction with start timestamp `txn.startTs`.
+
+Passing `txn` to `callLambda` allows your lambda to execute additional DQL mutations against Dgraph
+within the **exact same in-flight transaction**:
+
+```graphql
+type Plugin
+  @postValidate(
+    add: {
+      expr: """
+      let res = callLambda("Plugin.postValidateAdd", {
+        "nodes": nodes,
+        "action": action,
+        "auth": auth,
+        "txn": txn
+      });
+      res.allowed == true
+      """
+      reason: "Plugin validation failed: {{.error}}"
+    }
+  ) {
+  id: ID!
+}
+```
+
+In the lambda:
+
+```javascript
+// Execute DQL mutation under the open transaction using startTs
+const res = await fetch(`http://alpha:8080/mutate?startTs=${txn.startTs}`, {
+  method: "POST",
+  headers: { "Content-Type": "application/dql" },
+  body: provisionDql,
+})
+const mutateJson = await res.json()
+
+// Return the extensions.txn keys and preds back to Dgraph
+return {
+  allowed: true,
+  txn: {
+    keys: mutateJson.extensions?.txn?.keys || [],
+    preds: mutateJson.extensions?.txn?.preds || [],
+  },
+}
+```
+
+Dgraph automatically extracts the returned `txn.keys` and `txn.preds` and merges them into the root
+transaction proposal. When GraphQL commits the transaction via Dgraph Zero, both the root node and
+all child nodes created by the lambda commit **atomically in a single proposal**. If validation
+fails or the transaction aborts, all changes are rolled back together.
 
 > [!NOTE] `@validate` supports the same `callLambda` + `{{.error}}` pattern at the **field level**.
 > See [validate.md §`callLambda` + `{{.error}}` pattern](validate.md#calllambda--error-pattern) for

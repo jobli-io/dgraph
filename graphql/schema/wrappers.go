@@ -3636,7 +3636,7 @@ func NewExprFuncs(auth AuthCtx) ExprFuncs {
 			return
 		},
 		CallLambda: func(lambdaName string, payload map[string]interface{}) (interface{}, error) {
-			return callLambda(x.RootNamespace, lambdaName, payload, auth.AccessJWT, auth.AuthHeaderKey, auth.AuthHeaderValue)
+			return callLambda(x.RootNamespace, lambdaName, payload, auth.AccessJWT, auth.AuthHeaderKey, auth.AuthHeaderValue, auth.TxnCollector)
 		},
 		MapDiff:        diffMapInterface,
 		MapWithoutKeys: mapWithoutKeys,
@@ -3720,7 +3720,67 @@ type exprEvaluationContext struct {
 	FieldName string
 }
 
-func callLambda(ns uint64, lambdaName string, payload map[string]interface{}, accessJWT string, authHeaderKey string, authHeaderValue string) (interface{}, error) {
+// TxnCollector collects transaction keys and predicates modified during in-flight lambda calls.
+type TxnCollector struct {
+	sync.Mutex
+	Keys  []string
+	Preds []string
+}
+
+func (tc *TxnCollector) Add(keys []string, preds []string) {
+	if tc == nil {
+		return
+	}
+	tc.Lock()
+	defer tc.Unlock()
+	tc.Keys = append(tc.Keys, keys...)
+	tc.Preds = append(tc.Preds, preds...)
+}
+
+func extractTxnDelta(resMap map[string]interface{}, collector *TxnCollector) {
+	if collector == nil || resMap == nil {
+		return
+	}
+	var txnObj map[string]interface{}
+	if t, ok := resMap["txn"].(map[string]interface{}); ok {
+		txnObj = t
+	} else if ext, ok := resMap["extensions"].(map[string]interface{}); ok {
+		if t, ok := ext["txn"].(map[string]interface{}); ok {
+			txnObj = t
+		}
+	}
+	if txnObj == nil {
+		return
+	}
+
+	var keys []string
+	if rawKeys, ok := txnObj["keys"].([]interface{}); ok {
+		for _, k := range rawKeys {
+			if s, ok := k.(string); ok && s != "" {
+				keys = append(keys, s)
+			}
+		}
+	} else if strKeys, ok := txnObj["keys"].([]string); ok {
+		keys = append(keys, strKeys...)
+	}
+
+	var preds []string
+	if rawPreds, ok := txnObj["preds"].([]interface{}); ok {
+		for _, p := range rawPreds {
+			if s, ok := p.(string); ok && s != "" {
+				preds = append(preds, s)
+			}
+		}
+	} else if strPreds, ok := txnObj["preds"].([]string); ok {
+		preds = append(preds, strPreds...)
+	}
+
+	if len(keys) > 0 || len(preds) > 0 {
+		collector.Add(keys, preds)
+	}
+}
+
+func callLambda(ns uint64, lambdaName string, payload map[string]interface{}, accessJWT string, authHeaderKey string, authHeaderValue string, collector *TxnCollector) (interface{}, error) {
 	lambdaURL := x.LambdaUrl(ns)
 	if lambdaURL == "" {
 		return nil, errors.Errorf("lambda-url not configured")
@@ -3761,6 +3821,12 @@ func callLambda(ns uint64, lambdaName string, payload map[string]interface{}, ac
 		return nil, errors.Wrapf(err, "failed to unmarshal response from lambda %s", lambdaName)
 	}
 
+	if collector != nil {
+		if resMap, ok := result.(map[string]interface{}); ok {
+			extractTxnDelta(resMap, collector)
+		}
+	}
+
 	return result, nil
 }
 
@@ -3772,8 +3838,9 @@ type AuthCtx struct {
 	// RawInput holds the original user-provided mutation input fields before
 	// any @default expressions are evaluated. This is used to expose the
 	// true client input via `input` in @validate expressions.
-	RawInput map[string]interface{}
-	IsDryRun bool
+	RawInput     map[string]interface{}
+	IsDryRun     bool
+	TxnCollector *TxnCollector
 }
 
 func NewExprEvaluationContext(
