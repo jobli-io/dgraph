@@ -277,6 +277,13 @@ type Type interface {
 	// given mutation action, combining the type's own @postValidate directive (if any)
 	// with directives inherited from all interfaces the type implements.
 	PostValidateConfigs(action string) []*PostValidateConfig
+	// ValidateConfigs returns all applicable @validate configurations for the
+	// given mutation action, combining the type's own @validate directive (if any)
+	// with directives inherited from all interfaces the type implements.
+	ValidateConfigs(action string) []*ValidateConfig
+	// ValidateObject validates the full object data during mutation rewriting (pre-commit)
+	// against type-level and inherited interface-level @validate directives.
+	ValidateObject(action string, parent map[string]interface{}, auth AuthCtx, oldValue map[string]interface{}, removeValue map[string]interface{}) []error
 	IDField() FieldDefinition
 	XIDFields() []FieldDefinition
 	InterfaceImplHasAuthRules() bool
@@ -3192,6 +3199,90 @@ func (t *astType) PostValidateConfig(action string) *PostValidateConfig {
 	return cfgs[0]
 }
 
+// ValidateConfigs returns all applicable @validate configurations for the
+// given mutation action ("add" or "update"). It checks the type's own @validate
+// directive first, followed by any @validate directives declared on interfaces
+// that the type implements.
+func (t *astType) ValidateConfigs(action string) []*ValidateConfig {
+	typeDef := t.inSchema.schema.Types[t.Name()]
+	if typeDef == nil {
+		return nil
+	}
+
+	var configs []*ValidateConfig
+	seenKeys := make(map[string]bool)
+
+	// 1. Direct type directive
+	for _, cfg := range parseValidateDirective(typeDef.Directives.ForName(validateDirective), action) {
+		key := cfg.Rule + "\x00" + cfg.Expr
+		if !seenKeys[key] {
+			configs = append(configs, cfg)
+			seenKeys[key] = true
+		}
+	}
+
+	// 2. Directives inherited from implemented interfaces
+	for _, ifaceName := range typeDef.Interfaces {
+		if ifaceDef := t.inSchema.schema.Types[ifaceName]; ifaceDef != nil {
+			for _, cfg := range parseValidateDirective(ifaceDef.Directives.ForName(validateDirective), action) {
+				key := cfg.Rule + "\x00" + cfg.Expr
+				if !seenKeys[key] {
+					configs = append(configs, cfg)
+					seenKeys[key] = true
+				}
+			}
+		}
+	}
+
+	return configs
+}
+
+func (t *astType) ValidateObject(
+	action string,
+	parent map[string]interface{},
+	auth AuthCtx,
+	oldValue map[string]interface{},
+	removeValue map[string]interface{}) (errs []error) {
+
+	configs := t.ValidateConfigs(action)
+	if len(configs) == 0 {
+		return nil
+	}
+
+	eev := NewExprEvaluationContext(t.Name(), parent, oldValue, removeValue, auth, action)
+	eev.FieldValue = eev.After
+
+	for _, cfg := range configs {
+		var validationTags []string
+		if cfg.Rule != "" {
+			validationTags = append(validationTags, cfg.Rule)
+		}
+
+		validate := validator.New(validator.WithRequiredStructEnabled())
+
+		if cfg.Expr != "" {
+			validationTags = append(validationTags, "expr")
+			validate.RegisterValidation("expr", eev.validateExpr(cfg.Expr), true)
+		}
+
+		if len(validationTags) == 0 {
+			continue
+		}
+
+		ruleString := strings.Join(validationTags, ",")
+
+		cfgErrs, panicErr := runValidation(validate, &eev, ruleString, cfg.Reason, t.Name())
+		if panicErr != nil {
+			return []error{panicErr}
+		}
+		if len(cfgErrs) > 0 {
+			errs = append(errs, cfgErrs...)
+		}
+	}
+
+	return errs
+}
+
 // buildSelectionTree converts a list of dot-separated field paths into a nested
 // OldValueSelection tree. For example, ["name", "address.city", "address.country.code"]
 // becomes {name:{pred}, address:{pred, SubFields:{city:{pred}, country:{pred, SubFields:{code:{pred}}}}}}
@@ -4436,12 +4527,17 @@ func collectValidateConfigs(sch *ast.Schema, fd *ast.FieldDefinition, parentType
 	return configs
 }
 
-func runValidation(validate *validator.Validate, eev *exprEvaluationContext, ruleString string, reason string, fieldName string) (errs []error, panicErr error) {
+func runValidation(validate *validator.Validate, eev *exprEvaluationContext, ruleString string, reason string, targetName string) (errs []error, panicErr error) {
 	eev.exprErrorMsg = ""
 
 	defer func() {
 		if r := recover(); r != nil {
-			panicMsg := fmt.Errorf("validation for field '%s' with rule '%s' caused a panic: %v", fieldName, ruleString, r)
+			var panicMsg error
+			if targetName == eev.Typename {
+				panicMsg = fmt.Errorf("validation for type '%s' with rule '%s' caused a panic: %v", targetName, ruleString, r)
+			} else {
+				panicMsg = fmt.Errorf("validation for field '%s' with rule '%s' caused a panic: %v", targetName, ruleString, r)
+			}
 			panicErr = &CompileError{Err: panicMsg}
 		}
 	}()
@@ -4457,8 +4553,12 @@ func runValidation(validate *validator.Validate, eev *exprEvaluationContext, rul
 					} else {
 						msg = reason
 					}
+				} else if eev.exprErrorMsg != "" {
+					msg = eev.exprErrorMsg
+				} else if targetName == eev.Typename {
+					msg = fmt.Sprintf("failed validation on %s", e.ActualTag())
 				} else {
-					msg = fmt.Sprintf("Field %s failed validation on %s", fieldName, e.ActualTag())
+					msg = fmt.Sprintf("Field %s failed validation on %s", targetName, e.ActualTag())
 				}
 				errs = append(errs, errors.New(msg))
 			}
@@ -4545,6 +4645,7 @@ func renderValidateReason(reason string, eev exprEvaluationContext, tag string) 
 	data := map[string]interface{}{
 		"value":  eev.Value(),
 		"field":  eev.FieldName,
+		"type":   eev.Typename,
 		"action": eev.Action,
 		"auth":   eev.Auth,
 		"error":  eev.exprErrorMsg,

@@ -252,7 +252,7 @@ directive @cascadeAuth(operations: [CascadeAuthOperation!], depth: Int, bidirect
 directive @cascadeAuthPolicy(aggregation: String, skipBidirectional: Boolean, skip: Boolean, rule: String) on OBJECT | INTERFACE
 directive @bypassAuth(except: [String!], if: String) on FIELD_DEFINITION
 
-directive @validate(rule: String, expr: String, reason: String, rules: [DgraphValidate], add: [DgraphValidate], update: [DgraphValidate]) on FIELD_DEFINITION
+directive @validate(rule: String, expr: String, reason: String, rules: [DgraphValidate], add: [DgraphValidate], update: [DgraphValidate]) on FIELD_DEFINITION | OBJECT | INTERFACE
 directive @postValidate(expr: String, reason: String, rules: [DgraphPostValidate], add: [DgraphPostValidate], update: [DgraphPostValidate]) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION

@@ -8,6 +8,7 @@ package schema
 import (
 	"testing"
 
+	"github.com/dgraph-io/gqlparser/v2/ast"
 	"github.com/hypermodeinc/dgraph/v25/x"
 	"github.com/stretchr/testify/require"
 )
@@ -305,4 +306,168 @@ func TestValidate_ExprCustomErrorWithTemplate(t *testing.T) {
 	parentValid := map[string]interface{}{"balance": 100}
 	errsValid := validateValue(s.schema, balanceFd, "add", "Account", parentValid, auth, nil, nil)
 	require.Empty(t, errsValid)
+}
+
+func TestValidate_TypeLevel_AddAndUpdate(t *testing.T) {
+	const gqlSchema = `
+		type DateRange @validate(
+			expr: "after.endDate > after.startDate"
+			reason: "Type {{.type}}: endDate must be after startDate"
+		) {
+			id: ID!
+			startDate: String!
+			endDate: String!
+		}
+
+		type Event @validate(
+			add: [
+				{ expr: "after.status == 'DRAFT'", reason: "New events must start in DRAFT status" }
+			]
+			update: [
+				{ expr: "before.status == 'CANCELLED' ? error('Cannot update cancelled event') : true", reason: "{{.error}}" }
+			]
+		) {
+			id: ID!
+			title: String!
+			status: String!
+		}
+	`
+
+	handler, err := NewHandler(gqlSchema, false)
+	require.NoError(t, err, "NewHandler failed")
+
+	sch, err := FromString(handler.GQLSchema(), x.RootNamespace)
+	require.NoError(t, err, "FromString failed")
+
+	s, ok := sch.(*schema)
+	require.True(t, ok)
+
+	dateRangeTyp := &astType{
+		typ:      &ast.Type{NamedType: "DateRange"},
+		inSchema: s,
+	}
+
+	eventTyp := &astType{
+		typ:      &ast.Type{NamedType: "Event"},
+		inSchema: s,
+	}
+
+	auth := AuthCtx{}
+
+	t.Run("violating root expr fails with template reason on add", func(t *testing.T) {
+		parent := map[string]interface{}{
+			"startDate": "2026-10-05",
+			"endDate":   "2026-10-01",
+		}
+		errs := dateRangeTyp.ValidateObject("add", parent, auth, nil, nil)
+		require.Len(t, errs, 1)
+		require.Equal(t, "Type DateRange: endDate must be after startDate", errs[0].Error())
+	})
+
+	t.Run("valid root expr passes on add", func(t *testing.T) {
+		parent := map[string]interface{}{
+			"startDate": "2026-10-01",
+			"endDate":   "2026-10-05",
+		}
+		errs := dateRangeTyp.ValidateObject("add", parent, auth, nil, nil)
+		require.Empty(t, errs)
+	})
+
+	t.Run("violating add rule fails on Event", func(t *testing.T) {
+		parent := map[string]interface{}{
+			"title":  "Published Event",
+			"status": "PUBLISHED",
+		}
+		errs := eventTyp.ValidateObject("add", parent, auth, nil, nil)
+		require.Len(t, errs, 1)
+		require.Equal(t, "New events must start in DRAFT status", errs[0].Error())
+	})
+
+	t.Run("valid add passes on Event", func(t *testing.T) {
+		parent := map[string]interface{}{
+			"title":  "Draft Event",
+			"status": "DRAFT",
+		}
+		errs := eventTyp.ValidateObject("add", parent, auth, nil, nil)
+		require.Empty(t, errs)
+	})
+
+	t.Run("update on cancelled event surfaces error message", func(t *testing.T) {
+		before := map[string]interface{}{
+			"title":  "Old Title",
+			"status": "CANCELLED",
+		}
+		input := map[string]interface{}{
+			"title": "New Title",
+		}
+		errs := eventTyp.ValidateObject("update", input, auth, before, nil)
+		require.Len(t, errs, 1)
+		require.Equal(t, "Cannot update cancelled event", errs[0].Error())
+	})
+}
+
+func TestValidate_TypeLevel_InterfaceInheritance(t *testing.T) {
+	const gqlSchema = `
+		interface Named @validate(
+			expr: "after.title != ''"
+			reason: "Title cannot be empty"
+		) {
+			id: ID!
+			title: String!
+		}
+
+		type Task implements Named @validate(
+			expr: "after.priority >= 1 && after.priority <= 5"
+			reason: "Priority must be between 1 and 5"
+		) {
+			id: ID!
+			title: String!
+			priority: Int!
+		}
+	`
+
+	handler, err := NewHandler(gqlSchema, false)
+	require.NoError(t, err, "NewHandler failed")
+
+	sch, err := FromString(handler.GQLSchema(), x.RootNamespace)
+	require.NoError(t, err, "FromString failed")
+
+	s, ok := sch.(*schema)
+	require.True(t, ok)
+
+	taskTyp := &astType{
+		typ:      &ast.Type{NamedType: "Task"},
+		inSchema: s,
+	}
+
+	auth := AuthCtx{}
+
+	t.Run("violating interface rule fails", func(t *testing.T) {
+		parent := map[string]interface{}{
+			"title":    "",
+			"priority": 3,
+		}
+		errs := taskTyp.ValidateObject("add", parent, auth, nil, nil)
+		require.Len(t, errs, 1)
+		require.Equal(t, "Title cannot be empty", errs[0].Error())
+	})
+
+	t.Run("violating concrete rule fails", func(t *testing.T) {
+		parent := map[string]interface{}{
+			"title":    "Valid Title",
+			"priority": 10,
+		}
+		errs := taskTyp.ValidateObject("add", parent, auth, nil, nil)
+		require.Len(t, errs, 1)
+		require.Equal(t, "Priority must be between 1 and 5", errs[0].Error())
+	})
+
+	t.Run("valid passes both", func(t *testing.T) {
+		parent := map[string]interface{}{
+			"title":    "Valid Title",
+			"priority": 2,
+		}
+		errs := taskTyp.ValidateObject("add", parent, auth, nil, nil)
+		require.Empty(t, errs)
+	})
 }

@@ -3922,6 +3922,36 @@ invalid_schemas:
         },
       ]
 
+  - name: "@validate directive on type with malformed expr is rejected at schema load time"
+    input: |
+      type Event @validate(expr: "after.endDate >>>>") {
+        id: ID!
+        title: String!
+      }
+    errlist:
+      [
+        {
+          "message":
+            "Type Event: @validate top-level expr \"after.endDate >>>>\" cannot be compiled:
+            unexpected token Operator(\">\") (1:16)\n | after.endDate >>>>\n | ...............^",
+          "locations": [{ "line": 1, "column": 13 }],
+        },
+      ]
+
+  - name: "@validate directive on @remote type is rejected"
+    input: |
+      type RemoteEvent @remote @validate(expr: "after.endDate > after.startDate") {
+        id: ID!
+        title: String!
+      }
+    errlist:
+      [
+        {
+          "message": "Type RemoteEvent: cannot use @validate directive on a @remote type",
+          "locations": [{ "line": 1, "column": 27 }],
+        },
+      ]
+
 valid_schemas:
   - name: "@postValidate with valid callLambda expr is accepted"
     input: |
@@ -3970,6 +4000,34 @@ valid_schemas:
             { rule: "min=3", reason: "Product code must be at least 3 characters" }
           ]
         )
+      }
+
+  - name: "@validate directive on object and interface is accepted"
+    input: |
+      interface Named @validate(
+        rules: [
+          { expr: "after.title != ''", reason: "Title cannot be empty" }
+        ]
+      ) {
+        id: ID!
+        title: String!
+      }
+
+      type Event implements Named @validate(
+        expr: "after.endDate > after.startDate"
+        reason: "Event endDate must be after startDate"
+        add: [
+          { expr: "after.startDate >= date('now')", reason: "Start date cannot be in the past" }
+        ]
+        update: [
+          { expr: "before.status == 'CANCELLED' ? error('Cannot update cancelled event') : true" }
+        ]
+      ) {
+        id: ID!
+        title: String!
+        startDate: DateTime!
+        endDate: DateTime!
+        status: String!
       }
 
   - name: "@default allows non-scalar field type"

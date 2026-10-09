@@ -2880,12 +2880,11 @@ func rewriteObject(
 	// At this point, default values for the object type has also been populated in obj.
 	// We can now validate the values before mutation.
 
-	// if err := typ.ValidateObject(obj, nil); err != nil {
-	// 	retErrors = append(retErrors, err)
-	// }
+	oldValue := xidMetadata.variableOldValueMap[variable] // retrieve the old value
+	for _, err := range typ.ValidateObject(action, obj, authCtx, oldValue, objDel) {
+		retErrors = append(retErrors, errors.Errorf("Type %s; %s", typ.Name(), err.Error()))
+	}
 	for _, field := range typ.Fields() {
-		// Extract auth variables
-		oldValue := xidMetadata.variableOldValueMap[variable] // retrieve the old value
 		for _, err := range field.ValidateValue(action, typ.Name(), obj, authCtx, oldValue, objDel) {
 			retErrors = append(retErrors, errors.Errorf("Type %s; %s", typ.Name(), err.Error()))
 		}

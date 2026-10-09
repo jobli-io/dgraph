@@ -39,7 +39,7 @@ func init() {
 		passwordDirectiveValidation, conflictingDirectiveValidation, nonIdFieldsCheck,
 		remoteTypeValidation, generateDirectiveValidation, apolloKeyValidation,
 		apolloExtendsValidation, lambdaOnMutateValidation, postValidateDirectiveValidation,
-		validateInterfacePolicy)
+		validateInterfacePolicy, validateTypeDirectiveValidation)
 	fieldValidations = append(fieldValidations, listValidityCheck, fieldArgumentCheck,
 		fieldNameCheck, isValidFieldForList, hasAuthDirective, fieldDirectiveCheck)
 
@@ -1880,6 +1880,101 @@ func validateDirectiveValidation(sch *ast.Schema,
 
 	// Returns nil if no schema validation errors were found.
 	return combinedErrors
+}
+
+// validateTypeDirectiveValidation validates @validate directive placement on types/interfaces
+// and compiles all expr arguments at schema load time so that syntax errors and unknown
+// functions are surfaced immediately.
+func validateTypeDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqlerror.List {
+	dir := typ.Directives.ForName(validateDirective)
+	if dir == nil {
+		return nil
+	}
+
+	var errs gqlerror.List
+
+	// Rule 1: Directive placement check
+	if typ.Directives.ForName(remoteDirective) != nil {
+		errs = append(errs, gqlerror.ErrorPosf(dir.Position, "Type %s: cannot use @validate directive on a @remote type", typ.Name))
+		return errs
+	}
+
+	// Rule 2: Argument literal kind checks
+	for _, argName := range []string{"reason", "rule", "expr"} {
+		if arg := dir.Arguments.ForName(argName); arg != nil && arg.Value != nil {
+			if arg.Value.Kind != ast.StringValue && arg.Value.Kind != ast.BlockValue && arg.Value.Kind != 0 {
+				errs = append(errs, gqlerror.ErrorPosf(arg.Position, "%s argument for @validate directive on type '%s' must be a string literal, got %v", argName, typ.Name, arg.Value.Kind))
+			}
+		}
+	}
+	for _, argName := range []string{"rules", "add", "update"} {
+		if arg := dir.Arguments.ForName(argName); arg != nil && arg.Value != nil {
+			if arg.Value.Kind != ast.ListValue && arg.Value.Kind != ast.ObjectValue {
+				errs = append(errs, gqlerror.ErrorPosf(arg.Position, "%s argument for @validate directive on type '%s' must be a list or object, got %v", argName, typ.Name, arg.Value.Kind))
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return errs
+	}
+
+	// Collect all expr strings from: top-level expr, rules, add, update.
+	type exprEntry struct {
+		raw string
+		arm string // "" | "rules" | "add" | "update"
+	}
+	var exprs []exprEntry
+
+	collectFromArg := func(arg *ast.Argument, arm string) {
+		if arg == nil || arg.Value == nil {
+			return
+		}
+		switch arg.Value.Kind {
+		case ast.ListValue:
+			for _, child := range arg.Value.Children {
+				if child.Value != nil && child.Value.Kind == ast.ObjectValue {
+					if exprVal := child.Value.Children.ForName("expr"); exprVal != nil && exprVal.Raw != "" {
+						exprs = append(exprs, exprEntry{exprVal.Raw, arm})
+					}
+				}
+			}
+		case ast.ObjectValue:
+			if exprVal := arg.Value.Children.ForName("expr"); exprVal != nil && exprVal.Raw != "" {
+				exprs = append(exprs, exprEntry{exprVal.Raw, arm})
+			}
+		}
+	}
+
+	if topExpr := dir.Arguments.ForName("expr"); topExpr != nil && topExpr.Value.Raw != "" {
+		exprs = append(exprs, exprEntry{topExpr.Value.Raw, ""})
+	}
+	collectFromArg(dir.Arguments.ForName("rules"), "rules")
+	for _, arm := range []string{"add", "update"} {
+		collectFromArg(dir.Arguments.ForName(arm), arm)
+	}
+
+	if len(exprs) == 0 {
+		return nil
+	}
+
+	env := NewExprEvaluationContext(typ.Name, map[string]interface{}{}, nil, nil, AuthCtx{}, "add")
+	env.FieldValue = env.After
+
+	for _, e := range exprs {
+		_, compErr := expr.Compile(e.raw, expr.Env(env.As()))
+		if compErr != nil {
+			arm := e.arm
+			if arm == "" {
+				arm = "top-level"
+			}
+			errs = append(errs, gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s: @validate %s expr %q cannot be compiled: %s",
+				typ.Name, arm, e.raw, compErr.Error()))
+		}
+	}
+
+	return errs
 }
 
 // postValidateDirectiveValidation compiles the @postValidate expr arguments at

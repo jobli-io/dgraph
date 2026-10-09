@@ -1,10 +1,13 @@
 # @validate Directive
 
-Field-level validation that runs **during mutation rewriting** — before the mutation is sent to
-Dgraph. If validation fails, the mutation is rejected and Dgraph is never touched.
+Validation that runs **during mutation rewriting** — before the mutation is sent to Dgraph. If
+validation fails, the mutation is rejected and Dgraph is never touched.
+
+`@validate` can be declared on fields (`FIELD_DEFINITION`) for field-level input validation, and on
+types or interfaces (`OBJECT | INTERFACE`) for cross-field invariants and state transitions.
 
 Compare with `@postValidate` (type-level, runs _after_ commit) — `@validate` is the pre-commit
-per-field guard.
+guard.
 
 ---
 
@@ -18,7 +21,7 @@ directive @validate(
   rules: [DgraphValidate] # general rules for add and update (array or single object)
   add: [DgraphValidate] # add-specific rules (array or single object)
   update: [DgraphValidate] # update-specific rules (array or single object)
-) on FIELD_DEFINITION
+) on FIELD_DEFINITION | OBJECT | INTERFACE
 
 input DgraphValidate {
   rule: String
@@ -100,8 +103,9 @@ The human-readable message returned to the client on failure. Supports Go
 
 | Variable      | Example access             | Description                                                                      |
 | ------------- | -------------------------- | -------------------------------------------------------------------------------- |
-| `{{.value}}`  | `{{.value}}`               | The field value being validated                                                  |
+| `{{.value}}`  | `{{.value}}`               | The field value being validated (or node object for type-level)                  |
 | `{{.field}}`  | `{{.field}}`               | The GraphQL field name                                                           |
+| `{{.type}}`   | `{{.type}}`                | The GraphQL type name being validated                                            |
 | `{{.action}}` | `{{.action}}`              | `"add"` or `"update"`                                                            |
 | `{{.auth}}`   | `{{index .auth "USERID"}}` | JWT claim map                                                                    |
 | `{{.error}}`  | `{{.error}}`               | Message from `error()` call; empty string `""` when `expr` simply returned false |
@@ -317,13 +321,75 @@ name: String!
 
 ---
 
+---
+
+## Type and Interface-Level Validation
+
+`@validate` can also be placed directly on `OBJECT` and `INTERFACE` definitions. This enables
+**cross-field validation** and **state machine invariant enforcement** before any data is written:
+
+```graphql
+type Event
+  @validate(
+    expr: "after.endDate > after.startDate"
+    reason: "Type {{.type}}: endDate must be after startDate"
+    add: [{ expr: "after.status == 'DRAFT'", reason: "New events must start in DRAFT status" }]
+    update: [
+      {
+        expr: "before.status == 'CANCELLED' ? error('Cannot update cancelled event') : true"
+        reason: "{{.error}}"
+      }
+    ]
+  ) {
+  id: ID!
+  title: String!
+  startDate: String!
+  endDate: String!
+  status: String!
+}
+```
+
+### How Type-Level `@validate` Works
+
+1. **Pre-commit execution**: Evaluated in `mutation_rewriter` after field values, defaults, and
+   transforms are processed, but before any DQL write mutations are emitted.
+2. **Evaluation Environment**:
+   - `after`: Merged state (`before + input`), allowing cross-field comparisons such as
+     `after.endDate > after.startDate`.
+   - `before`: Pre-mutation node values (fetched via `@oldValue`).
+   - `input`: The mutation input fields for this node.
+   - `new`: Keys modified between `before` and `after`.
+   - `auth`: JWT claims.
+   - `action`: `"add"` or `"update"`.
+3. **Reason Templates**: Supports `{{.type}}`, `{{.action}}`, `{{.auth}}`, `{{.error}}`, and
+   `{{.tag}}`.
+4. **Interface Inheritance**: If an interface declares `@validate`, all concrete types implementing
+   that interface automatically inherit and execute the interface's validation rules before their
+   own type-level rules run:
+
+```graphql
+interface Named @validate(expr: "after.title != ''", reason: "Title cannot be empty") {
+  id: ID!
+  title: String!
+}
+
+type Project implements Named
+  @validate(expr: "after.budget > 0", reason: "Budget must be positive") {
+  id: ID!
+  title: String!
+  budget: Int!
+}
+```
+
+---
+
 ## Difference from `@postValidate`
 
-|                | `@validate`                        | `@postValidate`                        |
-| -------------- | ---------------------------------- | -------------------------------------- |
-| **Placement**  | Field-level                        | Type-level                             |
-| **When**       | Before commit (rewriting phase)    | After commit                           |
-| **Scope**      | Single field                       | Entire node (all fields)               |
-| **Data**       | New value + context                | Written node + `before`/`after`/`new`  |
-| **On failure** | Mutation rejected, nothing written | Error returned, data already committed |
-| **Use case**   | Input guards, permission checks    | Cross-field invariants, quota checks   |
+|                | `@validate` (Field)                | `@validate` (Type / Interface)         | `@postValidate`                        |
+| -------------- | ---------------------------------- | -------------------------------------- | -------------------------------------- |
+| **Placement**  | `FIELD_DEFINITION`                 | `OBJECT \| INTERFACE`                  | `OBJECT \| INTERFACE`                  |
+| **When**       | Before commit (rewriting phase)    | Before commit (rewriting phase)        | After commit                           |
+| **Scope**      | Single field                       | Entire node (cross-field)              | Entire node (all fields)               |
+| **Data**       | New value + context                | `after`, `before`, `input`, `new`, etc | Written node + `before`/`after`/`new`  |
+| **On failure** | Mutation rejected, nothing written | Mutation rejected, nothing written     | Error returned, data already committed |
+| **Use case**   | Field input guards, formats        | Cross-field invariants, state checks   | Quota checks, external notifications   |

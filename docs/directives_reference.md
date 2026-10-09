@@ -8,22 +8,22 @@ are in addition to Dgraph's built-in directives (`@auth`, `@search`, `@id`, `@dg
 
 ## Quick Reference
 
-| Directive                                          | Placement             | Purpose                                                                                                        | Doc                                                                  |
-| -------------------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| [`@cascadeAuth`](#cascadeauth)                     | `FIELD_DEFINITION`    | Propagate auth from authority type to child                                                                    | [cascade_auth.md](cascade_auth.md)                                   |
-| [`@cascadeAuthPolicy`](#cascadeauthpolicy)         | `OBJECT \| INTERFACE` | Control cascade auth aggregation and opt-outs                                                                  | [cascade_auth.md](cascade_auth.md)                                   |
-| [`@authVariables`](#authvariables)                 | `OBJECT \| INTERFACE` | Declare `<<KEY>>` template substitution values for `@auth` rules                                               | [cascade_auth.md](cascade_auth.md)                                   |
-| [`@cascadeDelete`](#cascadedelete)                 | `FIELD_DEFINITION`    | Auto-delete linked nodes when parent is deleted                                                                | [cascade_delete.md](cascade_delete.md)                               |
-| [`@postValidate`](#postvalidate)                   | `OBJECT \| INTERFACE` | Run expr-lang expression after mutation commits                                                                | [post_validate.md](post_validate.md)                                 |
-| [`@validate`](#validate)                           | `FIELD_DEFINITION`    | Field-level validation before mutation commits                                                                 | [validate.md](validate.md)                                           |
-| [`@default`](#default)                             | `FIELD_DEFINITION`    | Set default field value on add/update                                                                          | [default_transform.md](default_transform.md)                         |
-| [`@transform`](#transform)                         | `FIELD_DEFINITION`    | Transform a field value via expr-lang on add/update; include `uid: #.uid` when forwarding `before.*` edge refs | [default_transform.md](default_transform.md)                         |
-| [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`    | Fetch pre-mutation field values for expr-lang expressions                                                      | [old_value.md](old_value.md)                                         |
-| [`@dryRun`](#dryrun)                               | `MUTATION`            | Test prospective mutations and post-validation rules without committing to Badger/Raft                         | [#dryrun](#dryrun)                                                   |
-| [`@bypassAuth`](#bypassauth)                       | `FIELD_DEFINITION`    | Conditionally or selectively bypass auth checks on a child edge                                                | [bypass_auth.md](bypass_auth.md)                                     |
-| [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`    | Make a bidirectional edge write-once                                                                           | [immutable_inverse.md](immutable_inverse.md)                         |
-| `memberTypes` filter                               | Interface `XxxFilter` | Scope an interface query to a subset of implementing types                                                     | [interface_member_types_filter.md](interface_member_types_filter.md) |
-| `groupByXxx` query                                 | Root query (auto)     | Bucket-aggregate over filtered nodes; DateTime interval bucketing via `by`/`tz`                                | [groupby_queries.md](groupby_queries.md)                             |
+| Directive                                          | Placement                                 | Purpose                                                                                                        | Doc                                                                  |
+| -------------------------------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| [`@cascadeAuth`](#cascadeauth)                     | `FIELD_DEFINITION`                        | Propagate auth from authority type to child                                                                    | [cascade_auth.md](cascade_auth.md)                                   |
+| [`@cascadeAuthPolicy`](#cascadeauthpolicy)         | `OBJECT \| INTERFACE`                     | Control cascade auth aggregation and opt-outs                                                                  | [cascade_auth.md](cascade_auth.md)                                   |
+| [`@authVariables`](#authvariables)                 | `OBJECT \| INTERFACE`                     | Declare `<<KEY>>` template substitution values for `@auth` rules                                               | [cascade_auth.md](cascade_auth.md)                                   |
+| [`@cascadeDelete`](#cascadedelete)                 | `FIELD_DEFINITION`                        | Auto-delete linked nodes when parent is deleted                                                                | [cascade_delete.md](cascade_delete.md)                               |
+| [`@postValidate`](#postvalidate)                   | `OBJECT \| INTERFACE`                     | Run expr-lang expression after mutation commits                                                                | [post_validate.md](post_validate.md)                                 |
+| [`@validate`](#validate)                           | `FIELD_DEFINITION \| OBJECT \| INTERFACE` | Field-level and type-level validation before mutation commits                                                  | [validate.md](validate.md)                                           |
+| [`@default`](#default)                             | `FIELD_DEFINITION`                        | Set default field value on add/update                                                                          | [default_transform.md](default_transform.md)                         |
+| [`@transform`](#transform)                         | `FIELD_DEFINITION`                        | Transform a field value via expr-lang on add/update; include `uid: #.uid` when forwarding `before.*` edge refs | [default_transform.md](default_transform.md)                         |
+| [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`                        | Fetch pre-mutation field values for expr-lang expressions                                                      | [old_value.md](old_value.md)                                         |
+| [`@dryRun`](#dryrun)                               | `MUTATION`                                | Test prospective mutations and post-validation rules without committing to Badger/Raft                         | [#dryrun](#dryrun)                                                   |
+| [`@bypassAuth`](#bypassauth)                       | `FIELD_DEFINITION`                        | Conditionally or selectively bypass auth checks on a child edge                                                | [bypass_auth.md](bypass_auth.md)                                     |
+| [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`                        | Make a bidirectional edge write-once                                                                           | [immutable_inverse.md](immutable_inverse.md)                         |
+| `memberTypes` filter                               | Interface `XxxFilter`                     | Scope an interface query to a subset of implementing types                                                     | [interface_member_types_filter.md](interface_member_types_filter.md) |
+| `groupByXxx` query                                 | Root query (auto)                         | Bucket-aggregate over filtered nodes; DateTime interval bucketing via `by`/`tz`                                | [groupby_queries.md](groupby_queries.md)                             |
 
 ---
 
@@ -113,7 +113,7 @@ directive @validate(
   rules: [DgraphValidate] # general rules for add and update (array or single object)
   add: [DgraphValidate] # add-specific rules (array or single object)
   update: [DgraphValidate] # update-specific rules (array or single object)
-) on FIELD_DEFINITION
+) on FIELD_DEFINITION | OBJECT | INTERFACE
 
 input DgraphValidate {
   rule: String
