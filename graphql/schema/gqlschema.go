@@ -1068,6 +1068,7 @@ func completeSchema(
 	definitions []string,
 	providesFieldsMap map[string]map[string]bool,
 	apolloServiceQuery bool,
+	meta *metaInfo,
 ) {
 	query := sch.Types["Query"]
 	if query != nil {
@@ -1163,6 +1164,10 @@ func completeSchema(
 			}
 			addMutations(sch, defn, params)
 		}
+
+		// Strip query-hidden fields after mutation inputs have been generated and before
+		// query/filter/orderable types are generated.
+		stripQueryHiddenFields(defn, meta)
 
 		// types and inputs needed for query and search
 		addInterfaceMemberTypesEnum(sch, defn) // must run before addFilterType
@@ -3210,7 +3215,6 @@ func getFieldsWithoutIDType(schema *ast.Schema, defn *ast.Definition,
 // isFieldGenerateAdd reports whether the field is allowed to appear in AddXxxInput.
 // Returns false only when @generate(mutation: { add: false }) is explicitly declared on
 // the field definition. Returns true when the directive is absent or add is true/omitted.
-// Only the mutation.add flag is honoured at field level; query/subscription args are ignored.
 func isFieldGenerateAdd(fld *ast.FieldDefinition) bool {
 	return fieldGenerateMutationFlag(fld, generateAddField)
 }
@@ -3280,11 +3284,18 @@ func isFieldGenerateQuery(fld *ast.FieldDefinition) bool {
 // query-facing types are built (addFieldFilters, addQueries, addTypeOrderable).
 // After stripping, query results, filters, and orderable enums no longer include these fields,
 // making them completely invisible to GraphQL clients.
-func stripQueryHiddenFields(defn *ast.Definition) {
+// The stripped fields are preserved in meta.queryHiddenFields so the runtime engine can
+// evaluate @default, @transform, @validate, and write to Dgraph storage predicates.
+func stripQueryHiddenFields(defn *ast.Definition, meta *metaInfo) {
 	filtered := defn.Fields[:0]
 	for _, fld := range defn.Fields {
 		if isFieldGenerateQuery(fld) {
 			filtered = append(filtered, fld)
+		} else if meta != nil {
+			if meta.queryHiddenFields == nil {
+				meta.queryHiddenFields = make(map[string][]*ast.FieldDefinition)
+			}
+			meta.queryHiddenFields[defn.Name] = append(meta.queryHiddenFields[defn.Name], fld)
 		}
 	}
 	defn.Fields = filtered

@@ -180,6 +180,27 @@ type metaInfo struct {
 	// authMeta stores the authorization meta info extracted from `# Dgraph.Authorization` if any,
 	// otherwise it is nil.
 	authMeta *authorization.AuthMeta
+	// queryHiddenFields stores field definitions with @generate(query: false) stripped from the output type
+	queryHiddenFields map[string][]*ast.FieldDefinition
+}
+
+func (m *metaInfo) QueryHiddenFields(typ string) []*ast.FieldDefinition {
+	if m == nil || m.queryHiddenFields == nil {
+		return nil
+	}
+	return m.queryHiddenFields[typ]
+}
+
+func (m *metaInfo) QueryHiddenField(typ, fld string) *ast.FieldDefinition {
+	if m == nil || m.queryHiddenFields == nil {
+		return nil
+	}
+	for _, f := range m.queryHiddenFields[typ] {
+		if f.Name == fld {
+			return f
+		}
+	}
+	return nil
 }
 
 func (m *metaInfo) AllowedCorsHeaders() string {
@@ -389,7 +410,7 @@ func NewHandler(input string, apolloServiceQuery bool) (Handler, error) {
 
 	metaInfo.extraCorsHeaders = getAllowedHeaders(sch, defns, authHeader)
 	dgSchema := genDgSchema(sch, typesToComplete, providesFieldsMap)
-	completeSchema(sch, typesToComplete, providesFieldsMap, apolloServiceQuery)
+	completeSchema(sch, typesToComplete, providesFieldsMap, apolloServiceQuery, metaInfo)
 	cleanSchema(sch)
 
 	if len(sch.Query.Fields) == 0 && len(sch.Mutation.Fields) == 0 {

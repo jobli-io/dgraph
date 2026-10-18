@@ -5,7 +5,6 @@
 type Post {
 	id: ID!
 	title: String!
-	updatedAt: DateTime @generate(mutation: {add:false,update:false}, query: false) @default(add: {expr:"now()"}, update: {expr:"now()"})
 	createdAt: DateTime @generate(mutation: {update:false}) @default(add: {expr:"now()"})
 	score: Int @generate(mutation: {update:false}) @default(add: {value:"0"})
 }
@@ -374,8 +373,6 @@ type PostAggregateResult {
 	count: Int
 	titleMin: String
 	titleMax: String
-	updatedAtMin: DateTime
-	updatedAtMax: DateTime
 	createdAtMin: DateTime
 	createdAtMax: DateTime
 	scoreMin: Int
@@ -389,8 +386,6 @@ type PostGroupByResult {
 	count: Int
 	titleMin: String
 	titleMax: String
-	updatedAtMin: DateTime
-	updatedAtMax: DateTime
 	createdAtMin: DateTime
 	createdAtMax: DateTime
 	scoreMin: Int
@@ -410,14 +405,12 @@ type UpdatePostPayload {
 
 enum PostHasFilter {
 	title
-	updatedAt
 	createdAt
 	score
 }
 
 enum PostOrderable {
 	title
-	updatedAt
 	createdAt
 	score
 }
@@ -443,7 +436,6 @@ input PostFilter {
 
 input PostGroupByField {
 	title: Boolean
-	updatedAt: Boolean
 	createdAt: Boolean
 	score: Boolean
 }

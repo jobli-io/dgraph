@@ -484,6 +484,16 @@ func (s *schema) IsFederated() bool {
 
 func (s *schema) SetMeta(meta *metaInfo) {
 	s.meta = meta
+	if meta != nil && meta.queryHiddenFields != nil {
+		for typName, fields := range meta.queryHiddenFields {
+			if s.dgraphPredicate[typName] == nil {
+				s.dgraphPredicate[typName] = make(map[string]string)
+			}
+			for _, fld := range fields {
+				s.dgraphPredicate[typName][fld.Name] = fieldName(fld, typName)
+			}
+		}
+	}
 }
 
 func (s *schema) Meta() *metaInfo {
@@ -2788,6 +2798,9 @@ func (t *astType) Field(name string) FieldDefinition {
 		return nil
 	}
 	fieldDef := def.Fields.ForName(name)
+	if fieldDef == nil && t.inSchema != nil && t.inSchema.meta != nil {
+		fieldDef = t.inSchema.meta.QueryHiddenField(t.Name(), name)
+	}
 	if fieldDef == nil {
 		return nil
 	}
@@ -2811,6 +2824,17 @@ func (t *astType) Fields() []FieldDefinition {
 				parentType:      t,
 			})
 	}
+	if t.inSchema != nil && t.inSchema.meta != nil {
+		for _, fld := range t.inSchema.meta.QueryHiddenFields(t.Name()) {
+			result = append(result,
+				&fieldDefinition{
+					fieldDef:        fld,
+					inSchema:        t.inSchema,
+					dgraphPredicate: t.dgraphPredicate,
+					parentType:      t,
+				})
+		}
+	}
 
 	return result
 }
@@ -2828,6 +2852,17 @@ func (t *astType) FieldsInDefaultValueEvaluationOrder(action string) []FieldDefi
 				dgraphPredicate: t.dgraphPredicate,
 				parentType:      t,
 			})
+	}
+	if t.inSchema != nil && t.inSchema.meta != nil {
+		for _, fld := range t.inSchema.meta.QueryHiddenFields(t.Name()) {
+			defs = append(defs,
+				&fieldDefinition{
+					fieldDef:        fld,
+					inSchema:        t.inSchema,
+					dgraphPredicate: t.dgraphPredicate,
+					parentType:      t,
+				})
+		}
 	}
 
 	// It returns true if the element at index i should come before the element at index j.
@@ -2857,6 +2892,17 @@ func (t *astType) FieldsInTransformEvaluationOrder(action string) []FieldDefinit
 				dgraphPredicate: t.dgraphPredicate,
 				parentType:      t,
 			})
+	}
+	if t.inSchema != nil && t.inSchema.meta != nil {
+		for _, fld := range t.inSchema.meta.QueryHiddenFields(t.Name()) {
+			defs = append(defs,
+				&fieldDefinition{
+					fieldDef:        fld,
+					inSchema:        t.inSchema,
+					dgraphPredicate: t.dgraphPredicate,
+					parentType:      t,
+				})
+		}
 	}
 
 	// It returns true if the element at index i should come before the element at index j.

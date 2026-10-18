@@ -163,6 +163,19 @@ type Post {
   createdAt: DateTime
   score: Int
 }
+
+# PostFilter, PostHasFilter, PostOrderable, PostAggregateResult, PostGroupByField: updatedAt absent
+enum PostHasFilter {
+  title
+  createdAt
+  score
+}
+
+enum PostOrderable {
+  title
+  createdAt
+  score
+}
 ```
 
 ## See also

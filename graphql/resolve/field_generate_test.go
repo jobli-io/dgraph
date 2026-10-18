@@ -139,17 +139,12 @@ func TestFieldGenerate_UpdatePatch_VisibleFields(t *testing.T) {
 		"update mutation setting only the visible title field must be accepted")
 }
 
-// TestFieldGenerate_QueryHiddenField_Rejected verifies the current behaviour of
-// @generate(query: false) on a field.
-//
-// NOTE: stripQueryHiddenFields is implemented in gqlschema.go but is not currently
-// called during schema generation. As a result, fields with @generate(query: false)
-// are NOT stripped from the output type — they remain queryable. This test documents
-// the current behaviour. If stripQueryHiddenFields is re-enabled, this test should
-// be updated to require.Error instead.
+// TestFieldGenerate_QueryHiddenField_Rejected verifies that @generate(query: false)
+// strips the field from the output type, rejecting client queries that select it.
 func TestFieldGenerate_QueryHiddenField_Rejected(t *testing.T) {
 	gqlSchema := test.LoadSchemaFromString(t, fieldGenerateTestSchema)
 
+	// 1. queryPost selection
 	_, err := gqlSchema.Operation(&schema.Request{
 		Query: `query {
 			queryPost {
@@ -159,10 +154,35 @@ func TestFieldGenerate_QueryHiddenField_Rejected(t *testing.T) {
 			}
 		}`,
 	})
-	// Currently accepted — @generate(query: false) does not strip the field from
-	// the output type. Update to require.Error if stripQueryHiddenFields is re-enabled.
-	require.NoError(t, err,
-		"@generate(query: false) does not currently strip the field from the output type")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `Cannot query field "updatedAt" on type "Post"`)
+
+	// 2. getPost selection
+	_, err = gqlSchema.Operation(&schema.Request{
+		Query: `query {
+			getPost(id: "0x1") {
+				id
+				title
+				updatedAt
+			}
+		}`,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `Cannot query field "updatedAt" on type "Post"`)
+
+	// 3. Mutation payload selection
+	_, err = gqlSchema.Operation(&schema.Request{
+		Query: `mutation {
+			addPost(input: [{ title: "Test" }]) {
+				post {
+					id
+					updatedAt
+				}
+			}
+		}`,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `Cannot query field "updatedAt" on type "Post"`)
 }
 
 // TestFieldGenerate_QueryVisibleFields_Accepted verifies that fields without
@@ -184,4 +204,79 @@ func TestFieldGenerate_QueryVisibleFields_Accepted(t *testing.T) {
 	require.NoError(t, err,
 		"querying visible fields (title, createdAt, score) must be accepted — "+
 			"mutation restrictions do not affect query visibility")
+}
+
+// TestFieldGenerate_QueryHiddenField_FiltersAndOrderRejected verifies that
+// @generate(query: false) fields are excluded from HasFilter and Orderable enums.
+func TestFieldGenerate_QueryHiddenField_FiltersAndOrderRejected(t *testing.T) {
+	gqlSchema := test.LoadSchemaFromString(t, fieldGenerateTestSchema)
+
+	// Filter has: [updatedAt] must fail validation
+	_, err := gqlSchema.Operation(&schema.Request{
+		Query: `query {
+			queryPost(filter: { has: [updatedAt] }) {
+				id
+			}
+		}`,
+	})
+	require.Error(t, err, "filtering on query-hidden field via has must be rejected")
+	require.Contains(t, err.Error(), `Expected type PostHasFilter, found updatedAt`)
+
+	// Orderable asc: updatedAt must fail validation
+	_, err = gqlSchema.Operation(&schema.Request{
+		Query: `query {
+			queryPost(order: { asc: updatedAt }) {
+				id
+			}
+		}`,
+	})
+	require.Error(t, err, "ordering on query-hidden field must be rejected")
+	require.Contains(t, err.Error(), `Expected type PostOrderable, found updatedAt`)
+}
+
+// TestFieldGenerate_InternalField_RuntimeMetadata verifies that query-hidden fields
+// are still preserved internally in schema metadata for @default, @transform, and Dgraph predicates.
+func TestFieldGenerate_InternalField_RuntimeMetadata(t *testing.T) {
+	gqlSchema := test.LoadSchemaFromString(t, fieldGenerateTestSchema)
+
+	op, err := gqlSchema.Operation(&schema.Request{
+		Query: `mutation {
+			addPost(input: [{ title: "Test" }]) {
+				post { id }
+			}
+		}`,
+	})
+	require.NoError(t, err)
+
+	postTyp := op.Mutations()[0].MutatedType()
+	require.NotNil(t, postTyp, "Post type must exist")
+
+	// The field definition must be resolved internally
+	updatedAtFld := postTyp.Field("updatedAt")
+	require.NotNil(t, updatedAtFld, "updatedAt FieldDefinition must be accessible internally")
+	require.Equal(t, "updatedAt", updatedAtFld.Name())
+
+	// DgraphPredicate mapping must be correct
+	require.Equal(t, "Post.updatedAt", postTyp.DgraphPredicate("updatedAt"))
+
+	// Default value evaluation order must include updatedAt for both add and update
+	addDefaults := postTyp.FieldsInDefaultValueEvaluationOrder("add")
+	var foundAdd bool
+	for _, f := range addDefaults {
+		if f.Name() == "updatedAt" {
+			foundAdd = true
+			break
+		}
+	}
+	require.True(t, foundAdd, "updatedAt must be in FieldsInDefaultValueEvaluationOrder('add')")
+
+	updDefaults := postTyp.FieldsInDefaultValueEvaluationOrder("update")
+	var foundUpd bool
+	for _, f := range updDefaults {
+		if f.Name() == "updatedAt" {
+			foundUpd = true
+			break
+		}
+	}
+	require.True(t, foundUpd, "updatedAt must be in FieldsInDefaultValueEvaluationOrder('update')")
 }
