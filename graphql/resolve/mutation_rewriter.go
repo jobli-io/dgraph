@@ -1757,6 +1757,55 @@ func oldValueSelectionToGraphQuery(selections map[string]*schema.OldValueSelecti
 	return result
 }
 
+// BuildOldValuePreQuery takes the upsert query blocks produced by deleteRewriter and
+// returns an augmented slice that can be executed read-only to resolve the pre-deletion
+// state for any fields marked with @oldValue.
+func BuildOldValuePreQuery(queryBlocks []*dql.GraphQuery, rootVar, rootTypeName string, selections map[string]*schema.OldValueSelection) []*dql.GraphQuery {
+	var allVars []string
+	var collectVars func(blocks []*dql.GraphQuery)
+	collectVars = func(blocks []*dql.GraphQuery) {
+		for _, b := range blocks {
+			if b.Var != "" {
+				allVars = append(allVars, b.Var)
+			}
+			collectVars(b.Children)
+		}
+	}
+	if len(queryBlocks) > 0 {
+		collectVars([]*dql.GraphQuery{queryBlocks[0]})
+	}
+
+	if len(allVars) == 0 {
+		return queryBlocks
+	}
+
+	consumerFunc := &dql.Function{Name: "uid"}
+	for _, varName := range allVars {
+		consumerFunc.Args = append(consumerFunc.Args, dql.Arg{Value: varName, IsDQLVar: true})
+		consumerFunc.NeedsVar = append(consumerFunc.NeedsVar, dql.VarContext{Name: varName, Typ: dql.UidVar})
+	}
+
+	children := []*dql.GraphQuery{
+		{Attr: "uid"},
+		{Attr: "dgraph.type"},
+	}
+	children = append(children, oldValueSelectionToGraphQuery(selections)...)
+
+	beforeBlock := &dql.GraphQuery{
+		Attr: "before",
+		Func: consumerFunc,
+		Filter: &dql.FilterTree{
+			Func: &dql.Function{
+				Name: "type",
+				Args: []dql.Arg{{Value: rootTypeName}},
+			},
+		},
+		Children: children,
+	}
+
+	return append(queryBlocks, beforeBlock)
+}
+
 func checkXIDExistsQuery(xidVariable, xidString, xidPredicate string, typ schema.Type,
 	interfaceType schema.Type) *dql.GraphQuery {
 	qry := &dql.GraphQuery{

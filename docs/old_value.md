@@ -422,6 +422,42 @@ before.<field1>.<field2>.<field3>...<leafField>
 
 ---
 
+## Delete Mutations & Webhook Payloads (`before`)
+
+When fields on a type are annotated with `@oldValue` and a `delete` mutation is executed on that
+type:
+
+1. The Dgraph mutation engine issues a pre-query using `BuildOldValuePreQuery` to snapshot all
+   `@oldValue` fields for the entities being deleted prior to their removal.
+2. If `@lambdaOnMutate(delete: true)` or webhook events are configured, the captured pre-deletion
+   entities are emitted in the webhook event payload under the **`before`** array:
+
+```json
+{
+  "__typename": "AutomationScheduleTrigger",
+  "operation": "delete",
+  "commitTs": 1729251234,
+  "delete": {
+    "rootUIDs": ["0x123"],
+    "before": [
+      {
+        "uid": "0x123",
+        "dgraph.type": ["AutomationScheduleTrigger"],
+        "sId": "jobli::f7a8b9c0-1234-4567-89ab-cdef01234567",
+        "cron": "0 9 * * 1-5"
+      }
+    ]
+  }
+}
+```
+
+This allows downstream subscribers (such as schedulers, cleanup workers, audit loggers, and external
+webhooks) to reliably inspect the deleted entity's state—such as its stable identifier (`xId`),
+schedule expressions, or associated relationships—even after the record has been permanently deleted
+from Dgraph.
+
+---
+
 ## See also
 
 - [`@postValidate`](./post_validate.md) — type-level post-mutation validation; `before`, `after`,

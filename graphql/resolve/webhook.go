@@ -52,14 +52,15 @@ type updateEvent struct {
 }
 
 type deleteEvent struct {
-	RootUIDs []string `json:"rootUIDs"`
+	RootUIDs []string                 `json:"rootUIDs"`
+	Before   []map[string]interface{} `json:"before,omitempty"`
 }
 
 // sendWebhookEvent forms an HTTP payload required for the webhooks configured with @lambdaOnMutate
 // directive, and then sends that payload to the lambda URL configured with Alpha. There is no
 // guarantee that the payload will be delivered successfully to the lambda server.
 func sendWebhookEvent(ctx context.Context, m schema.Mutation, commitTs uint64,
-	rootUIDs []string, newUIDs map[string][]string) {
+	rootUIDs []string, newUIDs map[string][]string, before ...[]map[string]interface{}) {
 	accessJWT, _ := x.ExtractJwt(ctx)
 	var authHeader *authHeaderPayload
 	if m.GetAuthMeta() != nil {
@@ -96,7 +97,11 @@ func sendWebhookEvent(ctx context.Context, m schema.Mutation, commitTs uint64,
 			RemovePatch: inp["remove"],
 		}
 	case schema.DeleteMutation:
-		payload.Event.Delete = &deleteEvent{RootUIDs: rootUIDs}
+		delEv := &deleteEvent{RootUIDs: rootUIDs}
+		if len(before) > 0 && len(before[0]) > 0 {
+			delEv.Before = before[0]
+		}
+		payload.Event.Delete = delEv
 	}
 
 	b, err := json.Marshal(payload)

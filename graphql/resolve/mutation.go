@@ -500,7 +500,32 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	// isn't needed for mutation, it only has the query to fetch the query field.
 	// We need to execute this query before the mutation to find out the query field.
 	var queryErrs error
+	var beforePayload []map[string]interface{}
 	if mutation.MutationType() == schema.DeleteMutation {
+		mutatedType := mutation.MutatedType()
+
+		// Fetch @oldValue pre-mutation state before nodes are deleted so that
+		// webhooks (and downstream subscribers) receive the pre-delete snapshot under "before".
+		oldValueSelections := mutatedType.GetOldValueFieldsForQuery()
+		if len(oldValueSelections) > 0 && len(upserts) > 0 && upserts[0].Mutations != nil {
+			typeName := mutatedType.Name()
+			preQuery := BuildOldValuePreQuery(upserts[0].Query, MutationQueryVar, typeName, oldValueSelections)
+			preResp, preErr := mr.executor.Execute(ctx,
+				&dgoapi.Request{Query: dgraph.AsString(preQuery), ReadOnly: true}, nil)
+			if preErr == nil && len(preResp.GetJson()) > 0 {
+				var preResult map[string]interface{}
+				if json.Unmarshal(preResp.GetJson(), &preResult) == nil {
+					if arr, ok := preResult["before"].([]interface{}); ok {
+						for _, item := range arr {
+							if m, ok := item.(map[string]interface{}); ok {
+								beforePayload = append(beforePayload, m)
+							}
+						}
+					}
+				}
+			}
+		}
+
 		// For delete mutations, the queryField is fetched HERE — before the mutation executes —
 		// so that the return payload reflects nodes that still exist in the graph.
 		// deleteRewriter.Rewrite() appends upserts[1] (a query-only block) only when
@@ -535,7 +560,6 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		// Slow path (filter/bulk deletes): Func.UID is empty, so we augment the
 		// upsert query with consumer blocks (BuildCascadePreQuery) and run it
 		// read-only to resolve the root UIDs from cascadeRoots.
-		mutatedType := mutation.MutatedType()
 		cascadeFields := mutatedType.CascadeDeleteFields()
 		// Note: no need to re-check MutationType — already inside the DeleteMutation block above.
 		if len(cascadeFields) > 0 && len(upserts) > 0 && upserts[0].Mutations != nil {
@@ -776,7 +800,14 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		}
 
 		rootUIDs := mr.mutationRewriter.MutatedRootUIDs(mutation, mutResp.GetUids(), result)
-		go sendWebhookEvent(ctx, mutation, txnCtx.CommitTs, rootUIDs, newUids)
+		if len(rootUIDs) == 0 && mutation.MutationType() == schema.DeleteMutation && len(beforePayload) > 0 {
+			for _, item := range beforePayload {
+				if u, ok := item["uid"].(string); ok && u != "" {
+					rootUIDs = append(rootUIDs, u)
+				}
+			}
+		}
+		go sendWebhookEvent(ctx, mutation, txnCtx.CommitTs, rootUIDs, newUids, beforePayload)
 	}
 
 	// For delete mutation, we would have already populated qryResp if query field was requested.
