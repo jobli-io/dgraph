@@ -254,7 +254,7 @@ The compiled rule is the combination of the authority's own `@auth` (compiled) A
 protection.
 
 - **Authority has a self-contained rule** (`@auth` with no `<<KEY>>` placeholders): passed through
-  unchanged.
+  unchanged, including compound rules (`and` / `or` expressions).
 - **Authority has a template `@auth`** (`<<KEY>>` present): the authority compiles its own rule via
   its own cascade chain (when the authority is itself a cascade child). The child simply inherits
   the result. If the authority has a template but no cascade chain to compile it, schema validation

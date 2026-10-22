@@ -422,15 +422,22 @@ before.<field1>.<field2>.<field3>...<leafField>
 
 ---
 
-## Delete Mutations & Webhook Payloads (`before`)
+## Change Data Capture (CDC) & Webhook Payloads (`before` & `after`)
 
-When fields on a type are annotated with `@oldValue` and a `delete` mutation is executed on that
-type:
+In event-driven architectures and Change Data Capture (CDC) systems, webhook events standardly
+convey the state of records before and after mutations:
 
-1. The Dgraph mutation engine issues a pre-query using `BuildOldValuePreQuery` to snapshot all
-   `@oldValue` fields for the entities being deleted prior to their removal.
-2. If `@lambdaOnMutate(delete: true)` or webhook events are configured, the captured pre-deletion
-   entities are emitted in the webhook event payload under the **`before`** array:
+- **`before`**: The state of the record prior to mutation (applicable to `update` and `delete`
+  mutations).
+- **`after`**: The state of the record after mutation (applicable to `add` and `update` mutations).
+
+When fields on a type are annotated with `@oldValue` and a mutation runs on a type with
+`@lambdaOnMutate` or webhook configuration:
+
+### 1. `delete` Mutations (`before`)
+
+Prior to node deletion, Dgraph snapshots all `@oldValue` fields using `BuildOldValuePreQuery`. The
+pre-deletion state is emitted under `before`:
 
 ```json
 {
@@ -451,10 +458,77 @@ type:
 }
 ```
 
+### 2. `update` Mutations (`before` & `after`)
+
+During query rewriting, Dgraph captures the pre-update state of the matching records under `before`.
+Before committing, Dgraph queries the post-update state using `BuildOldValuePostQuery` and emits it
+under `after`:
+
+```json
+{
+  "__typename": "AutomationScheduleTrigger",
+  "operation": "update",
+  "commitTs": 1729251235,
+  "update": {
+    "rootUIDs": ["0x123"],
+    "setPatch": {
+      "cron": "0 10 * * 1-5"
+    },
+    "before": [
+      {
+        "uid": "0x123",
+        "dgraph.type": ["AutomationScheduleTrigger"],
+        "sId": "jobli::f7a8b9c0-1234-4567-89ab-cdef01234567",
+        "cron": "0 9 * * 1-5"
+      }
+    ],
+    "after": [
+      {
+        "uid": "0x123",
+        "dgraph.type": ["AutomationScheduleTrigger"],
+        "sId": "jobli::f7a8b9c0-1234-4567-89ab-cdef01234567",
+        "cron": "0 10 * * 1-5"
+      }
+    ]
+  }
+}
+```
+
+### 3. `add` Mutations (`after`)
+
+After new nodes are added, Dgraph queries their state using `BuildOldValuePostQuery` and emits the
+snapshot under `after`:
+
+```json
+{
+  "__typename": "AutomationScheduleTrigger",
+  "operation": "add",
+  "commitTs": 1729251236,
+  "add": {
+    "rootUIDs": ["0x123"],
+    "newUIDs": {
+      "AutomationScheduleTrigger": ["0x123"]
+    },
+    "input": [
+      {
+        "cron": "0 9 * * 1-5"
+      }
+    ],
+    "after": [
+      {
+        "uid": "0x123",
+        "dgraph.type": ["AutomationScheduleTrigger"],
+        "sId": "jobli::f7a8b9c0-1234-4567-89ab-cdef01234567",
+        "cron": "0 9 * * 1-5"
+      }
+    ]
+  }
+}
+```
+
 This allows downstream subscribers (such as schedulers, cleanup workers, audit loggers, and external
-webhooks) to reliably inspect the deleted entity's state—such as its stable identifier (`xId`),
-schedule expressions, or associated relationships—even after the record has been permanently deleted
-from Dgraph.
+webhooks) to reliably inspect the entity's complete lifecycle state (`before` and/or `after`) across
+all mutations without needing additional round-trips to Dgraph.
 
 ---
 

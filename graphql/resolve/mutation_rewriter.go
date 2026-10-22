@@ -549,7 +549,7 @@ func (urw *UpdateRewriter) RewriteQueries(
 	// inverse fields, or @validate/@default that reference pre-existing node state
 	// (i.e. getFieldsForExistsQuery returns more than the baseline {uid, dgraph.type}).
 	filterQueryFields := getFieldsForExistsQuery(mutatedType)
-	if filterArg != nil && len(filterQueryFields) > 2 {
+	if filterArg != nil && (len(filterQueryFields) > 2 || m.HasLambdaOnMutate()) {
 		obj := filterArg.(map[string]interface{})
 		if len(obj) != 0 {
 			dgQuery := &dql.GraphQuery{
@@ -1804,6 +1804,43 @@ func BuildOldValuePreQuery(queryBlocks []*dql.GraphQuery, rootVar, rootTypeName 
 	}
 
 	return append(queryBlocks, beforeBlock)
+}
+
+// BuildOldValuePostQuery constructs a DQL query block to fetch the post-mutation
+// state ("after") for fields annotated with @oldValue on the given root UIDs.
+func BuildOldValuePostQuery(rootUIDs []string, rootTypeName string, selections map[string]*schema.OldValueSelection) []*dql.GraphQuery {
+	parsedUIDs := make([]uint64, 0, len(rootUIDs))
+	for _, uid := range rootUIDs {
+		if v := mustParseUID(uid); v != 0 {
+			parsedUIDs = append(parsedUIDs, v)
+		}
+	}
+	if len(parsedUIDs) == 0 {
+		return nil
+	}
+
+	children := []*dql.GraphQuery{
+		{Attr: "uid"},
+		{Attr: "dgraph.type"},
+	}
+	children = append(children, oldValueSelectionToGraphQuery(selections)...)
+
+	afterBlock := &dql.GraphQuery{
+		Attr: "after",
+		Func: &dql.Function{
+			Name: "uid",
+			UID:  parsedUIDs,
+		},
+		Filter: &dql.FilterTree{
+			Func: &dql.Function{
+				Name: "type",
+				Args: []dql.Arg{{Value: rootTypeName}},
+			},
+		},
+		Children: children,
+	}
+
+	return []*dql.GraphQuery{afterBlock}
 }
 
 func checkXIDExistsQuery(xidVariable, xidString, xidPredicate string, typ schema.Type,
@@ -3637,17 +3674,50 @@ func addDelete(
 	// grab the auth for Author1
 	customClaims, err := qryFld.GetAuthMeta().ExtractCustomClaims(ctx)
 	if err != nil {
+		// If the edge has unconditional @bypassAuth, bypass even if auth context failed to extract claims
+		if (qryFld != nil && qryFld.EvaluateBypassAuth(nil) && len(qryFld.BypassAuthExcept()) == 0) ||
+			(delFld != nil && delFld.EvaluateBypassAuth(nil) && len(delFld.BypassAuthExcept()) == 0) {
+			return
+		}
 		frag.check =
 			checkQueryResult("auth.failed", nil, schema.GQLWrapf(err, "authorization failed"))
 		return
 	}
 
+	var authVars map[string]interface{}
+	if customClaims != nil {
+		authVars = customClaims.AuthVariables
+	}
+
+	// Check if the edge being severed has @bypassAuth configured.
+	// If bypassed without exceptions, we do not require update permissions on the disconnected target node.
+	selector := updateAuthSelector
+	if qryFld != nil && qryFld.EvaluateBypassAuth(authVars) {
+		exceptRules := qryFld.BypassAuthExcept()
+		if len(exceptRules) == 0 {
+			return
+		}
+		currSelector := selector
+		selector = func(t schema.Type) *schema.RuleNode {
+			return schema.FilterRuleNode(currSelector(t), exceptRules)
+		}
+	} else if delFld != nil && delFld.EvaluateBypassAuth(authVars) {
+		exceptRules := delFld.BypassAuthExcept()
+		if len(exceptRules) == 0 {
+			return
+		}
+		currSelector := selector
+		selector = func(t schema.Type) *schema.RuleNode {
+			return schema.FilterRuleNode(currSelector(t), exceptRules)
+		}
+	}
+
 	nestedAuthVarCache := make(map[string]string)
 	newRw := &authRewriter{
-		authVariables: customClaims.AuthVariables,
+		authVariables: authVars,
 		varGen:        varGen,
 		varName:       targetVar,
-		selector:      updateAuthSelector,
+		selector:      selector,
 		parentVarName: qryFld.Type().Name() + "Root",
 		mutVarCache:   &nestedAuthVarCache,
 		forceForward:  true,

@@ -40,15 +40,18 @@ type eventPayload struct {
 }
 
 type addEvent struct {
-	RootUIDs []string            `json:"rootUIDs"`
-	NewUIDs  map[string][]string `json:"newUIDs"`
-	Input    []interface{}       `json:"input"`
+	RootUIDs []string                 `json:"rootUIDs"`
+	NewUIDs  map[string][]string      `json:"newUIDs"`
+	Input    []interface{}            `json:"input"`
+	After    []map[string]interface{} `json:"after,omitempty"`
 }
 
 type updateEvent struct {
-	RootUIDs    []string    `json:"rootUIDs"`
-	SetPatch    interface{} `json:"setPatch"`
-	RemovePatch interface{} `json:"removePatch"`
+	RootUIDs    []string                 `json:"rootUIDs"`
+	SetPatch    interface{}              `json:"setPatch"`
+	RemovePatch interface{}              `json:"removePatch"`
+	Before      []map[string]interface{} `json:"before,omitempty"`
+	After       []map[string]interface{} `json:"after,omitempty"`
 }
 
 type deleteEvent struct {
@@ -60,7 +63,7 @@ type deleteEvent struct {
 // directive, and then sends that payload to the lambda URL configured with Alpha. There is no
 // guarantee that the payload will be delivered successfully to the lambda server.
 func sendWebhookEvent(ctx context.Context, m schema.Mutation, commitTs uint64,
-	rootUIDs []string, newUIDs map[string][]string, before ...[]map[string]interface{}) {
+	rootUIDs []string, newUIDs map[string][]string, beforePayload, afterPayload []map[string]interface{}) {
 	accessJWT, _ := x.ExtractJwt(ctx)
 	var authHeader *authHeaderPayload
 	if m.GetAuthMeta() != nil {
@@ -84,22 +87,33 @@ func sendWebhookEvent(ctx context.Context, m schema.Mutation, commitTs uint64,
 	switch payload.Event.Operation {
 	case schema.AddMutation:
 		input, _ := m.ArgValue(schema.InputArgName).([]interface{})
-		payload.Event.Add = &addEvent{
+		addEv := &addEvent{
 			RootUIDs: rootUIDs,
 			NewUIDs:  newUIDs,
 			Input:    input,
 		}
+		if len(afterPayload) > 0 {
+			addEv.After = afterPayload
+		}
+		payload.Event.Add = addEv
 	case schema.UpdateMutation:
 		inp, _ := m.ArgValue(schema.InputArgName).(map[string]interface{})
-		payload.Event.Update = &updateEvent{
+		updEv := &updateEvent{
 			RootUIDs:    rootUIDs,
 			SetPatch:    inp["set"],
 			RemovePatch: inp["remove"],
 		}
+		if len(beforePayload) > 0 {
+			updEv.Before = beforePayload
+		}
+		if len(afterPayload) > 0 {
+			updEv.After = afterPayload
+		}
+		payload.Event.Update = updEv
 	case schema.DeleteMutation:
 		delEv := &deleteEvent{RootUIDs: rootUIDs}
-		if len(before) > 0 && len(before[0]) > 0 {
-			delEv.Before = before[0]
+		if len(beforePayload) > 0 {
+			delEv.Before = beforePayload
 		}
 		payload.Event.Delete = delEv
 	}

@@ -480,6 +480,23 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		mr.mutationRewriter.SetOldValue(UpdateMutationFilterVar, merged)
 	}
 
+	var beforePayload []map[string]interface{}
+	var afterPayload []map[string]interface{}
+	if mutation.MutationType() == schema.UpdateMutation && len(updateMutFilterResults) > 0 {
+		mutatedType := mutation.MutatedType()
+		for _, res := range updateMutFilterResults {
+			item := make(map[string]interface{})
+			item["uid"] = res.Uid
+			if len(res.Types) > 0 {
+				item["dgraph.type"] = res.Types
+			}
+			for k, v := range res.OldValues {
+				item[k] = v
+			}
+			beforePayload = append(beforePayload, normalizePredicateKeys(item, mutatedType.DgraphName()))
+		}
+	}
+
 	// Create upserts, delete mutations, update mutations, add mutations.
 	upserts, err = mr.mutationRewriter.Rewrite(ctx, mutation, qNameToUID)
 
@@ -500,7 +517,6 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	// isn't needed for mutation, it only has the query to fetch the query field.
 	// We need to execute this query before the mutation to find out the query field.
 	var queryErrs error
-	var beforePayload []map[string]interface{}
 	if mutation.MutationType() == schema.DeleteMutation {
 		mutatedType := mutation.MutatedType()
 
@@ -772,6 +788,34 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		}, resolverSucceeded
 	}
 
+	// Fetch @oldValue post-mutation state ("after") for add and update mutations within
+	// the uncommitted transaction so webhooks receive the post-mutation snapshot.
+	if mutation.HasLambdaOnMutate() && mutation.MutationType() != schema.DeleteMutation {
+		mutatedType := mutation.MutatedType()
+		oldValueSelections := mutatedType.GetOldValueFieldsForQuery()
+		if len(oldValueSelections) > 0 {
+			rootUIDs := mr.mutationRewriter.MutatedRootUIDs(mutation, mutResp.GetUids(), result)
+			if len(rootUIDs) > 0 {
+				afterQuery := BuildOldValuePostQuery(rootUIDs, mutatedType.DgraphName(), oldValueSelections)
+				if len(afterQuery) > 0 {
+					afterResp, afterErr := mr.executor.Execute(ctx, &dgoapi.Request{
+						Query:    dgraph.AsString(afterQuery),
+						ReadOnly: false,
+						StartTs:  mutResp.Txn.GetStartTs(),
+					}, nil)
+					if afterErr == nil && len(afterResp.GetJson()) > 0 {
+						var rawAfter map[string][]map[string]interface{}
+						if err := json.Unmarshal(afterResp.GetJson(), &rawAfter); err == nil {
+							for _, n := range rawAfter["after"] {
+								afterPayload = append(afterPayload, normalizePredicateKeys(n, mutatedType.DgraphName()))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	txnCtx, err := mr.executor.CommitOrAbort(ctx, mutResp.Txn)
 	if err != nil {
 		return emptyResult(
@@ -807,7 +851,22 @@ func (mr *dgraphResolver) rewriteAndExecute(
 				}
 			}
 		}
-		go sendWebhookEvent(ctx, mutation, txnCtx.CommitTs, rootUIDs, newUids, beforePayload)
+		if mutation.MutationType() == schema.UpdateMutation && len(beforePayload) > 0 && len(rootUIDs) > 0 {
+			rootSet := make(map[string]bool, len(rootUIDs))
+			for _, u := range rootUIDs {
+				rootSet[u] = true
+			}
+			filteredBefore := make([]map[string]interface{}, 0, len(beforePayload))
+			for _, item := range beforePayload {
+				if u, ok := item["uid"].(string); ok && rootSet[u] {
+					filteredBefore = append(filteredBefore, item)
+				}
+			}
+			if len(filteredBefore) > 0 {
+				beforePayload = filteredBefore
+			}
+		}
+		go sendWebhookEvent(ctx, mutation, txnCtx.CommitTs, rootUIDs, newUids, beforePayload, afterPayload)
 	}
 
 	// For delete mutation, we would have already populated qryResp if query field was requested.

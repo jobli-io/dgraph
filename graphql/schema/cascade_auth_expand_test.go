@@ -2162,3 +2162,61 @@ type User implements WorkspaceMember
 		assert.False(t, hasGatedArm, "Bidirectional arm for OR policy child should not be wrapped with edge condition gate")
 	})
 }
+
+func TestCascadeAuth_VariableContextParent_CompoundAuth(t *testing.T) {
+	input := `
+type Workspace {
+  id: ID!
+  name: String! @search(by: [exact])
+  hasPlugins: [Plugin] @hasInverse(field: inWorkspace)
+}
+
+type Plugin
+  @auth(
+    query: {
+      and: [
+        {
+          or: [
+            { rule: "{ $ws: { in: [\"*\", \"\"] } }" }
+            { rule: "query ($ws: String) { queryPlugin (filter: { inWorkspace: { name: { eq: $ws } }}) { __typename } }" }
+          ]
+        }
+        {
+          rule: "query ($azp: String!) { queryPlugin(filter: { clientId: {eq: $azp}}) { __typename } }"
+        }
+      ]
+    }
+  )
+{
+  id: ID!
+  clientId: String @search(by: [hash])
+  inWorkspace: Workspace @search @hasInverse(field: hasPlugins)
+  hasSettings: SettingsForm @hasInverse(field: forPlugin)
+}
+
+type SettingsForm {
+  id: ID!
+  forPlugin: Plugin! @hasInverse(field: hasSettings)
+    @cascadeAuth(operations: [query], variableContext: parent, bidirectional: false)
+}
+`
+	s := buildSchema(t, input)
+	sfAuth := s.authRules["SettingsForm"]
+	require.NotNil(t, sfAuth)
+	require.NotNil(t, sfAuth.Rules)
+	require.NotNil(t, sfAuth.Rules.Query)
+
+	// SettingsForm query auth should contain CascadeWrap on SettingsForm.forPlugin
+	q := sfAuth.Rules.Query
+	require.Equal(t, "SettingsForm.forPlugin", q.CascadeWrapPred)
+	require.NotNil(t, q.CascadeWrapInner, "CascadeWrapInner must not be nil")
+	// The inner auth must preserve Plugin's compound query rule (2 And arms: Or and clientId rule)
+	require.Len(t, q.CascadeWrapInner.And, 2, "CascadeWrapInner must retain Plugin's 2 And branches")
+
+	// RBAC evaluation with { azp: "seek", ws: "ed7da7ef" } should evaluate to Uncertain (0), NOT Negative (2)
+	evalRes := q.EvaluateStatic(map[string]interface{}{
+		"azp": "seek",
+		"ws":  "ed7da7ef",
+	})
+	assert.Equal(t, Uncertain, evalRes, "SettingsForm auth must evaluate to Uncertain for valid azp/ws")
+}

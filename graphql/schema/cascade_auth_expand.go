@@ -986,19 +986,7 @@ func resolveAuthVarsInRuleNode(parentRule *RuleNode, edge cascadeAuthIncomingEdg
 	case "parent":
 		// No re-substitution. No vars check. The child inherits whatever
 		// compiled rule the authority has.
-		//
-		// If the authority's own @auth is already compiled (self-contained rule,
-		// Rule!=nil), pass it through as authorityOwnRule — it contributes to
-		// authorityFullAuth alongside parentCascadeRules.
-		//
-		// If the rule is an uncompiled template (Rule==nil), the authority's
-		// compilation happens during its own cascade processing, not here.
-		// Return nil so that only parentCascadeRules (from the step-3 recursion)
-		// contributes to authorityFullAuth.
-		if parentRule != nil && parentRule.Rule != nil {
-			return parentRule, nil
-		}
-		return nil, nil
+		return parentRule, nil
 
 	default: // "adaptive" or "" (unset — treated as adaptive)
 		if hasAuthVariables(sch, childTypeName) {
