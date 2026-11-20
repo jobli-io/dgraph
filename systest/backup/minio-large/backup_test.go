@@ -1,7 +1,7 @@
 //go:build integration
 
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	minio "github.com/minio/minio-go/v6"
+	minio "github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -26,9 +26,9 @@ import (
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/dgo/v250"
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/testutil"
-	"github.com/hypermodeinc/dgraph/v25/worker"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/testutil"
+	"github.com/dgraph-io/dgraph/v25/worker"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 var (
@@ -47,7 +47,7 @@ var (
 // Test to add a large database and verify backup and restore work as expected.
 func TestBackupMinioLarge(t *testing.T) {
 	// backupDestination = "minio://" + testutil.DockerPrefix + "_minio_1:9001/dgraph-backup?secure=false"
-	conn, err := grpc.NewClient(testutil.SockAddr,
+	conn, err := grpc.NewClient(testutil.GetSockAddr(),
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))))
 	require.NoError(t, err)
 	dg := dgo.NewDgraphClient(api.NewDgraphClient(conn))
@@ -56,7 +56,7 @@ func TestBackupMinioLarge(t *testing.T) {
 
 	mc, err = testutil.NewMinioClient()
 	require.NoError(t, err)
-	require.NoError(t, mc.MakeBucket(bucketName, ""))
+	require.NoError(t, mc.MakeBucket(ctx, bucketName, minio.MakeBucketOptions{}))
 
 	// Setup the schema and make sure each group is assigned one predicate.
 	setupTablets(t, dg)
@@ -89,13 +89,13 @@ func setupTablets(t *testing.T, dg *dgo.Dgraph) {
 				 name2: string .
 				 name3: string .`}))
 	client := testutil.GetHttpsClient(t)
-	_, err := client.Get("https://" + testutil.SockAddrZeroHttp + "/moveTablet?tablet=name1&group=1")
+	_, err := client.Get("https://" + testutil.GetSockAddrZeroHttp() + "/moveTablet?tablet=name1&group=1")
 	require.NoError(t, err)
 	time.Sleep(time.Second)
-	_, err = client.Get("https://" + testutil.SockAddrZeroHttp + "/moveTablet?tablet=name2&group=2")
+	_, err = client.Get("https://" + testutil.GetSockAddrZeroHttp() + "/moveTablet?tablet=name2&group=2")
 	require.NoError(t, err)
 	time.Sleep(time.Second)
-	_, err = client.Get("https://" + testutil.SockAddrZeroHttp + "/moveTablet?tablet=name3&group=3")
+	_, err = client.Get("https://" + testutil.GetSockAddrZeroHttp() + "/moveTablet?tablet=name3&group=3")
 	require.NoError(t, err)
 
 	// After the move, we need to pause a bit to give zero a chance to quorum.
@@ -145,7 +145,7 @@ func runBackup(t *testing.T) {
 		}
 	}`
 
-	adminUrl := "https://" + testutil.SockAddrHttp + "/admin"
+	adminUrl := "https://" + testutil.GetSockAddrHttp() + "/admin"
 	params := testutil.GraphQLParams{
 		Query: backupRequest,
 		Variables: map[string]interface{}{
@@ -165,7 +165,7 @@ func runBackup(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&data))
 	require.Equal(t, "Success", testutil.JsonGet(data, "data", "backup", "response", "code").(string))
 	taskId := testutil.JsonGet(data, "data", "backup", "taskId").(string)
-	testutil.WaitForTask(t, taskId, true, testutil.SockAddrHttp)
+	testutil.WaitForTask(t, taskId, true, testutil.GetSockAddrHttp())
 
 	// Verify that the right amount of files and directories were created.
 	copyToLocalFs(t)
@@ -220,26 +220,26 @@ func dirCleanup(t *testing.T) {
 }
 
 func copyToLocalFs(t *testing.T) {
-	// List all the folders in the bucket.
-	lsCh1 := make(chan struct{})
-	defer close(lsCh1)
-	objectCh1 := mc.ListObjectsV2(bucketName, "", false, lsCh1)
+	objectCh1 := mc.ListObjects(context.Background(), bucketName,
+		minio.ListObjectsOptions{Prefix: "", Recursive: false})
 	for object := range objectCh1 {
 		require.NoError(t, object.Err)
-		if object.Key != "manifest.json" {
+		// Skip root-level JSON manifest files (manifest.json, manifest_summary.json,
+		// manifest_summary_tmp.json). The inner recursive loop downloads them as files;
+		// MkdirAll on a path that already exists as a file fails with "not a directory".
+		if !strings.HasSuffix(object.Key, ".json") {
 			dstDir := backupDir + "/" + object.Key
 			require.NoError(t, os.MkdirAll(dstDir, os.ModePerm))
 		}
 
 		// Get all the files in that folder and copy them to the local filesystem.
-		lsCh2 := make(chan struct{})
-		objectCh2 := mc.ListObjectsV2(bucketName, "", true, lsCh2)
+		objectCh2 := mc.ListObjects(context.Background(), bucketName,
+			minio.ListObjectsOptions{Prefix: "", Recursive: true})
 		for object := range objectCh2 {
 			require.NoError(t, object.Err)
 			dstFile := backupDir + "/" + object.Key
-			err := mc.FGetObject(bucketName, object.Key, dstFile, minio.GetObjectOptions{})
+			err := mc.FGetObject(context.Background(), bucketName, object.Key, dstFile, minio.GetObjectOptions{})
 			require.NoError(t, err)
 		}
-		close(lsCh2)
 	}
 }

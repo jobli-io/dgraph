@@ -17,18 +17,18 @@ on:
         description: if checked, images will be pushed to dgraph-custom repo in Dockerhub
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   dgraph-build-amd64:
-    runs-on: warp-ubuntu-latest-x64-4x
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: "${{ github.event.inputs.releasetag }}"
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Install protobuf-compiler
@@ -39,19 +39,6 @@ jobs:
           go mod tidy
           make regenerate
           git diff --exit-code -- .
-      - name: Set Badger Release Version
-        run: |
-          #!/bin/bash
-          BADGER_RELEASE_VERSION=$(cat go.mod | grep -i "github.com/dgraph-io/badger" | awk '{print $2}')
-          echo "setting badger version "$BADGER_RELEASE_VERSION
-          echo "BADGER_RELEASE_VERSION=$BADGER_RELEASE_VERSION" >> $GITHUB_ENV
-      - name: Download Badger Artifacts
-        run: |
-          #!/bin/bash
-          mkdir badger
-          cd badger
-          wget https://github.com/dgraph-io/badger/releases/download/${{ env.BADGER_RELEASE_VERSION }}/badger-checksum-linux-amd64.sha256
-          wget https://github.com/dgraph-io/badger/releases/download/${{ env.BADGER_RELEASE_VERSION }}/badger-linux-amd64.tar.gz
       - name: Set Dgraph Release Version
         run: |
           #!/bin/bash
@@ -77,16 +64,8 @@ jobs:
         with:
           name: dgraph-amd-release-artifacts
           path: |
-            badger/badger-checksum-linux-amd64.sha256
-            badger/badger-linux-amd64.tar.gz
             dgraph/dgraph-checksum-linux-amd64.sha256
             dgraph/dgraph-linux-amd64.tar.gz
-      - name: Move Badger Binary into Linux Directory
-        run: |
-          tar -xzf badger/badger-linux-amd64.tar.gz --directory badger
-          [ -d "linux" ] || mkdir linux
-          # linux directory will be added to docker image in build step
-          cp badger/badger-linux-amd64 linux/badger
       - name: Make Dgraph Docker Image
         run: |
           set -e
@@ -121,14 +100,14 @@ jobs:
           path: dgraph-standalone-amd64.tar
 
   dgraph-build-arm64:
-    runs-on: warp-ubuntu-latest-arm64-4x
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: "${{ github.event.inputs.releasetag }}"
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Install protobuf-compiler
@@ -139,19 +118,6 @@ jobs:
           go mod tidy
           make regenerate
           git diff --exit-code -- .
-      - name: Set Badger Release Version
-        run: |
-          #!/bin/bash
-          BADGER_RELEASE_VERSION=$(cat go.mod | grep -i "github.com/dgraph-io/badger" | awk '{print $2}')
-          echo "setting badger version "$BADGER_RELEASE_VERSION
-          echo "BADGER_RELEASE_VERSION=$BADGER_RELEASE_VERSION" >> $GITHUB_ENV
-      - name: Download Badger Artifacts
-        run: |
-          #!/bin/bash
-          mkdir badger
-          cd badger
-          wget https://github.com/dgraph-io/badger/releases/download/${{ env.BADGER_RELEASE_VERSION }}/badger-checksum-linux-arm64.sha256
-          wget https://github.com/dgraph-io/badger/releases/download/${{ env.BADGER_RELEASE_VERSION }}/badger-linux-arm64.tar.gz
       - name: Set Dgraph Release Version
         run: |
           #!/bin/bash
@@ -177,16 +143,8 @@ jobs:
         with:
           name: dgraph-arm-release-artifacts
           path: |
-            badger/badger-checksum-linux-arm64.sha256
-            badger/badger-linux-arm64.tar.gz
             dgraph/dgraph-checksum-linux-arm64.sha256
             dgraph/dgraph-linux-arm64.tar.gz
-      - name: Move Badger Binary into Linux Directory
-        run: |
-          tar -xzf badger/badger-linux-arm64.tar.gz --directory badger
-          [ -d "linux" ] || mkdir linux
-          # linux directory will be added to docker image in build step
-          cp badger/badger-linux-arm64 linux/badger
       - name: Make Dgraph Docker Image
         run: |
           set -e
@@ -222,10 +180,10 @@ jobs:
 
   graph-docker-image-and-manifests-push:
     needs: [dgraph-build-amd64, dgraph-build-arm64]
-    runs-on: warp-ubuntu-latest-x64-4x
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: "${{ github.event.inputs.releasetag }}"
       - name: Set Dgraph Release Version
@@ -250,15 +208,29 @@ jobs:
 
           # Download AMD64 Tar File
       - name: Download Dgraph AMD64 Tar
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: dgraph-docker-amd64
 
       # Download Dgraph ARM64 Tar File
       - name: Download ARM64 Tar
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: dgraph-docker-arm64
+
+      # Download Dgraph Linux AMD64 Binary Artifacts
+      - name: Download Dgraph Linux AMD64 Binary Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: dgraph-amd-release-artifacts
+          path: dgraph-amd-release-artifacts
+
+      # Download Dgraph Linux ARM64 Binary Artifacts
+      - name: Download Dgraph Linux ARM64 Binary Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: dgraph-arm-release-artifacts
+          path: dgraph-arm-release-artifacts
 
       # Load Dgraph AMD64 Image
       - name: Load AMD64 Docker Image
@@ -273,7 +245,7 @@ jobs:
       # Download Standalone AMD64 Tar File
       - name: Download Standalone AMD64 Tar
         if: inputs.custom-build == false
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: dgraph-standalone-amd64
 
@@ -286,7 +258,7 @@ jobs:
       # Download Standalone ARM64 Tar File
       - name: Download Standalone ARM64 Tar
         if: inputs.custom-build == false
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: dgraph-standalone-arm64
 
@@ -325,3 +297,14 @@ jobs:
                docker manifest push dgraph/dgraph:latest
             fi
           fi
+
+      - name: Upload Assets to Release
+        if: github.event.inputs.custom-build == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.releasetag }}
+          files: |
+            dgraph-amd-release-artifacts/dgraph-linux-amd64.tar.gz
+            dgraph-amd-release-artifacts/dgraph-checksum-linux-amd64.sha256
+            dgraph-arm-release-artifacts/dgraph-linux-arm64.tar.gz
+            dgraph-arm-release-artifacts/dgraph-checksum-linux-arm64.sha256

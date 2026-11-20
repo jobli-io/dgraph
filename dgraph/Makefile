@@ -1,10 +1,10 @@
 #
-# SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+# SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
 # SPDX-License-Identifier: Apache-2.0
 #
 
 USER_ID         = $(shell id -u)
-BIN             = dgraph
+BIN            ?= dgraph
 BUILD          ?= $(shell git rev-parse --short HEAD)
 BUILD_CODENAME ?= dgraph
 BUILD_DATE     ?= $(shell git log -1 --format=%ci)
@@ -26,13 +26,14 @@ endif
 GOPATH        ?= $(shell go env GOPATH)
 
 # Build-time Go variables
-dgraphVersion   = github.com/hypermodeinc/dgraph/v25/x.dgraphVersion
-dgraphCodename  = github.com/hypermodeinc/dgraph/v25/x.dgraphCodename
-gitBranch       = github.com/hypermodeinc/dgraph/v25/x.gitBranch
-lastCommitSHA   = github.com/hypermodeinc/dgraph/v25/x.lastCommitSHA
-lastCommitTime  = github.com/hypermodeinc/dgraph/v25/x.lastCommitTime
+dgraphVersion   = github.com/dgraph-io/dgraph/v25/x.dgraphVersion
+dgraphCodename  = github.com/dgraph-io/dgraph/v25/x.dgraphCodename
+gitBranch       = github.com/dgraph-io/dgraph/v25/x.gitBranch
+lastCommitSHA   = github.com/dgraph-io/dgraph/v25/x.lastCommitSHA
+lastCommitTime  = github.com/dgraph-io/dgraph/v25/x.lastCommitTime
 
-BUILD_FLAGS   ?= -ldflags '-X ${lastCommitSHA}=${BUILD} -X "${lastCommitTime}=${BUILD_DATE}" -X "${dgraphVersion}=${BUILD_VERSION}" -X "${dgraphCodename}=${BUILD_CODENAME}" -X ${gitBranch}=${BUILD_BRANCH}'
+EXTLDFLAGS    ?=
+BUILD_FLAGS   ?= -ldflags '-X ${lastCommitSHA}=${BUILD} -X "${lastCommitTime}=${BUILD_DATE}" -X "${dgraphVersion}=${BUILD_VERSION}" -X "${dgraphCodename}=${BUILD_CODENAME}" -X ${gitBranch}=${BUILD_BRANCH}$(if $(EXTLDFLAGS), -extldflags "$(EXTLDFLAGS)")'
 
 # Insert build tags if specified
 ifneq ($(strip $(BUILD_TAGS)),)
@@ -50,8 +51,11 @@ ifneq ($(strip $(BUILD_RACE)),)
 endif
 
 # jemalloc stuff
-HAS_JEMALLOC = $(shell test -f /usr/local/lib/libjemalloc.a && echo "jemalloc")
-JEMALLOC_URL = "https://github.com/jemalloc/jemalloc/releases/download/5.3.0/jemalloc-5.3.0.tar.bz2"
+# Check common package-manager install paths: /usr/local/lib (make
+# install from source), /usr/lib (apt-get libjemalloc-dev), and
+# /usr/lib/libjemalloc_pic.a (apk add jemalloc-dev on Alpine/Wolfi).
+HAS_JEMALLOC = $(shell test -f /usr/local/lib/libjemalloc.a -o -f /usr/lib/libjemalloc.a -o -f /usr/lib/libjemalloc_pic.a && echo "jemalloc")
+JEMALLOC_URL = "https://github.com/jemalloc/jemalloc/releases/download/5.3.1/jemalloc-5.3.1.tar.bz2"
 
 # go install variables
 HAS_SHA256SUM = $(shell which sha256sum)
@@ -85,19 +89,32 @@ install: jemalloc
 		echo "Old SHA256:" `sha256sum $(INSTALL_TARGET) 2>/dev/null | cut -c-64` ; \
 	fi
 	@go mod tidy
-	@go install $(BUILD_FLAGS)
-	@echo "Installed $(BIN) to $(INSTALL_TARGET)"
+	@# Use 'go build -o' rather than 'go install': 'go install' honors
+	@# the package's default name (always "dgraph"), but we want to
+	@# honor $(BIN) so renames such as a fork binary produce the
+	@# correct file name.
+	@go build $(BUILD_FLAGS) -o $(INSTALL_TARGET)
+	@echo "Installed $(BIN) ($(GOOS)/$(GOARCH)) to $(INSTALL_TARGET)"
 	@if [ "$(HAS_SHA256SUM)" ] ; then \
 		echo "New SHA256:" `sha256sum $(INSTALL_TARGET) 2>/dev/null | cut -c-64` ; \
 	fi
 
+# jemalloc 5.3.1 source compat patch: libstdc++ 16+ removed
+# std::__throw_bad_alloc from the public ABI, breaking
+# src/jemalloc_cpp.cpp on GCC 16 / libstdc++ 16 toolchains (notably
+# Chainguard go-fips:v1.26.3.1-dev and later). The sed substitution
+# below is a no-op on older libstdc++ (exact-match) and rewrites the
+# legacy call to the standard `throw std::bad_alloc()` idiom on
+# libstdc++ 16+. Drop the sed line once a tagged jemalloc release
+# upstreams the fix and JEMALLOC_URL bumps past it.
 jemalloc:
 	@if [ -z "$(HAS_JEMALLOC)" ] ; then \
 		mkdir -p /tmp/jemalloc-temp && cd /tmp/jemalloc-temp ; \
 		echo "Downloading jemalloc" ; \
 		curl -f -s -L ${JEMALLOC_URL} -o jemalloc.tar.bz2 ; \
 		tar xjf ./jemalloc.tar.bz2 ; \
-		cd jemalloc-5.3.0 ; \
+		cd jemalloc-5.3.1 ; \
+		sed -i.bak 's|std::__throw_bad_alloc()|throw std::bad_alloc()|g' src/jemalloc_cpp.cpp ; \
 		./configure --with-jemalloc-prefix='je_' --with-malloc-conf='background_thread:true,metadata_thp:auto'; \
 		make ; \
 		if [ "$(USER_ID)" = "0" ]; then \

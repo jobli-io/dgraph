@@ -1,5 +1,5 @@
 //
-// SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+// SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 // Style guide for Protocol Buffer 3.
@@ -19,7 +19,6 @@ import (
 	context "context"
 	pb "github.com/dgraph-io/badger/v4/pb"
 	api "github.com/dgraph-io/dgo/v250/protos/api"
-	api_v25 "github.com/dgraph-io/dgo/v250/protos/api.v25"
 	grpc "google.golang.org/grpc"
 	codes "google.golang.org/grpc/codes"
 	status "google.golang.org/grpc/status"
@@ -885,22 +884,22 @@ var Zero_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	Worker_Mutate_FullMethodName              = "/pb.Worker/Mutate"
-	Worker_ServeTask_FullMethodName           = "/pb.Worker/ServeTask"
-	Worker_StreamSnapshot_FullMethodName      = "/pb.Worker/StreamSnapshot"
-	Worker_Sort_FullMethodName                = "/pb.Worker/Sort"
-	Worker_Schema_FullMethodName              = "/pb.Worker/Schema"
-	Worker_Backup_FullMethodName              = "/pb.Worker/Backup"
-	Worker_Restore_FullMethodName             = "/pb.Worker/Restore"
-	Worker_Export_FullMethodName              = "/pb.Worker/Export"
-	Worker_ReceivePredicate_FullMethodName    = "/pb.Worker/ReceivePredicate"
-	Worker_MovePredicate_FullMethodName       = "/pb.Worker/MovePredicate"
-	Worker_Subscribe_FullMethodName           = "/pb.Worker/Subscribe"
-	Worker_UpdateGraphQLSchema_FullMethodName = "/pb.Worker/UpdateGraphQLSchema"
-	Worker_DeleteNamespace_FullMethodName     = "/pb.Worker/DeleteNamespace"
-	Worker_TaskStatus_FullMethodName          = "/pb.Worker/TaskStatus"
-	Worker_ApplyDrainmode_FullMethodName      = "/pb.Worker/ApplyDrainmode"
-	Worker_InternalStreamPDir_FullMethodName  = "/pb.Worker/InternalStreamPDir"
+	Worker_Mutate_FullMethodName                          = "/pb.Worker/Mutate"
+	Worker_ServeTask_FullMethodName                       = "/pb.Worker/ServeTask"
+	Worker_StreamSnapshot_FullMethodName                  = "/pb.Worker/StreamSnapshot"
+	Worker_Sort_FullMethodName                            = "/pb.Worker/Sort"
+	Worker_Schema_FullMethodName                          = "/pb.Worker/Schema"
+	Worker_Backup_FullMethodName                          = "/pb.Worker/Backup"
+	Worker_Restore_FullMethodName                         = "/pb.Worker/Restore"
+	Worker_Export_FullMethodName                          = "/pb.Worker/Export"
+	Worker_ReceivePredicate_FullMethodName                = "/pb.Worker/ReceivePredicate"
+	Worker_MovePredicate_FullMethodName                   = "/pb.Worker/MovePredicate"
+	Worker_Subscribe_FullMethodName                       = "/pb.Worker/Subscribe"
+	Worker_UpdateGraphQLSchema_FullMethodName             = "/pb.Worker/UpdateGraphQLSchema"
+	Worker_DeleteNamespace_FullMethodName                 = "/pb.Worker/DeleteNamespace"
+	Worker_TaskStatus_FullMethodName                      = "/pb.Worker/TaskStatus"
+	Worker_UpdateExtSnapshotStreamingState_FullMethodName = "/pb.Worker/UpdateExtSnapshotStreamingState"
+	Worker_StreamExtSnapshot_FullMethodName               = "/pb.Worker/StreamExtSnapshot"
 )
 
 // WorkerClient is the client API for Worker service.
@@ -922,8 +921,8 @@ type WorkerClient interface {
 	UpdateGraphQLSchema(ctx context.Context, in *UpdateGraphQLSchemaRequest, opts ...grpc.CallOption) (*UpdateGraphQLSchemaResponse, error)
 	DeleteNamespace(ctx context.Context, in *DeleteNsRequest, opts ...grpc.CallOption) (*Status, error)
 	TaskStatus(ctx context.Context, in *TaskStatusRequest, opts ...grpc.CallOption) (*TaskStatusResponse, error)
-	ApplyDrainmode(ctx context.Context, in *DrainModeRequest, opts ...grpc.CallOption) (*Status, error)
-	InternalStreamPDir(ctx context.Context, opts ...grpc.CallOption) (Worker_InternalStreamPDirClient, error)
+	UpdateExtSnapshotStreamingState(ctx context.Context, in *api.UpdateExtSnapshotStreamingStateRequest, opts ...grpc.CallOption) (*Status, error)
+	StreamExtSnapshot(ctx context.Context, opts ...grpc.CallOption) (Worker_StreamExtSnapshotClient, error)
 }
 
 type workerClient struct {
@@ -1130,43 +1129,40 @@ func (c *workerClient) TaskStatus(ctx context.Context, in *TaskStatusRequest, op
 	return out, nil
 }
 
-func (c *workerClient) ApplyDrainmode(ctx context.Context, in *DrainModeRequest, opts ...grpc.CallOption) (*Status, error) {
+func (c *workerClient) UpdateExtSnapshotStreamingState(ctx context.Context, in *api.UpdateExtSnapshotStreamingStateRequest, opts ...grpc.CallOption) (*Status, error) {
 	out := new(Status)
-	err := c.cc.Invoke(ctx, Worker_ApplyDrainmode_FullMethodName, in, out, opts...)
+	err := c.cc.Invoke(ctx, Worker_UpdateExtSnapshotStreamingState_FullMethodName, in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *workerClient) InternalStreamPDir(ctx context.Context, opts ...grpc.CallOption) (Worker_InternalStreamPDirClient, error) {
-	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[3], Worker_InternalStreamPDir_FullMethodName, opts...)
+func (c *workerClient) StreamExtSnapshot(ctx context.Context, opts ...grpc.CallOption) (Worker_StreamExtSnapshotClient, error) {
+	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[3], Worker_StreamExtSnapshot_FullMethodName, opts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &workerInternalStreamPDirClient{stream}
+	x := &workerStreamExtSnapshotClient{stream}
 	return x, nil
 }
 
-type Worker_InternalStreamPDirClient interface {
-	Send(*api_v25.StreamPDirRequest) error
-	CloseAndRecv() (*api_v25.StreamPDirResponse, error)
+type Worker_StreamExtSnapshotClient interface {
+	Send(*api.StreamExtSnapshotRequest) error
+	Recv() (*api.StreamExtSnapshotResponse, error)
 	grpc.ClientStream
 }
 
-type workerInternalStreamPDirClient struct {
+type workerStreamExtSnapshotClient struct {
 	grpc.ClientStream
 }
 
-func (x *workerInternalStreamPDirClient) Send(m *api_v25.StreamPDirRequest) error {
+func (x *workerStreamExtSnapshotClient) Send(m *api.StreamExtSnapshotRequest) error {
 	return x.ClientStream.SendMsg(m)
 }
 
-func (x *workerInternalStreamPDirClient) CloseAndRecv() (*api_v25.StreamPDirResponse, error) {
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	m := new(api_v25.StreamPDirResponse)
+func (x *workerStreamExtSnapshotClient) Recv() (*api.StreamExtSnapshotResponse, error) {
+	m := new(api.StreamExtSnapshotResponse)
 	if err := x.ClientStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
@@ -1192,8 +1188,8 @@ type WorkerServer interface {
 	UpdateGraphQLSchema(context.Context, *UpdateGraphQLSchemaRequest) (*UpdateGraphQLSchemaResponse, error)
 	DeleteNamespace(context.Context, *DeleteNsRequest) (*Status, error)
 	TaskStatus(context.Context, *TaskStatusRequest) (*TaskStatusResponse, error)
-	ApplyDrainmode(context.Context, *DrainModeRequest) (*Status, error)
-	InternalStreamPDir(Worker_InternalStreamPDirServer) error
+	UpdateExtSnapshotStreamingState(context.Context, *api.UpdateExtSnapshotStreamingStateRequest) (*Status, error)
+	StreamExtSnapshot(Worker_StreamExtSnapshotServer) error
 	mustEmbedUnimplementedWorkerServer()
 }
 
@@ -1243,11 +1239,11 @@ func (UnimplementedWorkerServer) DeleteNamespace(context.Context, *DeleteNsReque
 func (UnimplementedWorkerServer) TaskStatus(context.Context, *TaskStatusRequest) (*TaskStatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method TaskStatus not implemented")
 }
-func (UnimplementedWorkerServer) ApplyDrainmode(context.Context, *DrainModeRequest) (*Status, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ApplyDrainmode not implemented")
+func (UnimplementedWorkerServer) UpdateExtSnapshotStreamingState(context.Context, *api.UpdateExtSnapshotStreamingStateRequest) (*Status, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method UpdateExtSnapshotStreamingState not implemented")
 }
-func (UnimplementedWorkerServer) InternalStreamPDir(Worker_InternalStreamPDirServer) error {
-	return status.Errorf(codes.Unimplemented, "method InternalStreamPDir not implemented")
+func (UnimplementedWorkerServer) StreamExtSnapshot(Worker_StreamExtSnapshotServer) error {
+	return status.Errorf(codes.Unimplemented, "method StreamExtSnapshot not implemented")
 }
 func (UnimplementedWorkerServer) mustEmbedUnimplementedWorkerServer() {}
 
@@ -1533,44 +1529,44 @@ func _Worker_TaskStatus_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Worker_ApplyDrainmode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DrainModeRequest)
+func _Worker_UpdateExtSnapshotStreamingState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(api.UpdateExtSnapshotStreamingStateRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(WorkerServer).ApplyDrainmode(ctx, in)
+		return srv.(WorkerServer).UpdateExtSnapshotStreamingState(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Worker_ApplyDrainmode_FullMethodName,
+		FullMethod: Worker_UpdateExtSnapshotStreamingState_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(WorkerServer).ApplyDrainmode(ctx, req.(*DrainModeRequest))
+		return srv.(WorkerServer).UpdateExtSnapshotStreamingState(ctx, req.(*api.UpdateExtSnapshotStreamingStateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Worker_InternalStreamPDir_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(WorkerServer).InternalStreamPDir(&workerInternalStreamPDirServer{stream})
+func _Worker_StreamExtSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(WorkerServer).StreamExtSnapshot(&workerStreamExtSnapshotServer{stream})
 }
 
-type Worker_InternalStreamPDirServer interface {
-	SendAndClose(*api_v25.StreamPDirResponse) error
-	Recv() (*api_v25.StreamPDirRequest, error)
+type Worker_StreamExtSnapshotServer interface {
+	Send(*api.StreamExtSnapshotResponse) error
+	Recv() (*api.StreamExtSnapshotRequest, error)
 	grpc.ServerStream
 }
 
-type workerInternalStreamPDirServer struct {
+type workerStreamExtSnapshotServer struct {
 	grpc.ServerStream
 }
 
-func (x *workerInternalStreamPDirServer) SendAndClose(m *api_v25.StreamPDirResponse) error {
+func (x *workerStreamExtSnapshotServer) Send(m *api.StreamExtSnapshotResponse) error {
 	return x.ServerStream.SendMsg(m)
 }
 
-func (x *workerInternalStreamPDirServer) Recv() (*api_v25.StreamPDirRequest, error) {
-	m := new(api_v25.StreamPDirRequest)
+func (x *workerStreamExtSnapshotServer) Recv() (*api.StreamExtSnapshotRequest, error) {
+	m := new(api.StreamExtSnapshotRequest)
 	if err := x.ServerStream.RecvMsg(m); err != nil {
 		return nil, err
 	}
@@ -1629,8 +1625,8 @@ var Worker_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Worker_TaskStatus_Handler,
 		},
 		{
-			MethodName: "ApplyDrainmode",
-			Handler:    _Worker_ApplyDrainmode_Handler,
+			MethodName: "UpdateExtSnapshotStreamingState",
+			Handler:    _Worker_UpdateExtSnapshotStreamingState_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
@@ -1651,8 +1647,9 @@ var Worker_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 		{
-			StreamName:    "InternalStreamPDir",
-			Handler:       _Worker_InternalStreamPDir_Handler,
+			StreamName:    "StreamExtSnapshot",
+			Handler:       _Worker_StreamExtSnapshot_Handler,
+			ServerStreams: true,
 			ClientStreams: true,
 		},
 	},

@@ -11,10 +11,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/graphql/test"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/graphql/test"
 )
 
 const nestedGroupByAuthSchema = `
@@ -90,7 +90,7 @@ func TestQueryRewritingNestedGroupByAuth(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQuery)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQuery)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -135,7 +135,7 @@ func TestQueryRewritingNestedGroupByAuthMultiLevel(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQuery)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQuery)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -208,7 +208,7 @@ func TestQueryRewritingNestedGroupByAuthDirectTypeScan(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQuery)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQuery)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)

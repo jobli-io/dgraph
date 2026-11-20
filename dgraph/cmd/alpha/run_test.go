@@ -1,7 +1,7 @@
 //go:build integration
 
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -35,13 +35,13 @@ import (
 
 	"github.com/dgraph-io/dgo/v250"
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
-	"github.com/hypermodeinc/dgraph/v25/dgraphtest"
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/query"
-	"github.com/hypermodeinc/dgraph/v25/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/dgraphapi"
+	"github.com/dgraph-io/dgraph/v25/dgraphtest"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/query"
+	"github.com/dgraph-io/dgraph/v25/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 type defaultContextKey int
@@ -1602,6 +1602,54 @@ func TestGeoValidWkbData(t *testing.T) {
 	resp, err := dg.NewReadOnlyTxn().Query(ctx, q)
 	require.NoError(t, err)
 	require.Contains(t, string(resp.Json), `{"type":"Point","coordinates":[1,2]}`)
+}
+
+// TestWithConditionallyPrunedMutations provides a minimal test case to verify that the server
+// does not panic when a mutation with a unique predicate is conditionally pruned.
+func TestWithConditionallyPrunedMutations(t *testing.T) {
+	schema := `
+		username: string @index(term,hash) @upsert @unique .
+		type User {
+			username
+		}
+	`
+	require.NoError(t, alterSchemaWithRetry(schema))
+	ctx := context.Background()
+
+	// Create an initial user to act as an anchor for a conditional mutation.
+	initialMutation := &api.Mutation{
+		SetJson:   []byte(`{"dgraph.type":["User"],"username":"user-A","uid":"_:user-A"}`),
+		CommitNow: true,
+	}
+	_, err := dg.NewTxn().Mutate(ctx, initialMutation)
+	require.NoError(t, err, "Setup mutation to create user-A failed")
+
+	// Send a request with one mutation to be pruned and one to be kept.
+	query := `query {
+		q(func: eq(username, "user-A")) { v as uid }
+	}`
+
+	mutations := []*api.Mutation{
+		{ // Mutation 0 (KEPT): This mutation should be processed correctly.
+			SetJson: []byte(`{"dgraph.type":["User"],"username":"user-C","uid":"_:user-C"}`),
+		},
+		{ // Mutation 1 (PRUNED): This mutation has a unique predicate but will be pruned.
+			SetJson: []byte(`{"dgraph.type":["User"],"username":"user-B","uid":"_:user-B"}`),
+			Cond:    "@if(eq(len(v), 0))", // This is FALSE, so the mutation is pruned.
+		},
+	}
+
+	req := &api.Request{Query: query, Mutations: mutations, CommitNow: true}
+	resp, err := dg.NewTxn().Do(ctx, req)
+
+	require.NoError(t, err, "The main request failed, but it should have succeeded.")
+	require.NotNil(t, resp, "Response should not be nil")
+
+	// The kept mutation for user-C should have created a UID.
+	require.NotEmpty(t, resp.Uids["user-C"], "UID for kept user-C should not be empty")
+
+	// The pruned mutation for user-B should not have created a UID.
+	require.Empty(t, resp.Uids["user-B"], "UID for pruned user-B should be empty")
 }
 
 type Token struct {

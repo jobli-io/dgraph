@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -12,10 +12,11 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/pkg/errors"
 
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
 )
 
 const (
@@ -228,6 +229,19 @@ func ReverseKey(attr string, uid uint64) []byte {
 
 	rest = rest[1:]
 	binary.BigEndian.PutUint64(rest, uid)
+	return buf
+}
+
+func IndexKeyAfterAllTerms(attr string) []byte {
+	// Use a term with 0xFF to ensure lexicographically after any real term
+	sentinelTerm := []byte{0xFF}
+	extra := 1 + len(sentinelTerm) // ByteIndex + 0xFF
+	buf, prefixLen := generateKey(DefaultPrefix, attr, extra)
+
+	rest := buf[prefixLen:]
+	rest[0] = ByteIndex
+	copy(rest[1:], sentinelTerm)
+
 	return buf
 }
 
@@ -629,6 +643,209 @@ var aclPredicateMap = map[string]struct{}{
 	"dgraph.rule.predicate":  {},
 	"dgraph.rule.permission": {},
 	"dgraph.acl.rule":        {},
+}
+
+// ReservedNamespace lets a plugin claim ownership of a sub-namespace under the
+// reserved `dgraph.` prefix, so the predicates and types it owns can be created
+// at runtime via Alter even though they are not part of the pre-defined initial
+// schema. Register one from an init() with RegisterReservedNamespace.
+//
+// With no registration the registry is empty and every check below reports
+// false, so a stock build keeps the pristine behavior: nothing under `dgraph.`
+// may be created except the pre-defined names.
+//
+// Ownership is deliberately explicit — a dynamic prefix and/or an exact name
+// allowlist — so registering a namespace cannot be used to admit arbitrary
+// reserved predicates through /alter or /mutate.
+type ReservedNamespace struct {
+	// All names below are bare (no namespace prefix); queries strip the
+	// namespace before matching, as the reserved-predicate checks already do.
+	//
+	// PredicatePrefix admits dynamically-named predicates by prefix (e.g.
+	// "dgraph.acme.rel."). Empty means the namespace owns no dynamic predicates.
+	PredicatePrefix string
+	// Predicates is the exact set of fixed predicate names the namespace owns.
+	Predicates []string
+	// Types is the exact set of type names the namespace owns.
+	Types []string
+	// ValueLocked is the subset of owned predicates whose stored *value* may
+	// only be written by a request whose context carries TrustMarker. Use it
+	// for predicates whose value is authoritative state the owner must control.
+	// Names are the bare predicate form (no namespace prefix), matched
+	// case-insensitively like Predicates above.
+	ValueLocked []string
+	// ValueLockedPrefixes locks predicates by prefix rather than by exact name,
+	// for a namespace whose owned predicates are created dynamically and so
+	// cannot be enumerated up front. Typically the same value as
+	// PredicatePrefix, which locks every dynamic predicate the namespace owns.
+	//
+	// Without this, a namespace that admits dynamic predicates by prefix has no
+	// way to protect them: they are creatable via Alter but writable by anyone
+	// through /mutate, which for a namespace holding authorization data means its
+	// own API can be bypassed.
+	ValueLockedPrefixes []string
+	// TrustMarker is a context key the owner's trusted in-process caller sets,
+	// via context.WithValue(ctx, TrustMarker, true), to authorize writing
+	// ValueLocked predicates. Required (non-nil) when ValueLocked or
+	// ValueLockedPrefixes is non-empty; RegisterReservedNamespace panics
+	// otherwise.
+	TrustMarker any
+}
+
+// valueLockedPrefix pairs a locked predicate prefix with the TrustMarker that
+// authorizes writing predicates under it.
+type valueLockedPrefix struct {
+	prefix string
+	marker any
+}
+
+var (
+	reservedNsMu                  sync.RWMutex
+	reservedNsPrefixes            []string
+	reservedNsPredicates          = map[string]struct{}{}
+	reservedNsTypes               = map[string]struct{}{}
+	reservedNsValueLocked         = map[string]any{} // lowercased bare predicate -> TrustMarker
+	reservedNsValueLockedPrefixes []valueLockedPrefix
+)
+
+// RegisterReservedNamespace records a plugin's ownership of names under the
+// reserved `dgraph.` prefix. Call it from an init(); it is safe for concurrent
+// use but is expected to run before the server starts handling requests.
+//
+// All names must be bare (no namespace separator) and uniquely owned, and a
+// non-empty ValueLocked needs a TrustMarker. It panics on any of these, so a
+// misconfiguration trips at startup rather than silently at mutation time.
+func RegisterReservedNamespace(ns ReservedNamespace) {
+	if (len(ns.ValueLocked) > 0 || len(ns.ValueLockedPrefixes) > 0) && ns.TrustMarker == nil {
+		panic("x.RegisterReservedNamespace: ValueLocked is set but TrustMarker is nil; " +
+			"a value-locked predicate with no TrustMarker is unwritable by everyone, including its owner")
+	}
+	// Names must be bare (no namespace separator). The membership lookups strip
+	// the namespace from the query, and the value-lock guard matches the bare
+	// predicate the mutation path passes, so a namespace-qualified registration
+	// would never match — silently leaving a value-locked predicate publicly
+	// writable. Reject it at startup instead.
+	for _, group := range [][]string{
+		{ns.PredicatePrefix}, ns.Predicates, ns.Types, ns.ValueLocked, ns.ValueLockedPrefixes,
+	} {
+		for _, name := range group {
+			if strings.Contains(name, NsSeparator) {
+				panic(fmt.Sprintf("x.RegisterReservedNamespace: name %q must be bare, "+
+					"without the %q namespace separator", name, NsSeparator))
+			}
+		}
+	}
+
+	reservedNsMu.Lock()
+	defer reservedNsMu.Unlock()
+	if ns.PredicatePrefix != "" {
+		reservedNsPrefixes = append(reservedNsPrefixes, strings.ToLower(ns.PredicatePrefix))
+	}
+	// A reserved name has a single owner. A duplicate registration (two
+	// namespaces, or a re-init) is a programming error, and for value locks it
+	// would silently change which TrustMarker wins by import order — so panic
+	// rather than last-writer-wins.
+	for _, p := range ns.Predicates {
+		key := strings.ToLower(p)
+		if _, dup := reservedNsPredicates[key]; dup {
+			panic(fmt.Sprintf("x.RegisterReservedNamespace: predicate %q already registered", key))
+		}
+		reservedNsPredicates[key] = struct{}{}
+	}
+	for _, t := range ns.Types {
+		key := strings.ToLower(t)
+		if _, dup := reservedNsTypes[key]; dup {
+			panic(fmt.Sprintf("x.RegisterReservedNamespace: type %q already registered", key))
+		}
+		reservedNsTypes[key] = struct{}{}
+	}
+	for _, p := range ns.ValueLocked {
+		key := strings.ToLower(p)
+		if _, dup := reservedNsValueLocked[key]; dup {
+			panic(fmt.Sprintf("x.RegisterReservedNamespace: value-locked predicate %q already registered", key))
+		}
+		reservedNsValueLocked[key] = ns.TrustMarker
+	}
+	for _, p := range ns.ValueLockedPrefixes {
+		key := strings.ToLower(p)
+		if key == "" {
+			// An empty prefix matches every predicate, locking the whole cluster to
+			// this namespace's marker. It fails closed rather than open, so it is not
+			// a bypass — but it is never intended, and PredicatePrefix above already
+			// rejects the same mistake.
+			panic("x.RegisterReservedNamespace: value-locked prefix must not be empty")
+		}
+		for _, existing := range reservedNsValueLockedPrefixes {
+			if existing.prefix == key {
+				panic(fmt.Sprintf("x.RegisterReservedNamespace: value-locked prefix %q already registered", key))
+			}
+		}
+		reservedNsValueLockedPrefixes = append(reservedNsValueLockedPrefixes, valueLockedPrefix{
+			prefix: key, marker: ns.TrustMarker,
+		})
+	}
+}
+
+// IsRegisteredReservedPredicate reports whether pred is owned by a registered
+// ReservedNamespace (by dynamic prefix or exact name). The alter validator and
+// the no-schema mutation guard allow such predicates through even though they
+// are not pre-defined. With no registration it always reports false.
+func IsRegisteredReservedPredicate(pred string) bool {
+	p := strings.ToLower(ParseAttr(pred))
+	reservedNsMu.RLock()
+	defer reservedNsMu.RUnlock()
+	for _, prefix := range reservedNsPrefixes {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	_, ok := reservedNsPredicates[p]
+	return ok
+}
+
+// IsRegisteredReservedType reports whether typ is a type owned by a registered
+// ReservedNamespace. With no registration it always reports false.
+func IsRegisteredReservedType(typ string) bool {
+	t := strings.ToLower(ParseAttr(typ))
+	reservedNsMu.RLock()
+	defer reservedNsMu.RUnlock()
+	_, ok := reservedNsTypes[t]
+	return ok
+}
+
+// ReservedPredicateValueLock reports whether pred's value is locked to a
+// trusted writer and, if so, returns the context key (TrustMarker) that
+// authorizes the write. The mutation-value guard rejects a write of a locked
+// predicate when the request context does not carry that marker.
+//
+// pred is matched case-insensitively (like the predicate/type lookups above) so
+// a value lock cannot be bypassed by changing the case of an owned name. Unlike
+// those lookups it does not ParseAttr: the guard passes the bare predicate (no
+// namespace separator), matching how IsOtherReservedPredicate is consulted.
+//
+// Exact names win over prefixes. That matters when two namespaces overlap — one
+// owning a prefix, another owning a specific predicate inside it — since a single
+// ReservedNamespace has one TrustMarker and cannot express the split itself.
+//
+// Among prefixes the longest (most specific) match wins, for the same reason: a
+// broader prefix must not authorize a write under a narrower one just because it
+// registered first. Registration order therefore never decides which marker
+// governs a predicate.
+func ReservedPredicateValueLock(pred string) (marker any, locked bool) {
+	p := strings.ToLower(pred)
+	reservedNsMu.RLock()
+	defer reservedNsMu.RUnlock()
+	if marker, locked = reservedNsValueLocked[p]; locked {
+		return marker, true
+	}
+	best := -1
+	for _, vlp := range reservedNsValueLockedPrefixes {
+		if strings.HasPrefix(p, vlp.prefix) && len(vlp.prefix) > best {
+			best = len(vlp.prefix)
+			marker, locked = vlp.marker, true
+		}
+	}
+	return marker, locked
 }
 
 // TODO: rename this map to a better suited name as per its properties. It is not just for GraphQL

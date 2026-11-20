@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -16,11 +16,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/types/facets"
-	"github.com/hypermodeinc/dgraph/v25/worker"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/types/facets"
+	"github.com/dgraph-io/dgraph/v25/worker"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 // ApplyMutations performs the required edge expansions and forwards the results to the
@@ -48,27 +48,38 @@ func ApplyMutations(ctx context.Context, m *pb.Mutations) (*api.TxnContext, erro
 	return tctx, err
 }
 
+// nodeTypesForEdge is getNodeTypes, indirected so a test can observe which
+// namespace the per-edge context actually carries.
+//
+// That is the only thing the discarded-context fix below changed, and it is
+// otherwise reachable only through worker.ProcessTaskOverNetwork — so without this
+// the fix had no test that would fail if it were reverted, which was exactly the
+// case when it landed.
+var nodeTypesForEdge = getNodeTypes
+
 func ExpandEdges(ctx context.Context, m *pb.Mutations) ([]*pb.DirectedEdge, error) {
 	edges := make([]*pb.DirectedEdge, 0, 2*len(m.Edges))
-	namespace, err := x.ExtractNamespace(ctx)
+	reqNamespace, err := x.ExtractNamespace(ctx)
 	if err != nil {
 		return nil, errors.Wrapf(err, "While expanding edges")
 	}
 	isGalaxyQuery := x.IsRootNsOperation(ctx)
 
-	// Reset the namespace to the original.
-	defer func(ns uint64) {
-		x.AttachNamespace(ctx, ns)
-	}(namespace)
-
 	for _, edge := range m.Edges {
 		x.AssertTrue(edge.Op == pb.DirectedEdge_DEL || edge.Op == pb.DirectedEdge_SET)
+
+		// For a galaxy operation the caller puts the target namespace on each
+		// edge, so an edge may target a namespace other than the request's. Derive
+		// a per-edge context rather than mutating ctx: x.AttachNamespace returns a
+		// new context, so the previous code — which discarded that return, both
+		// here and in a deferred "reset" — left ctx untouched and getNodeTypes
+		// below read dgraph.type from the REQUEST's namespace while the predicate
+		// list was built for the EDGE's. For a galaxy-mode `S * *` delete that
+		// resolves the expansion against the wrong schema.
+		namespace, edgeCtx := reqNamespace, ctx
 		if isGalaxyQuery {
-			// The caller should make sure that the directed edges contain the namespace we want
-			// to insert into. Now, attach the namespace in the context, so that further query
-			// proceeds as if made from the user of 'namespace'.
 			namespace = edge.GetNamespace()
-			x.AttachNamespace(ctx, namespace)
+			edgeCtx = x.AttachNamespace(ctx, namespace)
 		}
 
 		var preds []string
@@ -78,7 +89,7 @@ func ExpandEdges(ctx context.Context, m *pb.Mutations) ([]*pb.DirectedEdge, erro
 			sg := &SubGraph{}
 			sg.DestUIDs = &pb.List{Uids: []uint64{edge.GetEntity()}}
 			sg.ReadTs = m.StartTs
-			types, err := getNodeTypes(ctx, sg)
+			types, err := nodeTypesForEdge(edgeCtx, sg)
 			if err != nil {
 				return nil, err
 			}
@@ -121,12 +132,11 @@ func verifyUid(ctx context.Context, uid uint64) error {
 		return nil
 	}
 	deadline := time.Now().Add(3 * time.Second)
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	ticker := time.Tick(100 * time.Millisecond)
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-ticker:
 			lease := worker.MaxLeaseId()
 			if uid <= lease {
 				return nil

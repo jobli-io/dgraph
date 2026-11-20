@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -20,11 +20,11 @@ import (
 	"github.com/twpayne/go-geom/encoding/geojson"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/types"
+	"github.com/dgraph-io/dgraph/v25/types/facets"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/simdjson-go"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/types"
-	"github.com/hypermodeinc/dgraph/v25/types/facets"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var errEmptyUID = errors.New("UID must be present and non-zero while deleting edges")
@@ -397,10 +397,13 @@ func getNextBlank() string {
 func (buf *NQuadBuffer) mapToNquads(m map[string]interface{}, op int, parentPred string) (mapResponse, error) {
 	var mr mapResponse
 
-	// move all facets from global map to smaller mr.rawFacets map
-	mr.rawFacets = make(map[string]interface{})
+	// move all facets from global map to smaller mr.rawFacets map. The vast majority
+	// of input objects have no facet keys, so allocate the map lazily on first hit.
 	for k, v := range m {
 		if strings.Contains(k, x.FacetDelimiter) {
+			if mr.rawFacets == nil {
+				mr.rawFacets = make(map[string]interface{})
+			}
 			mr.rawFacets[k] = v
 			delete(m, k)
 		}
@@ -437,7 +440,7 @@ func (buf *NQuadBuffer) mapToNquads(m map[string]interface{}, op int, parentPred
 			}
 		}
 		if uid > 0 {
-			mr.uid = fmt.Sprintf("%d", uid)
+			mr.uid = strconv.FormatUint(uid, 10)
 		}
 	}
 

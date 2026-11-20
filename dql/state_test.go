@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/hypermodeinc/dgraph/v25/lex"
+	"github.com/dgraph-io/dgraph/v25/lex"
 )
 
 func TestQueryLexing(t *testing.T) {
@@ -189,6 +189,24 @@ func TestVariablesDefault(t *testing.T) {
 	for it.Next() {
 		item := it.Item()
 		require.NotEqual(t, item.Typ, lex.ItemError)
+		t.Log(item.String())
+	}
+}
+
+func TestIRIRefInIdentifyMutationOrQuery(t *testing.T) {
+	input := `{
+		<user-query>(func: uid(0x1)) {
+			name
+		}
+	}`
+	l := lex.Lexer{
+		Input: input,
+	}
+	l.Run(lexTopLevel)
+	it := l.NewIterator()
+	for it.Next() {
+		item := it.Item()
+		require.NotEqual(t, item.Typ, lex.ItemError, "Error: %v", item.String())
 		t.Log(item.String())
 	}
 }

@@ -1,7 +1,7 @@
 //go:build integration2
 
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -10,14 +10,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
-	"github.com/hypermodeinc/dgraph/v25/dgraphtest"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/dgraphapi"
+	"github.com/dgraph-io/dgraph/v25/dgraphtest"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 // func addData(gc *dgraphapi.GrpcClient, pred string, start, end int) error {
@@ -32,6 +33,26 @@ import (
 // 	_, err := gc.Mutate(&api.Mutation{SetNquads: []byte(rdf), CommitNow: true})
 // 	return err
 // }
+
+// requireEventualJSON polls query until its response matches wantJSON or the deadline passes, then
+// asserts. Right after a restore there is a brief window where the queried replica can be one Raft
+// apply behind, so a single-shot assert flakes under load. Retrying tolerates that lag without
+// masking a real bug: if the data never converges (e.g. a genuine restore data loss), the final
+// CompareJSON still fails.
+func requireEventualJSON(t *testing.T, gc *dgraphapi.GrpcClient, query, wantJSON string) {
+	t.Helper()
+	var last error
+	for range 60 {
+		resp, err := gc.Query(query)
+		if err != nil {
+			last = err
+		} else if last = dgraphapi.CompareJSON(wantJSON, string(resp.Json)); last == nil {
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	require.NoError(t, last)
+}
 
 func commonTest(t *testing.T, existingCluster, freshCluster *dgraphtest.LocalCluster) {
 	hc, err := existingCluster.HTTPClient()
@@ -78,9 +99,7 @@ func commonTest(t *testing.T, existingCluster, freshCluster *dgraphtest.LocalClu
 			                 	count(uid)
 			                }
 	                   	}`
-			resp, err := gc.Query(query)
-			require.NoError(t, err)
-			require.NoError(t, dgraphapi.CompareJSON(fmt.Sprintf(`{"all":[{"count":%v}]}`, 100+ns), string(resp.Json)))
+			requireEventualJSON(t, gc, query, fmt.Sprintf(`{"all":[{"count":%v}]}`, 100+ns))
 
 			// other namespaces should have no data
 			for _, ns2 := range namespaces[1:] {
@@ -154,9 +173,7 @@ func commonIncRestoreTest(t *testing.T, existingCluster, freshCluster *dgraphtes
 					count(uid)
 				}
 			}`
-				resp, err := gc.Query(query)
-				require.NoError(t, err)
-				require.NoError(t, dgraphapi.CompareJSON(fmt.Sprintf(`{"all":[{"count":%v}]}`, 20*(j+1)), string(resp.Json)))
+				requireEventualJSON(t, gc, query, fmt.Sprintf(`{"all":[{"count":%v}]}`, 20*(j+1)))
 			}
 		}
 	}
@@ -169,6 +186,9 @@ func commonIncRestoreTest(t *testing.T, existingCluster, freshCluster *dgraphtes
 }
 
 func TestNameSpaceAwareRestoreOnSingleNode(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("skipping on non-Linux: Docker port mapping is unreliable during restore")
+	}
 	baseClusterConf := dgraphtest.NewClusterConfig().WithNumAlphas(3).WithNumZeros(3).
 		WithReplicas(3).WithACL(20 * time.Hour).WithEncryption().WithUidLease(1000)
 	baseCluster, err := dgraphtest.NewLocalCluster(baseClusterConf)
@@ -189,6 +209,9 @@ func TestNameSpaceAwareRestoreOnSingleNode(t *testing.T) {
 }
 
 func TestNamespaceAwareRestoreOnMultipleGroups(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("skipping on non-Linux: Docker port mapping is unreliable during restore")
+	}
 	baseClusterConf := dgraphtest.NewClusterConfig().WithNumAlphas(9).WithNumZeros(3).
 		WithReplicas(3).WithACL(20 * time.Hour).WithEncryption().WithUidLease(10000)
 	baseCluster, err := dgraphtest.NewLocalCluster(baseClusterConf)

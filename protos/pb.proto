@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,7 +13,6 @@ syntax = "proto3";
 package pb;
 
 import "github.com/dgraph-io/dgo/v250/protos/api.proto";
-import "github.com/dgraph-io/dgo/v250/protos/api.v25.proto";
 import "github.com/dgraph-io/badger/v4/pb/pb.proto";
 import "google/protobuf/descriptor.proto";
 
@@ -61,6 +60,9 @@ message Query {
 	// field. Now, It's been used only for has query.
 	int32 offset = 16; // offset helps in fetching lesser results for the has query when there is
 	// no filter and order.
+
+  SortMessage order = 17; // Order of the query. It will be used to help reduce the amount of computation
+	// required to fetch the results.
 }
 
 message ValueList {
@@ -319,7 +321,7 @@ message Proposal {
   DeleteNsRequest delete_ns = 14;  // Used to delete namespace.
   // Skipping 15 as it is used for uint64 key in master and might be needed later here.
   uint64 start_ts = 16;
-  DrainModeRequest drainmode = 17;
+ api.UpdateExtSnapshotStreamingStateRequest ext_snapshot_state = 17;
 }
 
 message CDCState {
@@ -596,12 +598,8 @@ service Worker {
       returns (UpdateGraphQLSchemaResponse) {}
   rpc DeleteNamespace(DeleteNsRequest) returns (Status) {}
   rpc TaskStatus(TaskStatusRequest) returns (TaskStatusResponse) {}
-  rpc ApplyDrainmode(DrainModeRequest) returns (Status) {}
-  rpc InternalStreamPDir(stream api.v25.StreamPDirRequest) returns (api.v25.StreamPDirResponse) {}
-}
-
-message DrainModeRequest {
-  bool state = 1;
+  rpc UpdateExtSnapshotStreamingState(api.UpdateExtSnapshotStreamingStateRequest) returns (Status) {}
+  rpc StreamExtSnapshot(stream api.StreamExtSnapshotRequest) returns (stream api.StreamExtSnapshotResponse) {}
 }
 
 message TabletResponse {

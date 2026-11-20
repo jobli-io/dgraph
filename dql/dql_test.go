@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -84,6 +84,11 @@ func TestParseDQL(t *testing.T) {
 			}
 			delete {
 				<name> <is> <something-else> .
+			}
+		}`,
+		`{
+			<user-query>(func: uid(0x1)) {
+				name
 			}
 		}`,
 	}

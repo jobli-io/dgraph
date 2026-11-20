@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -22,11 +22,11 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/dgraph/v25/filestore"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/tok"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/filestore"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/tok"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // Bulk is the sub-command invoked when running "dgraph bulk".
@@ -78,6 +78,8 @@ func init() {
 	flag.Int64("partition_mb", 4, "Pick a partition key every N megabytes of data.")
 	flag.Bool("skip_map_phase", false,
 		"Skip the map phase (assumes that map output files already exist).")
+	flag.Bool("skip_reduce_phase", false,
+		"Skip the reduce phase (stops after map phase completion).")
 	flag.Bool("cleanup_tmp", true,
 		"Clean up the tmp directory after the loader finishes. Setting this to false allows the"+
 			" bulk loader can be re-run while skipping the map phase.")
@@ -91,6 +93,8 @@ func init() {
 	// TODO: Potentially move http server to main.
 	flag.String("http", "localhost:8080", "Address to serve http (pprof).")
 	flag.Bool("ignore_errors", false, "ignore line parsing errors in rdf files")
+	flag.Bool("log_errors", false, "log parsing errors to a file (requires --ignore_errors)")
+	flag.String("error_log", "bulk_errors.log", "path to error log file when --log_errors is set")
 	flag.Int("map_shards", 1,
 		"Number of map output shards. Must be greater than or equal to the number of reduce "+
 			"shards. Increasing allows more evenly sized reduce shards, at the expense of "+
@@ -99,6 +103,13 @@ func init() {
 		"Number of reduce shards. This determines the number of dgraph instances in the final "+
 			"cluster. Increasing this potentially decreases the reduce stage runtime by using "+
 			"more parallelism, but increases memory usage.")
+	flag.String("tablet_placement", "",
+		"Path to a JSON file pinning predicates to groups, as an array of "+
+			`{"predicate", "group", "namespace"} entries. Pinned predicates are written to the `+
+			"output shard of their group (group N is out/<N-1>); everything else is packed as "+
+			"usual. Placement is applied at load time only; until the cluster enforces pins, "+
+			"Zero's rebalancer may later move tablets. Use map_shards > reduce_shards so "+
+			"unpinned predicates still balance by size.")
 	flag.String("custom_tokenizers", "",
 		"Comma separated list of tokenizer plugins")
 	flag.Bool("new_uids", false,
@@ -133,35 +144,39 @@ func run() {
 	keys, err := x.GetEncAclKeys(Bulk.Conf)
 	x.Check(err)
 
-	opt := options{
-		DataFiles:        Bulk.Conf.GetString("files"),
-		DataFormat:       Bulk.Conf.GetString("format"),
-		EncryptionKey:    keys.EncKey,
-		SchemaFile:       Bulk.Conf.GetString("schema"),
-		GqlSchemaFile:    Bulk.Conf.GetString("graphql_schema"),
-		Encrypted:        Bulk.Conf.GetBool("encrypted"),
-		EncryptedOut:     Bulk.Conf.GetBool("encrypted_out"),
-		OutDir:           Bulk.Conf.GetString("out"),
-		ReplaceOutDir:    Bulk.Conf.GetBool("replace_out"),
-		TmpDir:           Bulk.Conf.GetString("tmp"),
-		NumGoroutines:    Bulk.Conf.GetInt("num_go_routines"),
-		MapBufSize:       uint64(Bulk.Conf.GetInt("mapoutput_mb")),
-		PartitionBufSize: int64(Bulk.Conf.GetInt("partition_mb")),
-		SkipMapPhase:     Bulk.Conf.GetBool("skip_map_phase"),
-		CleanupTmp:       Bulk.Conf.GetBool("cleanup_tmp"),
-		NumReducers:      Bulk.Conf.GetInt("reducers"),
-		Version:          Bulk.Conf.GetBool("version"),
-		StoreXids:        Bulk.Conf.GetBool("store_xids"),
-		ZeroAddr:         Bulk.Conf.GetString("zero"),
-		HttpAddr:         Bulk.Conf.GetString("http"),
-		IgnoreErrors:     Bulk.Conf.GetBool("ignore_errors"),
-		MapShards:        Bulk.Conf.GetInt("map_shards"),
-		ReduceShards:     Bulk.Conf.GetInt("reduce_shards"),
-		CustomTokenizers: Bulk.Conf.GetString("custom_tokenizers"),
-		NewUids:          Bulk.Conf.GetBool("new_uids"),
-		ClientDir:        Bulk.Conf.GetString("xidmap"),
-		Namespace:        Bulk.Conf.GetUint64("force-namespace"),
-		Badger:           bopts,
+	opt := BulkOptions{
+		DataFiles:           Bulk.Conf.GetString("files"),
+		DataFormat:          Bulk.Conf.GetString("format"),
+		EncryptionKey:       keys.EncKey,
+		SchemaFile:          Bulk.Conf.GetString("schema"),
+		GqlSchemaFile:       Bulk.Conf.GetString("graphql_schema"),
+		Encrypted:           Bulk.Conf.GetBool("encrypted"),
+		EncryptedOut:        Bulk.Conf.GetBool("encrypted_out"),
+		OutDir:              Bulk.Conf.GetString("out"),
+		ReplaceOutDir:       Bulk.Conf.GetBool("replace_out"),
+		TmpDir:              Bulk.Conf.GetString("tmp"),
+		NumGoroutines:       Bulk.Conf.GetInt("num_go_routines"),
+		MapBufSize:          uint64(Bulk.Conf.GetInt("mapoutput_mb")),
+		PartitionBufSize:    int64(Bulk.Conf.GetInt("partition_mb")),
+		SkipMapPhase:        Bulk.Conf.GetBool("skip_map_phase"),
+		SkipReducePhase:     Bulk.Conf.GetBool("skip_reduce_phase"),
+		CleanupTmp:          Bulk.Conf.GetBool("cleanup_tmp"),
+		NumReducers:         Bulk.Conf.GetInt("reducers"),
+		Version:             Bulk.Conf.GetBool("version"),
+		StoreXids:           Bulk.Conf.GetBool("store_xids"),
+		ZeroAddr:            Bulk.Conf.GetString("zero"),
+		HttpAddr:            Bulk.Conf.GetString("http"),
+		IgnoreErrors:        Bulk.Conf.GetBool("ignore_errors"),
+		LogErrors:           Bulk.Conf.GetBool("log_errors"),
+		ErrorLogPath:        Bulk.Conf.GetString("error_log"),
+		MapShards:           Bulk.Conf.GetInt("map_shards"),
+		ReduceShards:        Bulk.Conf.GetInt("reduce_shards"),
+		TabletPlacementFile: Bulk.Conf.GetString("tablet_placement"),
+		CustomTokenizers:    Bulk.Conf.GetString("custom_tokenizers"),
+		NewUids:             Bulk.Conf.GetBool("new_uids"),
+		ClientDir:           Bulk.Conf.GetString("xidmap"),
+		Namespace:           Bulk.Conf.GetUint64("force-namespace"),
+		Badger:              bopts,
 	}
 
 	x.PrintVersion()
@@ -169,6 +184,10 @@ func run() {
 		os.Exit(0)
 	}
 
+	RunBulkLoader(opt)
+}
+
+func RunBulkLoader(opt BulkOptions) {
 	if len(opt.EncryptionKey) == 0 {
 		if opt.Encrypted || opt.EncryptedOut {
 			fmt.Fprint(os.Stderr, "Must use --encryption or vault option(s).\n")
@@ -197,27 +216,29 @@ func run() {
 	}
 	fmt.Printf("Encrypted input: %v; Encrypted output: %v\n", opt.Encrypted, opt.EncryptedOut)
 
-	if opt.SchemaFile == "" {
-		// if only graphql schema is provided, we can generate DQL schema from it.
-		if opt.GqlSchemaFile == "" {
-			fmt.Fprint(os.Stderr, "Schema file must be specified.\n")
-			os.Exit(1)
-		}
-	} else {
-		if !filestore.Exists(opt.SchemaFile) {
-			fmt.Fprintf(os.Stderr, "Schema path(%v) does not exist.\n", opt.SchemaFile)
-			os.Exit(1)
-		}
-	}
-	if opt.DataFiles == "" {
-		fmt.Fprint(os.Stderr, "RDF or JSON file(s) location must be specified.\n")
-		os.Exit(1)
-	} else {
-		fileList := strings.Split(opt.DataFiles, ",")
-		for _, file := range fileList {
-			if !filestore.Exists(file) {
-				fmt.Fprintf(os.Stderr, "Data path(%v) does not exist.\n", file)
+	if !opt.SkipMapPhase {
+		if opt.SchemaFile == "" {
+			// if only graphql schema is provided, we can generate DQL schema from it.
+			if opt.GqlSchemaFile == "" {
+				fmt.Fprint(os.Stderr, "Schema file must be specified.\n")
 				os.Exit(1)
+			}
+		} else {
+			if !filestore.Exists(opt.SchemaFile) {
+				fmt.Fprintf(os.Stderr, "Schema path(%v) does not exist.\n", opt.SchemaFile)
+				os.Exit(1)
+			}
+		}
+		if opt.DataFiles == "" {
+			fmt.Fprint(os.Stderr, "RDF or JSON file(s) location must be specified.\n")
+			os.Exit(1)
+		} else {
+			fileList := strings.SplitSeq(opt.DataFiles, ",")
+			for file := range fileList {
+				if !filestore.Exists(file) {
+					fmt.Fprintf(os.Stderr, "Data path(%v) does not exist.\n", file)
+					os.Exit(1)
+				}
 			}
 		}
 	}
@@ -231,6 +252,42 @@ func run() {
 		fmt.Fprintf(os.Stderr, "Invalid flags: shufflers(%d) should be <= reduce_shards(%d)\n",
 			opt.NumReducers, opt.ReduceShards)
 		os.Exit(1)
+	}
+
+	if opt.TabletPlacementFile != "" {
+		entries, err := x.ParseTabletPlacementFile(opt.TabletPlacementFile)
+		if err == nil {
+			opt.tabletPlacement, err = buildTabletPlacement(&opt, entries)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid --tablet_placement: %v\n", err)
+			os.Exit(1)
+		}
+		printTabletPlacement(entries)
+		if opt.SkipMapPhase {
+			fmt.Println("WARNING: --tablet_placement routes data during the map phase, which " +
+				"this run skips. Make sure the map run used the same placement file; this run " +
+				"only applies it to schema-only predicates.")
+		}
+		if opt.MapShards == opt.ReduceShards {
+			fmt.Println("NOTE: map_shards == reduce_shards with --tablet_placement disables " +
+				"size balancing entirely; use map_shards > reduce_shards to let unpinned " +
+				"predicates balance by size.")
+		}
+	}
+
+	// Validate skip phase flags
+	if opt.SkipMapPhase && opt.SkipReducePhase {
+		fmt.Fprint(os.Stderr, "Cannot skip both map and reduce phases.\n")
+		os.Exit(1)
+	}
+	if opt.SkipReducePhase {
+		if Bulk.Cmd.Flags().Changed("cleanup_tmp") && opt.CleanupTmp {
+			fmt.Fprint(os.Stderr, "Cannot use --skip_reduce_phase with --cleanup_tmp=true. "+
+				"Temp files must be preserved for the later reduce phase.\n")
+			os.Exit(1)
+		}
+		opt.CleanupTmp = false
 	}
 	if opt.CustomTokenizers != "" {
 		for _, soFile := range strings.Split(opt.CustomTokenizers, ",") {
@@ -253,31 +310,34 @@ func run() {
 	maxOpenFilesWarning()
 
 	go func() {
-		log.Fatal(http.ListenAndServe(opt.HttpAddr, nil))
+		log.Fatal(http.ListenAndServe(opt.HttpAddr, x.SanitizedDefaultServeMux()))
 	}()
 	http.HandleFunc("/jemalloc", x.JemallocHandler)
 
 	// Make sure it's OK to create or replace the directory specified with the --out option.
 	// It is always OK to create or replace the default output directory.
-	if opt.OutDir != defaultOutDir && !opt.ReplaceOutDir {
-		err := x.IsMissingOrEmptyDir(opt.OutDir)
-		if err == nil {
-			fmt.Fprintf(os.Stderr, "Output directory exists and is not empty."+
-				" Use --replace_out to overwrite it.\n")
-			os.Exit(1)
-		} else if err != x.ErrMissingDir {
-			x.CheckfNoTrace(err)
+	// Skip output directory validation if we're only doing map phase
+	if !opt.SkipReducePhase {
+		if opt.OutDir != defaultOutDir && !opt.ReplaceOutDir {
+			err := x.IsMissingOrEmptyDir(opt.OutDir)
+			if err == nil {
+				fmt.Fprintf(os.Stderr, "Output directory exists and is not empty."+
+					" Use --replace_out to overwrite it.\n")
+				os.Exit(1)
+			} else if err != x.ErrMissingDir {
+				x.CheckfNoTrace(err)
+			}
 		}
-	}
 
-	// Delete and recreate the output dirs to ensure they are empty.
-	x.Check(os.RemoveAll(opt.OutDir))
-	for i := range opt.ReduceShards {
-		dir := filepath.Join(opt.OutDir, strconv.Itoa(i), "p")
-		x.Check(os.MkdirAll(dir, 0700))
-		opt.shardOutputDirs = append(opt.shardOutputDirs, dir)
+		// Delete and recreate the output dirs to ensure they are empty.
+		x.Check(os.RemoveAll(opt.OutDir))
+		for i := range opt.ReduceShards {
+			dir := filepath.Join(opt.OutDir, strconv.Itoa(i), "p")
+			x.Check(os.MkdirAll(dir, 0700))
+			opt.shardOutputDirs = append(opt.shardOutputDirs, dir)
 
-		x.Check(x.WriteGroupIdFile(dir, uint32(i+1)))
+			x.Check(x.WriteGroupIdFile(dir, uint32(i+1)))
+		}
 	}
 
 	// Create a directory just for bulk loader's usage.
@@ -295,10 +355,26 @@ func run() {
 	x.Check(os.MkdirAll(bufDir, 0700))
 	defer os.RemoveAll(bufDir)
 
-	loader := newLoader(&opt)
-
 	const bulkMetaFilename = "bulk.meta"
 	bulkMetaPath := filepath.Join(opt.TmpDir, bulkMetaFilename)
+	const writeTsFilename = "write.ts"
+	writeTsPath := filepath.Join(opt.TmpDir, writeTsFilename)
+
+	var precomputedWriteTs uint64
+	if opt.SkipMapPhase {
+		writeTsData, err := os.ReadFile(writeTsPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error reading write timestamp file; was --skip_reduce_phase used in the map run?")
+			os.Exit(1)
+		}
+		precomputedWriteTs, err = strconv.ParseUint(strings.TrimSpace(string(writeTsData)), 10, 64)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error parsing write timestamp file")
+			os.Exit(1)
+		}
+	}
+
+	loader := newLoader(&opt, precomputedWriteTs)
 
 	if opt.SkipMapPhase {
 		bulkMetaData, err := os.ReadFile(bulkMetaPath)
@@ -335,7 +411,24 @@ func run() {
 			fmt.Fprintln(os.Stderr, "Error writing to bulk meta file")
 			os.Exit(1)
 		}
+		if err = os.WriteFile(writeTsPath, []byte(strconv.FormatUint(loader.writeTs, 10)), 0600); err != nil {
+			fmt.Fprintln(os.Stderr, "Error writing write timestamp file")
+			os.Exit(1)
+		}
 	}
+
+	if len(opt.tabletPlacement) > 0 {
+		warnUnmatchedTabletPlacement(opt.tabletPlacement, loader.schema)
+	}
+
+	if opt.SkipReducePhase {
+		fmt.Println("Skipping reduce phase. Map phase completed successfully.")
+		fmt.Println("Temp files preserved for later reduce phase processing.")
+		// Don't call cleanup() to preserve temp files
+		loader.prog.endSummary()
+		return
+	}
+
 	loader.reduceStage()
 	loader.writeSchema()
 	loader.cleanup()

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -26,6 +26,8 @@ import (
 	texttemplate "text/template"
 	"time"
 
+	"github.com/dgraph-io/dgraph/v25/graphql/authorization"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/gqlparser/v2/ast"
 	"github.com/dgraph-io/gqlparser/v2/gqlerror"
 	"github.com/dgraph-io/gqlparser/v2/parser"
@@ -34,8 +36,6 @@ import (
 	"github.com/go-playground/validator/v10"
 	"github.com/golang/glog"
 	"github.com/google/uuid"
-	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
-	"github.com/hypermodeinc/dgraph/v25/x"
 	"github.com/mitchellh/mapstructure"
 	"github.com/pkg/errors"
 	"github.com/sashabaranov/go-openai"
@@ -93,40 +93,42 @@ type EntityRepresentations struct {
 
 // Query/Mutation types and arg names
 const (
-	GetQuery                      QueryType    = "get"
-	SimilarByIdQuery              QueryType    = "querySimilarById"
-	SimilarByEmbeddingQuery       QueryType    = "querySimilarByEmbedding"
-	FilterQuery                   QueryType    = "query"
-	AggregateQuery                QueryType    = "aggregate"
-	GroupByQuery                  QueryType    = "groupBy"
-	SchemaQuery                   QueryType    = "schema"
-	EntitiesQuery                 QueryType    = "entities"
-	PasswordQuery                 QueryType    = "checkPassword"
-	HTTPQuery                     QueryType    = "http"
-	DQLQuery                      QueryType    = "dql"
-	NotSupportedQuery             QueryType    = "notsupported"
-	AddMutation                   MutationType = "add"
-	UpdateMutation                MutationType = "update"
-	DeleteMutation                MutationType = "delete"
-	HTTPMutation                  MutationType = "http"
-	NotSupportedMutation          MutationType = "notsupported"
-	IDType                                     = "ID"
-	InputArgName                               = "input"
-	UpsertArgName                              = "upsert"
-	FilterArgName                              = "filter"
-	SimilarByArgName                           = "by"
-	SimilarTopKArgName                         = "topK"
-	SimilarVectorArgName                       = "vector"
-	SimilarTextArgName                         = "text"
-	EmbeddingEnumSuffix                        = "Embedding"
-	SimilarQueryPrefix                         = "querySimilar"
-	SimilarByIdQuerySuffix                     = "ById"
-	SimilarByEmbeddingQuerySuffix              = "ByEmbedding"
-	SimilarQueryResultTypeSuffix               = "WithDistance"
-	SimilarQueryDistanceFieldName              = "vector_distance"
-	SimilarSearchMetricEuclidean               = "euclidean"
-	SimilarSearchMetricDotProduct              = "dotproduct"
-	SimilarSearchMetricCosine                  = "cosine"
+	GetQuery                        QueryType    = "get"
+	SimilarByIdQuery                QueryType    = "querySimilarById"
+	SimilarByEmbeddingQuery         QueryType    = "querySimilarByEmbedding"
+	FilterQuery                     QueryType    = "query"
+	AggregateQuery                  QueryType    = "aggregate"
+	GroupByQuery                    QueryType    = "groupBy"
+	SchemaQuery                     QueryType    = "schema"
+	EntitiesQuery                   QueryType    = "entities"
+	PasswordQuery                   QueryType    = "checkPassword"
+	HTTPQuery                       QueryType    = "http"
+	DQLQuery                        QueryType    = "dql"
+	NotSupportedQuery               QueryType    = "notsupported"
+	AddMutation                     MutationType = "add"
+	UpdateMutation                  MutationType = "update"
+	DeleteMutation                  MutationType = "delete"
+	HTTPMutation                    MutationType = "http"
+	NotSupportedMutation            MutationType = "notsupported"
+	IDType                                       = "ID"
+	InputArgName                                 = "input"
+	UpsertArgName                                = "upsert"
+	FilterArgName                                = "filter"
+	SimilarByArgName                             = "by"
+	SimilarTopKArgName                           = "topK"
+	SimilarVectorArgName                         = "vector"
+	SimilarTextArgName                           = "text"
+	SimilarEfArgName                             = "ef"
+	SimilarDistanceThresholdArgName              = "distance_threshold"
+	EmbeddingEnumSuffix                          = "Embedding"
+	SimilarQueryPrefix                           = "querySimilar"
+	SimilarByIdQuerySuffix                       = "ById"
+	SimilarByEmbeddingQuerySuffix                = "ByEmbedding"
+	SimilarQueryResultTypeSuffix                 = "WithDistance"
+	SimilarQueryDistanceFieldName                = "vector_distance"
+	SimilarSearchMetricEuclidean                 = "euclidean"
+	SimilarSearchMetricDotProduct                = "dotproduct"
+	SimilarSearchMetricCosine                    = "cosine"
 )
 
 // Schema represents a valid GraphQL schema
@@ -1617,7 +1619,9 @@ func (f *field) IDArgValue() (xids map[string]string, uid uint64, err error) {
 		if (idField == nil || arg.Name != idField.Name()) &&
 			(passwordField == nil || arg.Name != passwordField.Name()) &&
 			(queryType(f.field.Name, nil) != SimilarByIdQuery ||
-				(arg.Name != SimilarTopKArgName && arg.Name != SimilarByArgName && arg.Name != "filter")) {
+				(arg.Name != SimilarTopKArgName && arg.Name != SimilarByArgName &&
+					arg.Name != SimilarEfArgName && arg.Name != SimilarDistanceThresholdArgName &&
+					arg.Name != "filter")) {
 			xidArgName = arg.Name
 		}
 

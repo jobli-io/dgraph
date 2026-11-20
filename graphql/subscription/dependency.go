@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"sync"
 
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
 )
 
 var hexUIDRegex = regexp.MustCompile(`^0x[0-9a-fA-F]+$`)

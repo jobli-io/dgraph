@@ -8,7 +8,7 @@ package resolve
 import (
 	"testing"
 
-	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/dql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

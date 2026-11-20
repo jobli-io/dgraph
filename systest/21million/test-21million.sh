@@ -4,7 +4,7 @@ set -e
 readonly ME=${0##*/}
 readonly SRCDIR=$(dirname "$0")
 
-BENCHMARKS_REPO="${BENCHMARKS_REPO:-$(go env GOPATH)/src/github.com/hypermodeinc/dgraph-benchmarks}"
+BENCHMARKS_REPO="${BENCHMARKS_REPO:-$(go env GOPATH)/src/github.com/dgraph-io/dgraph-benchmarks}"
 SCHEMA_FILE="${BENCHMARKS_REPO}/data/21million.schema"
 DATA_FILE="${BENCHMARKS_REPO}/data/21million.rdf.gz"
 
@@ -124,7 +124,7 @@ if [[ ${LOADER} == bulk ]]; then
             mkdir -p /data/alpha1
             mkdir -p /data/alpha2
             mkdir -p /data/alpha3
-            /gobin/dgraph bulk --schema=${SCHEMA_FILE} --files=${DATA_FILE} \
+            ${GOBIN_DGRAPH_PATH:-/gobin/dgraph} bulk --schema=${SCHEMA_FILE} --files=${DATA_FILE} \
                                --format=rdf --zero=zero1:5180 --out=/data/zero1/bulk \
                                --reduce_shards 3 --map_shards 9
             mv /data/zero1/bulk/0/p /data/alpha1

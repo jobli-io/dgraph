@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -23,14 +23,16 @@ import (
 	"go.etcd.io/etcd/raft/v3/raftpb"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
+
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4/y"
 	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/raftwal"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/raftwal"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -150,10 +152,9 @@ func (n *Node) ReportRaftComms() {
 	if !glog.V(3) {
 		return
 	}
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	ticker := time.Tick(time.Second)
 
-	for range ticker.C {
+	for range ticker {
 		out := atomic.SwapInt64(&n.heartbeatsOut, 0)
 		in := atomic.SwapInt64(&n.heartbeatsIn, 0)
 		glog.Infof("RaftComm: [%#x] Heartbeats out: %d, in: %d", n.Id, out, in)
@@ -401,11 +402,10 @@ func (n *Node) streamMessages(to uint64, s *stream) {
 	// Let's set the deadline to 10s because if we increase it, then it takes longer to recover from
 	// a partition and get a new leader.
 	deadline := time.Now().Add(10 * time.Second)
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	ticker := time.Tick(time.Second)
 
 	var logged int
-	for range ticker.C { // Don't do this in an busy-wait loop, use a ticker.
+	for range ticker { // Don't do this in a busy-wait loop, use a ticker.
 		// doSendMessage would block doing a stream. So, time.Now().After is
 		// only there to avoid a busy-wait.
 		if err := n.doSendMessage(to, s.msgCh); err != nil {
@@ -460,11 +460,8 @@ func (n *Node) doSendMessage(to uint64, msgCh chan []byte) error {
 
 	ctx = mc.Context()
 
-	fastTick := time.NewTicker(5 * time.Second)
-	defer fastTick.Stop()
-
-	ticker := time.NewTicker(3 * time.Minute)
-	defer ticker.Stop()
+	fastTick := time.Tick(5 * time.Second)
+	ticker := time.Tick(3 * time.Minute)
 
 	for {
 		select {
@@ -495,7 +492,7 @@ func (n *Node) doSendMessage(to uint64, msgCh chan []byte) error {
 				// RAFT would automatically retry.
 				return err
 			}
-		case <-fastTick.C:
+		case <-fastTick:
 			// We use this ticker, because during network partitions, mc.Send is
 			// unable to actually send packets, and also does not complain about
 			// them. We could have potentially used the separately tracked
@@ -512,7 +509,7 @@ func (n *Node) doSendMessage(to uint64, msgCh chan []byte) error {
 				pool.SetUnhealthy()
 				return errors.Wrapf(err, "while calling IsPeer %x", to)
 			}
-		case <-ticker.C:
+		case <-ticker:
 			if lastPackets == packets {
 				span.AddEvent(fmt.Sprintf("No activity for a while [Packets == %d]. Closing connection.", packets))
 				return mc.CloseSend()
@@ -560,7 +557,11 @@ func (n *Node) DeletePeer(pid uint64) {
 
 var errInternalRetry = errors.New("Retry proposal again")
 
-func (n *Node) proposeConfChange(ctx context.Context, conf raftpb.ConfChange) error {
+// ProposeConfChange proposes a Raft configuration change (add, remove, or
+// update a node) and blocks until it is committed or the context expires.
+// It is used by both the conn package internally and by the zero package
+// (for address reconciliation via ConfChangeUpdateNode).
+func (n *Node) ProposeConfChange(ctx context.Context, conf raftpb.ConfChange) error {
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
@@ -604,7 +605,7 @@ func (n *Node) addToCluster(ctx context.Context, rc *pb.RaftContext) error {
 	for err == errInternalRetry {
 		glog.Infof("Trying to add %#x to cluster. Addr: %v\n", pid, rc.Addr)
 		glog.Infof("Current confstate at %#x: %+v\n", n.Id, n.ConfState())
-		err = n.proposeConfChange(ctx, cc)
+		err = n.ProposeConfChange(ctx, cc)
 	}
 	return err
 }
@@ -623,7 +624,7 @@ func (n *Node) ProposePeerRemoval(ctx context.Context, id uint64) error {
 	}
 	err := errInternalRetry
 	for err == errInternalRetry {
-		err = n.proposeConfChange(ctx, cc)
+		err = n.ProposeConfChange(ctx, cc)
 	}
 	return err
 }
@@ -761,10 +762,13 @@ func (n *Node) joinCluster(ctx context.Context, rc *pb.RaftContext) (*api.Payloa
 		return nil, errors.Errorf("REUSE_RAFTID: Raft ID duplicates mine: %+v", rc)
 	}
 
-	// Check that the new node is not already part of the group.
+	// Reject if a peer with the same Raft ID is already registered at a
+	// different address AND that peer is still genuinely connected. Using the
+	// gRPC connection state is more accurate than IsHealthy(), which relies on
+	// a heartbeat timestamp and stays "healthy" for ~2s after the peer drops.
 	if addr, ok := n.Peer(rc.Id); ok && rc.Addr != addr {
-		// There exists a healthy connection to server with same id.
-		if _, err := GetPools().Get(addr); err == nil {
+		if pool, err := GetPools().Get(addr); err == nil &&
+			pool.Get().GetState() == connectivity.Ready {
 			return &api.Payload{}, errors.Errorf(
 				"REUSE_ADDR: IP Address same as existing peer: %s", addr)
 		}

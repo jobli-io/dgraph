@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -641,6 +641,16 @@ func TestConvertFloatToInt(t *testing.T) {
 		{in: float64(0), out: int64(0)},
 		{in: float64(522638295213.3243), out: int64(522638295213)},
 		{in: float64(-522638295213.3243), out: int64(-522638295213)},
+		// Largest float64 strictly below 2^63 (2^63 - 1024) is a valid int64.
+		{in: float64(9223372036854774784), out: int64(9223372036854774784)},
+		// -2^63 is exactly representable and equals math.MinInt64, so it must convert.
+		{in: float64(math.MinInt64), out: int64(math.MinInt64)},
+		{
+			// 2^63 is greater than math.MaxInt64 (2^63-1) but equals float64(math.MaxInt64),
+			// so it must be rejected instead of silently overflowing.
+			in:      float64(9223372036854775808),
+			failure: "Float out of int64 range",
+		},
 		{
 			in:      math.NaN(),
 			failure: "Float out of int64 range",
@@ -843,4 +853,23 @@ func TestConvertToString(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, Val{Tid: StringID, Value: tc.out}, out)
 	}
+}
+
+// TestObjectValuePasswordErrorDoesNotLeakValue ensures that when ObjectValue receives
+// an invalid type for a password field, the error message doesn't contain the actual value.
+func TestObjectValuePasswordErrorDoesNotLeakValue(t *testing.T) {
+	// Create a test value that would be sensitive if logged
+	sensitivePassword := int64(123456789)
+
+	// Call ObjectValue with wrong type (int64 instead of string) for password
+	_, err := ObjectValue(PasswordID, sensitivePassword)
+
+	// Verify error occurred
+	require.Error(t, err)
+
+	// Verify the error message contains type info but NOT the actual value
+	errMsg := err.Error()
+	require.Contains(t, errMsg, "Expected value of type password")
+	require.Contains(t, errMsg, "int64")        // type should be present
+	require.NotContains(t, errMsg, "123456789") // actual value should NOT be present
 }

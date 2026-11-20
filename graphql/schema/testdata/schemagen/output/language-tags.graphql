@@ -335,6 +335,10 @@ input StringRegExpFilter {
 	regexp: String
 }
 
+input StringNgramFilter {
+	ngram: String
+}
+
 input StringFullTextFilter {
 	alloftext: String
 	anyoftext: String

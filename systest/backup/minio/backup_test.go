@@ -1,7 +1,7 @@
 //go:build integration
 
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	minio "github.com/minio/minio-go/v6"
+	minio "github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -27,9 +27,9 @@ import (
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/dgo/v250"
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/testutil"
-	"github.com/hypermodeinc/dgraph/v25/worker"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/testutil"
+	"github.com/dgraph-io/dgraph/v25/worker"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 var (
@@ -49,14 +49,14 @@ func TestBackupMinio(t *testing.T) {
 	addr := testutil.ContainerAddr("minio", 9001)
 	localBackupDst = "minio://" + addr + "/dgraph-backup?secure=false"
 
-	conn, err := grpc.NewClient(testutil.SockAddr,
+	conn, err := grpc.NewClient(testutil.GetSockAddr(),
 		grpc.WithTransportCredentials(credentials.NewTLS(testutil.GetAlphaClientConfig(t))))
 	require.NoError(t, err)
 	dg := dgo.NewDgraphClient(api.NewDgraphClient(conn))
 
 	mc, err = testutil.NewMinioClient()
 	require.NoError(t, err)
-	require.NoError(t, mc.MakeBucket(bucketName, ""))
+	require.NoError(t, mc.MakeBucket(context.Background(), bucketName, minio.MakeBucketOptions{}))
 
 	ctx := context.Background()
 	require.NoError(t, dg.Alter(ctx, &api.Operation{DropAll: true}))
@@ -83,7 +83,7 @@ func TestBackupMinio(t *testing.T) {
 
 	// Move tablet to group 1 to avoid messes later.
 	client := testutil.GetHttpsClient(t)
-	_, err = client.Get("https://" + testutil.SockAddrZeroHttp + "/moveTablet?tablet=movie&group=1")
+	_, err = client.Get("https://" + testutil.GetSockAddrZeroHttp() + "/moveTablet?tablet=movie&group=1")
 	require.NoError(t, err)
 
 	// After the move, we need to pause a bit to give zero a chance to quorum.
@@ -101,8 +101,11 @@ func TestBackupMinio(t *testing.T) {
 	require.True(t, moveOk)
 
 	// Setup environmental variables for use during restore.
+	// Secret key padded to 14+ bytes so "AWS4"+secret satisfies the
+	// OpenSSL FIPS provider's HMAC key-length minimum (matches
+	// dgraph/minio.env, systest/backup.env).
 	os.Setenv("MINIO_ACCESS_KEY", "accesskey")
-	os.Setenv("MINIO_SECRET_KEY", "secretkey")
+	os.Setenv("MINIO_SECRET_KEY", "secretkey-long-enough")
 
 	// Setup test directories.
 	dirSetup(t)
@@ -284,7 +287,7 @@ func runBackupInternal(t *testing.T, forceFull bool, numExpectedFiles,
 		}
 	}`
 
-	adminUrl := "https://" + testutil.SockAddrHttp + "/admin"
+	adminUrl := "https://" + testutil.GetSockAddrHttp() + "/admin"
 	params := testutil.GraphQLParams{
 		Query: backupRequest,
 		Variables: map[string]interface{}{
@@ -304,7 +307,7 @@ func runBackupInternal(t *testing.T, forceFull bool, numExpectedFiles,
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&data))
 	require.Equal(t, "Success", testutil.JsonGet(data, "data", "backup", "response", "code").(string))
 	taskId := testutil.JsonGet(data, "data", "backup", "taskId").(string)
-	testutil.WaitForTask(t, taskId, true, testutil.SockAddrHttp)
+	testutil.WaitForTask(t, taskId, true, testutil.GetSockAddrHttp())
 
 	// Verify that the right amount of files and directories were created.
 	copyToLocalFs(t)
@@ -326,6 +329,17 @@ func runBackupInternal(t *testing.T, forceFull bool, numExpectedFiles,
 	err = json.Unmarshal(b, &manifest)
 	require.NoError(t, err)
 	require.Equal(t, numExpectedDirs, len(manifest.Manifests))
+
+	// manifest_summary.json is published right after manifest.json and must describe the same
+	// set of backups. The temporary summary object must not be left behind in the bucket.
+	b, err = os.ReadFile(filepath.Join(backupDir, "manifest_summary.json"))
+	require.NoError(t, err)
+
+	var summary worker.MasterManifestSummary
+	err = json.Unmarshal(b, &summary)
+	require.NoError(t, err)
+	require.Equal(t, numExpectedDirs, len(summary.Manifests))
+	require.NoFileExists(t, filepath.Join(backupDir, "manifest_summary_tmp.json"))
 
 	return dirs
 }
@@ -383,25 +397,25 @@ func dirCleanup(t *testing.T) {
 }
 
 func copyToLocalFs(t *testing.T) {
-	// List all the folders in the bucket.
-	lsCh1 := make(chan struct{})
-	defer close(lsCh1)
-	objectCh1 := mc.ListObjectsV2(bucketName, "", false, lsCh1)
+	objectCh1 := mc.ListObjects(context.Background(), bucketName,
+		minio.ListObjectsOptions{Prefix: "", Recursive: false})
 	for object := range objectCh1 {
 		require.NoError(t, object.Err)
-		if object.Key != "manifest.json" {
-			dstDir := backupDir + "/" + object.Key
+		// Only create local directories for backup sub-folder keys (end with "/").
+		// Root-level files like manifest.json and manifest_summary.json are not directories.
+		if strings.HasSuffix(object.Key, "/") {
+			dstDir := backupDir + "/" + strings.TrimSuffix(object.Key, "/")
 			require.NoError(t, os.MkdirAll(dstDir, os.ModePerm))
 		}
 
 		// Get all the files in that folder and copy them to the local filesystem.
-		lsCh2 := make(chan struct{})
-		objectCh2 := mc.ListObjectsV2(bucketName, "", true, lsCh2)
+		objectCh2 := mc.ListObjects(context.Background(), bucketName,
+			minio.ListObjectsOptions{Prefix: "", Recursive: true})
 		for object := range objectCh2 {
 			require.NoError(t, object.Err)
 			dstFile := backupDir + "/" + object.Key
-			require.NoError(t, mc.FGetObject(bucketName, object.Key, dstFile, minio.GetObjectOptions{}))
+			require.NoError(t, mc.FGetObject(context.Background(),
+				bucketName, object.Key, dstFile, minio.GetObjectOptions{}))
 		}
-		close(lsCh2)
 	}
 }

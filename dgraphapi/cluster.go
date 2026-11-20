@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -21,8 +21,8 @@ import (
 
 	"github.com/dgraph-io/dgo/v250"
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 const (
@@ -57,11 +57,16 @@ type HttpToken struct {
 // HTTPClient allows doing operations on Dgraph over http
 type HTTPClient struct {
 	*HttpToken
-	adminURL     string
-	graphqlURL   string
-	stateURL     string
-	dqlURL       string
-	dqlMutateUrl string
+	// AuthToken is the --security auth-token (poor man's auth). When set, it is sent as the
+	// X-Dgraph-AuthToken header so admin requests are accepted on a token-protected cluster.
+	AuthToken     string
+	adminURL      string
+	graphqlURL    string
+	stateURL      string
+	dqlURL        string
+	dqlMutateUrl  string
+	alphaStateUrl string
+	moveTabletURL string
 }
 
 // GraphQLParams are used for making graphql requests to dgraph
@@ -257,6 +262,9 @@ func (hc *HTTPClient) doPost(body []byte, url string, contentType string) ([]byt
 
 	if hc.HttpToken != nil {
 		req.Header.Add("X-Dgraph-AccessToken", hc.AccessJwt)
+	}
+	if hc.AuthToken != "" {
+		req.Header.Add("X-Dgraph-AuthToken", hc.AuthToken)
 	}
 
 	return DoReq(req)
@@ -511,14 +519,41 @@ func (hc *HTTPClient) RestoreTenant(c Cluster, backupPath string, backupId strin
 	return nil
 }
 
-// WaitForRestore waits for restore to complete on all alphas
+// transientClusterErr reports whether err looks like a temporary cluster condition that a poll
+// loop should retry through rather than fail on. Under load a restore can briefly put an alpha into
+// draining mode, time out its health endpoint, or drop quorum; none of these mean the restore failed.
+func transientClusterErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, s := range []string{
+		"the server is in draining mode",
+		"i/o timeout",
+		"connection refused",
+		"connection reset",
+		"EOF",
+		"context deadline exceeded",
+		"no such host",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// WaitForRestore waits for restore to complete on all alphas. A restore under load can transiently
+// fail health checks or lose quorum, so poll for a bounded time and retry through transient errors,
+// failing only on an unexpected error or if the restore never completes.
 func WaitForRestore(c Cluster) error {
+	const maxWaitAttempts = 300 // waitDurBeforeRetry (1s) apart => ~5m
 loop:
-	for {
+	for range maxWaitAttempts {
 		time.Sleep(waitDurBeforeRetry)
 
 		resp, err := c.AlphasHealth()
-		if err != nil && strings.Contains(err.Error(), "the server is in draining mode") {
+		if transientClusterErr(err) {
 			continue loop
 		} else if err != nil {
 			return err
@@ -540,7 +575,9 @@ loop2:
 		time.Sleep(waitDurBeforeRetry)
 
 		alphasLogs, err := c.AlphasLogs()
-		if err != nil {
+		if transientClusterErr(err) {
+			continue loop2
+		} else if err != nil {
 			return err
 		}
 
@@ -647,6 +684,25 @@ func (hc *HTTPClient) GetZeroState() (*LicenseResponse, error) {
 	return &stateResponse, nil
 }
 
+func (hc *HTTPClient) GetAlphaState() ([]byte, error) {
+	response, err := http.Get(hc.alphaStateUrl)
+	if err != nil {
+		return nil, errors.Wrap(err, "error getting alpha state http response")
+	}
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			log.Printf("[WARNING] error closing body: %v", err)
+		}
+	}()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, errors.Wrapf(err, "error reading zero state response body")
+	}
+
+	return body, nil
+}
+
 func (hc *HTTPClient) PostDqlQuery(query string) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodPost, hc.dqlURL, bytes.NewBufferString(query))
 	if err != nil {
@@ -674,6 +730,30 @@ func (hc *HTTPClient) Mutate(mutation string, commitNow bool) ([]byte, error) {
 		req.Header.Add("X-Dgraph-AccessToken", hc.AccessJwt)
 	}
 	return DoReq(req)
+}
+
+func (hc *HTTPClient) MoveTablet(predicate string, group uint32) error {
+	url := fmt.Sprintf("%s?tablet=%s&group=%d", hc.moveTabletURL, predicate, group)
+	response, err := http.Get(url)
+	if err != nil {
+		return errors.Wrapf(err, "error moving tablet via HTTP: predicate=%s, group=%d", predicate, group)
+	}
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			log.Printf("[WARNING] error closing body: %v", err)
+		}
+	}()
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return errors.Wrapf(err, "error reading move tablet response body")
+	}
+
+	if response.StatusCode != http.StatusOK {
+		return errors.Errorf("move tablet failed with status %d: %s", response.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 // SetupSchema sets up DQL schema
@@ -760,14 +840,19 @@ func GetHttpClient(alphaUrl, zeroUrl string) (*HTTPClient, error) {
 	adminUrl := "http://" + alphaUrl + "/admin"
 	graphQLUrl := "http://" + alphaUrl + "/graphql"
 	stateUrl := "http://" + zeroUrl + "/state"
+	alphaStateUrl := "http://" + alphaUrl + "/state"
+
 	dqlUrl := "http://" + alphaUrl + "/query"
 	dqlMutateUrl := "http://" + alphaUrl + "/mutate"
+	moveTabletUrl := "http://" + zeroUrl + "/moveTablet"
 	return &HTTPClient{
-		adminURL:     adminUrl,
-		graphqlURL:   graphQLUrl,
-		stateURL:     stateUrl,
-		dqlURL:       dqlUrl,
-		dqlMutateUrl: dqlMutateUrl,
-		HttpToken:    &HttpToken{},
+		adminURL:      adminUrl,
+		graphqlURL:    graphQLUrl,
+		moveTabletURL: moveTabletUrl,
+		stateURL:      stateUrl,
+		dqlURL:        dqlUrl,
+		dqlMutateUrl:  dqlMutateUrl,
+		alphaStateUrl: alphaStateUrl,
+		HttpToken:     &HttpToken{},
 	}, nil
 }

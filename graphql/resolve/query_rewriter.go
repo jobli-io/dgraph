@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -17,10 +17,10 @@ import (
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
 
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 type queryRewriter struct{}
@@ -145,14 +145,16 @@ func getAuthSelector(queryType schema.QueryType) func(t schema.Type) *schema.Rul
 	return queryAuthSelector
 }
 
-// Rewrite rewrites a GraphQL query into DQL.
+// Rewrite rewrites a GraphQL query into DQL. It also returns any DQL variable
+// bindings (e.g. parameterized password values) that must be passed to the
+// executor alongside the query string.
 func (qr *queryRewriter) Rewrite(
 	ctx context.Context,
-	gqlQuery schema.Query) ([]*dql.GraphQuery, error) {
+	gqlQuery schema.Query) ([]*dql.GraphQuery, map[string]string, error) {
 
 	customClaims, err := gqlQuery.GetAuthMeta().ExtractCustomClaims(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	isSelective := false
@@ -174,17 +176,18 @@ func (qr *queryRewriter) Rewrite(
 	authRw.hasCascade = hasCascadeDirective(gqlQuery)
 
 	var dgQuery []*dql.GraphQuery
+	var vars map[string]string
 	switch gqlQuery.QueryType() {
 	case schema.GetQuery:
 		xid, uid, err := gqlQuery.IDArgValue()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		dgQuery = rewriteAsGet(gqlQuery, uid, xid, authRw)
 	case schema.SimilarByIdQuery:
 		xid, uid, err := gqlQuery.IDArgValue()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		dgQuery = rewriteAsSimilarByIdQuery(gqlQuery, uid, xid, authRw)
 	case schema.SimilarByEmbeddingQuery:
@@ -192,28 +195,28 @@ func (qr *queryRewriter) Rewrite(
 	case schema.FilterQuery:
 		dgQuery = rewriteAsQuery(gqlQuery, authRw, gqlQuery.Alias())
 	case schema.PasswordQuery:
-		dgQuery, err = passwordQuery(gqlQuery, authRw)
+		dgQuery, vars, err = passwordQuery(gqlQuery, authRw)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	case schema.AggregateQuery:
 		dgQuery = aggregateQuery(gqlQuery, authRw)
 	case schema.GroupByQuery:
 		dgQuery, err = groupByQuery(gqlQuery, authRw)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	case schema.EntitiesQuery:
 		dgQuery, err = entitiesQuery(gqlQuery, authRw)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	default:
-		return nil, errors.Errorf("unimplemented query type %s", gqlQuery.QueryType())
+		return nil, nil, errors.Errorf("unimplemented query type %s", gqlQuery.QueryType())
 	}
 
 	applyQueryPlanInversion(dgQuery)
-	return dgQuery, nil
+	return dgQuery, vars, nil
 }
 
 // entitiesQuery rewrites the Apollo `_entities` Query which is sent from the Apollo gateway to a DQL query.
@@ -793,17 +796,18 @@ func groupByQuery(query schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, 
 	return result, nil
 }
 
-func passwordQuery(m schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, error) {
+func passwordQuery(m schema.Query, authRw *authRewriter) (
+	[]*dql.GraphQuery, map[string]string, error) {
 	xid, uid, err := m.IDArgValue()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	dgQuery := rewriteAsGet(m, uid, xid, authRw)
 
 	// Handle empty dgQuery
 	if strings.HasSuffix(dgQuery[0].Attr, "()") {
-		return dgQuery, nil
+		return dgQuery, nil, nil
 	}
 
 	// mainQuery is the query with check<Type>Password as Attr.
@@ -815,15 +819,24 @@ func passwordQuery(m schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, err
 	predicate := queriedType.DgraphPredicate(name)
 	password := m.ArgValue(name).(string)
 
+	// Parameterize the password as a DQL variable so the value is bound by
+	// the executor rather than interpolated into the query string. This
+	// prevents DQL injection via passwords containing characters such as
+	// a double-quote.
+	const pwdVar = "$pwd0"
+	if mainQuery.Args == nil {
+		mainQuery.Args = make(map[string]string)
+	}
+	mainQuery.Args[pwdVar] = "string"
+
 	// This adds the checkPwd function
 	op := &dql.GraphQuery{
 		Attr:   "checkPwd",
 		Func:   mainQuery.Func,
 		Filter: mainQuery.Filter,
 		Children: []*dql.GraphQuery{{
-			Var: "pwd",
-			Attr: fmt.Sprintf(`checkpwd(%s, "%s")`, predicate,
-				password),
+			Var:  "pwd",
+			Attr: fmt.Sprintf(`checkpwd(%s, %s)`, predicate, pwdVar),
 		}},
 	}
 
@@ -850,7 +863,7 @@ func passwordQuery(m schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, err
 
 	mainQuery.Filter = ft
 
-	return append(dgQuery, op), nil
+	return append(dgQuery, op), map[string]string{pwdVar: password}, nil
 }
 
 func intersection(a, b []uint64) []uint64 {
@@ -1143,9 +1156,9 @@ func rewriteAsSimilarByIdQuery(
 	distanceFormula := "math(sqrt((v2 - v1) dot (v2 - v1)))" // default - euclidean
 
 	if metric == schema.SimilarSearchMetricDotProduct {
-		distanceFormula = "math((1.0 - (v1 dot v2)) /2.0)"
+		distanceFormula = "math(1.0 - (v1 dot v2))"
 	} else if metric == schema.SimilarSearchMetricCosine {
-		distanceFormula = "math((1.0 - ((v1 dot v2) / sqrt( (v1 dot v1) * (v2 dot v2) ) )) / 2.0)"
+		distanceFormula = "math(1.0 - ((v1 dot v2) / sqrt( (v1 dot v1) * (v2 dot v2) )))"
 	}
 
 	// First generate the query to fetch the uid
@@ -1190,6 +1203,32 @@ func rewriteAsSimilarByIdQuery(
 	//	  v2 as Product.embedding
 	//	  distance as math((v2 - v1) dot (v2 - v1))
 	//  }
+	similarToArgs := []dql.Arg{
+		{
+			Value: pred,
+		},
+		{
+			Value: fmt.Sprintf("%v", topK),
+		},
+		{
+			Value: "val(v1)",
+		},
+	}
+
+	// Add optional ef parameter if provided (using "ef: value" format)
+	if ef := query.ArgValue(schema.SimilarEfArgName); ef != nil {
+		similarToArgs = append(similarToArgs,
+			dql.Arg{Value: fmt.Sprintf("%s: %v", schema.SimilarEfArgName, ef)},
+		)
+	}
+
+	// Add optional distance_threshold parameter if provided (using "distance_threshold: value" format)
+	if dt := query.ArgValue(schema.SimilarDistanceThresholdArgName); dt != nil {
+		similarToArgs = append(similarToArgs,
+			dql.Arg{Value: fmt.Sprintf("%s: %v", schema.SimilarDistanceThresholdArgName, dt)},
+		)
+	}
+
 	similarQuery := &dql.GraphQuery{
 		Attr: "var",
 		Children: []*dql.GraphQuery{
@@ -1204,17 +1243,7 @@ func rewriteAsSimilarByIdQuery(
 		},
 		Func: &dql.Function{
 			Name: "similar_to",
-			Args: []dql.Arg{
-				{
-					Value: pred,
-				},
-				{
-					Value: fmt.Sprintf("%v", topK),
-				},
-				{
-					Value: "val(v1)",
-				},
-			},
+			Args: similarToArgs,
 		},
 	}
 
@@ -1335,10 +1364,10 @@ func rewriteAsSimilarByEmbeddingQuery(
 	distanceFormula := "math(sqrt((v2 - $search_vector) dot (v2 - $search_vector)))" // default = euclidean
 
 	if metric == schema.SimilarSearchMetricDotProduct {
-		distanceFormula = "math(( 1.0 - (($search_vector) dot v2)) /2.0)"
+		distanceFormula = "math(1.0 - (($search_vector) dot v2))"
 	} else if metric == schema.SimilarSearchMetricCosine {
-		distanceFormula = "math((1.0 - ( (($search_vector) dot v2) / sqrt( (($search_vector) dot ($search_vector))" +
-			" * (v2 dot v2) ) )) / 2.0)"
+		distanceFormula = "math(1.0 - ((($search_vector) dot v2) / sqrt( (($search_vector) dot ($search_vector))" +
+			" * (v2 dot v2) )))"
 	}
 
 	// Save vectorString as a query variable, $search_vector
@@ -1358,13 +1387,33 @@ func rewriteAsSimilarByEmbeddingQuery(
 	// the search vector
 	dgQuery[0].Attr = "var"
 	similarToArgs := []dql.Arg{
-		{Value: pred},
-		{Value: fmt.Sprintf("%v", topK)},
-		{Value: "$search_vector"},
+		{
+			Value: pred,
+		},
+		{
+			Value: fmt.Sprintf("%v", topK),
+		},
+		{
+			Value: "$search_vector",
+		},
 	}
-	// Only include the distance threshold when explicitly set by the user (non-zero).
-	if distanceThreshold != 0 {
-		similarToArgs = append(similarToArgs, dql.Arg{Value: fmt.Sprintf("%v", distanceThreshold)})
+
+	// Add optional ef parameter if provided (using "ef: value" format)
+	if ef := query.ArgValue(schema.SimilarEfArgName); ef != nil {
+		similarToArgs = append(similarToArgs,
+			dql.Arg{Value: fmt.Sprintf("%s: %v", schema.SimilarEfArgName, ef)},
+		)
+	}
+
+	// Add optional distance_threshold parameter if provided (using "distance_threshold: value" format)
+	if dt := query.ArgValue(schema.SimilarDistanceThresholdArgName); dt != nil {
+		similarToArgs = append(similarToArgs,
+			dql.Arg{Value: fmt.Sprintf("%s: %v", schema.SimilarDistanceThresholdArgName, dt)},
+		)
+	} else if distanceThreshold != 0 {
+		similarToArgs = append(similarToArgs,
+			dql.Arg{Value: fmt.Sprintf("%s: %v", schema.SimilarDistanceThresholdArgName, distanceThreshold)},
+		)
 	}
 	dgQuery[0].Func = &dql.Function{
 		Name: "similar_to",
@@ -4528,7 +4577,7 @@ func buildFilter(typ schema.Type,
 					}
 				case "between":
 					// numLikes: { between : { min : 10,  max:100 }} should be rewritten into
-					// 	between(numLikes,10,20). Order of arguments (min,max) is neccessary or
+					// 	between(numLikes,10,20). Order of arguments (min,max) is necessary or
 					// it will return empty
 					vals := val.(map[string]interface{})
 					args = append(args, dql.Arg{Value: maybeQuoteArg(fn, vals["min"])},
@@ -4780,7 +4829,13 @@ func buildUnionFilter(typ schema.Type,
 func maybeQuoteArg(fn string, arg interface{}) string {
 	switch arg := arg.(type) {
 	case string: // dateTime also parsed as string
-		if fn == "regexp" {
+		// A regexp argument is a /.../ literal, so it can't be %q-quoted like
+		// other operators — it's written into the DQL query verbatim. Only pass
+		// it through raw when it is a single, self-contained regexp literal;
+		// otherwise fall through and quote it, which contains an injection
+		// payload as an ordinary string arg. See isValidRegexArg
+		// (GHSA-33p8-wc97-5qcj, CWE-943).
+		if fn == "regexp" && isValidRegexArg(arg) {
 			return arg
 		}
 		return fmt.Sprintf("%q", arg)
@@ -4789,6 +4844,53 @@ func maybeQuoteArg(fn string, arg interface{}) string {
 	default:
 		return fmt.Sprintf("%v", arg)
 	}
+}
+
+// isValidRegexArg reports whether s is a single, self-contained DQL regexp
+// literal — a leading '/', a pattern terminated by the first following
+// unescaped '/', and then only regexp flag characters ([a-zA-Z]). This mirrors
+// dql.lexRegex, which decides how the value is tokenized once it reaches
+// Dgraph: anything after the closing '/' that is not a flag would lex into
+// additional DQL tokens.
+//
+// The GraphQL rewriter writes regexp arguments into the DQL query string
+// verbatim. Without this check a crafted value such as `/x/) OR has(pred`
+// closes the regexp() call and appends attacker-controlled DQL, letting an
+// unauthenticated caller bypass the intended filter and read every node of the
+// type (GHSA-33p8-wc97-5qcj, CWE-943). Callers quote the value when this
+// returns false, containing it as an ordinary string argument.
+func isValidRegexArg(s string) bool {
+	if len(s) < 2 || s[0] != '/' {
+		return false
+	}
+	// Find the closing '/', honoring backslash escapes, exactly as dql.lexRegex.
+	closed := false
+	i := 1
+	for i < len(s) {
+		switch s[i] {
+		case '\\':
+			i += 2 // skip the escaped character
+			continue
+		case '/':
+			i++
+			closed = true
+		}
+		if closed {
+			break
+		}
+		i++
+	}
+	if !closed {
+		return false // unclosed regexp
+	}
+	// Everything after the closing '/' must be a regexp flag; anything else
+	// would tokenize into additional DQL.
+	for ; i < len(s); i++ {
+		if c := s[i]; !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return false
+		}
+	}
+	return true
 }
 
 // first returns the first element it finds in a map - we bump into lots of one-element

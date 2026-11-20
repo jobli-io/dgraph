@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -21,21 +21,21 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/minio/minio-go/v6"
+	"github.com/minio/minio-go/v7"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
 	bpb "github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/dgraph-io/dgraph/v25/enc"
+	"github.com/dgraph-io/dgraph/v25/posting"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/tok/hnsw"
+	"github.com/dgraph-io/dgraph/v25/types"
+	"github.com/dgraph-io/dgraph/v25/types/facets"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/enc"
-	"github.com/hypermodeinc/dgraph/v25/posting"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/tok/hnsw"
-	"github.com/hypermodeinc/dgraph/v25/types"
-	"github.com/hypermodeinc/dgraph/v25/types/facets"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // DefaultExportFormat stores the name of the default format for exports.
@@ -218,8 +218,8 @@ func (e *exporter) toRDF() (*bpb.KVList, error) {
 
 	prefix := fmt.Sprintf(uidFmtStrRdf+" <%s> ", e.uid, e.attr)
 	err := e.pl.Iterate(e.readTs, 0, func(p *pb.Posting) error {
-		fmt.Fprint(bp, prefix)
 		if p.PostingType == pb.Posting_REF {
+			fmt.Fprint(bp, prefix)
 			fmt.Fprintf(bp, uidFmtStrRdf, p.Uid)
 		} else {
 			val := types.Val{Tid: types.TypeID(p.ValType), Value: p.Value}
@@ -228,6 +228,7 @@ func (e *exporter) toRDF() (*bpb.KVList, error) {
 				glog.Errorf("Ignoring error: %+v\n", err)
 				return nil
 			}
+			fmt.Fprint(bp, prefix)
 			fmt.Fprintf(bp, "%s", escapedString(str))
 
 			tid := types.TypeID(p.ValType)
@@ -540,7 +541,6 @@ func (r *remoteExportStorage) OpenFile(fileName string) (*ExportWriter, error) {
 }
 
 func (r *remoteExportStorage) FinishWriting(w *Writers) (ExportedFiles, error) {
-
 	defer func() {
 		glog.Infof("Deleting temporary export directory %s\n", r.les.destination)
 		if err := os.RemoveAll(r.les.destination); err != nil {
@@ -563,7 +563,7 @@ func (r *remoteExportStorage) FinishWriting(w *Writers) (ExportedFiles, error) {
 		filePath := filepath.Join(r.les.destination, f)
 		// FIXME: tejas [06/2020] - We could probably stream these results, but it's easier to copy for now
 		glog.Infof("Uploading from %s to %s\n", filePath, d)
-		_, err := r.mc.FPutObject(r.bucket, d, filePath, minio.PutObjectOptions{
+		_, err := r.mc.FPutObject(context.Background(), r.bucket, d, filePath, minio.PutObjectOptions{
 			ContentType: "application/gzip",
 		})
 		if err != nil {

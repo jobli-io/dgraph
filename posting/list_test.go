@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -22,11 +22,11 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	bpb "github.com/dgraph-io/badger/v4/pb"
 	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/dgraph-io/dgraph/v25/codec"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/codec"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func setMaxListSize(newMaxListSize int) {
@@ -124,6 +124,7 @@ func TestGetSinglePosting(t *testing.T) {
 
 	res, err := l.StaticValue(1)
 	require.NoError(t, err)
+	fmt.Println(res, res == nil)
 	require.Equal(t, res == nil, true)
 
 	l.plist = create_pl(1, 1)
@@ -254,7 +255,7 @@ func TestAddMutation_jchiu1(t *testing.T) {
 	key := x.DataKey(x.AttrInRootNamespace(x.AttrInRootNamespace("value")), 12)
 	ol, err := GetNoStore(key, math.MaxUint64)
 	require.NoError(t, err)
-
+	ol.mutationMap.setTs(1)
 	// Set value to cars and merge to BadgerDB.
 	edge := &pb.DirectedEdge{
 		Value: []byte("cars"),
@@ -297,6 +298,7 @@ func TestAddMutation_DelSet(t *testing.T) {
 	key := x.DataKey(x.AttrInRootNamespace(x.AttrInRootNamespace("value")), 1534)
 	ol, err := GetNoStore(key, math.MaxUint64)
 	require.NoError(t, err)
+	ol.mutationMap.setTs(1)
 
 	// DO sp*, don't commit
 	// Del a value cars and but don't merge.
@@ -312,6 +314,7 @@ func TestAddMutation_DelSet(t *testing.T) {
 		Value: []byte("newcars"),
 	}
 	ol1, err := GetNoStore(key, math.MaxUint64)
+	ol1.mutationMap.setTs(2)
 	require.NoError(t, err)
 	txn = &Txn{StartTs: 2}
 	addMutationHelper(t, ol1, edge, Set, txn)
@@ -323,6 +326,7 @@ func TestAddMutation_DelSet(t *testing.T) {
 func TestAddMutation_DelRead(t *testing.T) {
 	key := x.DataKey(x.AttrInRootNamespace(x.AttrInRootNamespace("value")), 1543)
 	ol, err := GetNoStore(key, math.MaxUint64)
+	ol.mutationMap.setTs(1)
 	require.NoError(t, err)
 
 	// Set value to newcars, and commit it
@@ -361,6 +365,7 @@ func TestAddMutation_DelRead(t *testing.T) {
 func TestAddMutation_jchiu2(t *testing.T) {
 	key := x.DataKey(x.AttrInRootNamespace(x.AttrInRootNamespace("value")), 15)
 	ol, err := GetNoStore(key, math.MaxUint64)
+	ol.mutationMap.setTs(1)
 	require.NoError(t, err)
 
 	// Del a value cars and but don't merge.
@@ -383,6 +388,7 @@ func TestAddMutation_jchiu2(t *testing.T) {
 func TestAddMutation_jchiu2_Commit(t *testing.T) {
 	key := x.DataKey(x.AttrInRootNamespace(x.AttrInRootNamespace("value")), 16)
 	ol, err := GetNoStore(key, math.MaxUint64)
+	ol.mutationMap.setTs(1)
 	require.NoError(t, err)
 
 	// Del a value cars and but don't merge.
@@ -408,6 +414,7 @@ func TestAddMutation_jchiu2_Commit(t *testing.T) {
 func TestAddMutation_jchiu3(t *testing.T) {
 	key := x.DataKey(x.AttrInRootNamespace("value"), 29)
 	ol, err := GetNoStore(key, math.MaxUint64)
+	ol.mutationMap.setTs(1)
 	require.NoError(t, err)
 
 	// Set value to cars and merge to BadgerDB.
@@ -448,6 +455,7 @@ func TestAddMutation_jchiu3(t *testing.T) {
 func TestAddMutation_mrjn1(t *testing.T) {
 	key := x.DataKey(x.AttrInRootNamespace("value"), 21)
 	ol, err := GetNoStore(key, math.MaxUint64)
+	ol.mutationMap.setTs(1)
 	require.NoError(t, err)
 
 	// Set a value cars and merge.
@@ -500,7 +508,7 @@ func TestReadSingleValue(t *testing.T) {
 	// and GetSingeValueForKey works without an issue.
 
 	key := x.DataKey(x.AttrInRootNamespace("value"), 1240)
-	ol, err := getNew(key, ps, math.MaxUint64)
+	ol, err := getNew(key, ps, math.MaxUint64, false)
 	require.NoError(t, err)
 	N := uint64(10000)
 	for i := uint64(2); i <= N; i += 2 {
@@ -524,8 +532,8 @@ func TestReadSingleValue(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, writePostingListToDisk(kvs))
 			// Delete item from global cache before reading, as we are not updating the cache in the test
-			memoryLayer.del(key)
-			ol, err = getNew(key, ps, math.MaxUint64)
+			MemLayerInstance.del(key)
+			ol, err = getNew(key, ps, math.MaxUint64, false)
 			require.NoError(t, err)
 		}
 
@@ -1824,5 +1832,136 @@ func BenchmarkAddMutations(b *testing.B) {
 		if err = l.addMutation(ctx, txn, edge); err != nil {
 			b.Error(err)
 		}
+	}
+}
+
+// TestCalculatedUidsRespectReadTs is a regression test for issue #9795: calculatedUids is
+// computed at the newest commit in the list (committedUidsTime), so a read at an older
+// timestamp must not be served from it, or later mutations leak into an earlier snapshot.
+func TestCalculatedUidsRespectReadTs(t *testing.T) {
+	key := x.DataKey(x.AttrInRootNamespace("calculatedUidsReadTs"), 7)
+
+	txn := NewTxn(5)
+	l, err := txn.Get(key)
+	require.NoError(t, err)
+	for _, uid := range []uint64{3, 4, 10} {
+		addMutationHelper(t, l, &pb.DirectedEdge{ValueId: uid}, Set, txn)
+	}
+	require.NoError(t, l.commitMutation(5, 10))
+
+	txn = NewTxn(15)
+	addMutationHelper(t, l, &pb.DirectedEdge{ValueId: 4}, Del, txn)
+	addMutationHelper(t, l, &pb.DirectedEdge{ValueId: 13}, Set, txn)
+	require.NoError(t, l.commitMutation(15, 20))
+
+	// Precompute the uid slice. It represents the newest state (commit ts 20).
+	_, err = l.calculateUids()
+	require.NoError(t, err)
+	require.True(t, l.canUseCalculatedUids(20))
+	require.True(t, l.canUseCalculatedUids(25))
+	require.False(t, l.canUseCalculatedUids(15),
+		"a read below the timestamp the slice was computed at must not use it")
+
+	uidsAt := func(readTs uint64) []uint64 {
+		out, err := l.Uids(ListOptions{ReadTs: readTs})
+		require.NoError(t, err)
+		return out.Uids
+	}
+	// Reads at or after the newest commit see the newest state.
+	require.Equal(t, []uint64{3, 10, 13}, uidsAt(20))
+	require.Equal(t, []uint64{3, 10, 13}, uidsAt(25))
+	// A read between the two commits must see the ts=10 state, not the precomputed one.
+	require.Equal(t, []uint64{3, 4, 10}, uidsAt(15))
+	// A read before every commit sees nothing.
+	require.Empty(t, uidsAt(5))
+}
+
+func TestCalculatedUidsSkippedForBoundedReads(t *testing.T) {
+	key := x.DataKey(x.AttrInRootNamespace("calculatedUidsBoundedReads"), 7)
+
+	txn := NewTxn(5)
+	l, err := txn.Get(key)
+	require.NoError(t, err)
+	for _, uid := range []uint64{2, 3, 4} {
+		addMutationHelper(t, l, &pb.DirectedEdge{ValueId: uid}, Set, txn)
+	}
+	require.NoError(t, l.commitMutation(5, 10))
+	_, err = l.calculateUids()
+	require.NoError(t, err)
+	require.True(t, l.canUseCalculatedUids(10))
+
+	l.Lock()
+	l.mutationMap.calculatedUids = []uint64{100, 101}
+	l.Unlock()
+
+	unbounded, err := l.Uids(ListOptions{ReadTs: 10})
+	require.NoError(t, err)
+	require.Equal(t, []uint64{100, 101}, unbounded.Uids)
+
+	workerUnbounded, err := l.Uids(ListOptions{ReadTs: 10, First: math.MaxInt32})
+	require.NoError(t, err)
+	require.Equal(t, []uint64{100, 101}, workerUnbounded.Uids)
+
+	first, err := l.Uids(ListOptions{ReadTs: 10, First: 1})
+	require.NoError(t, err)
+	require.Equal(t, []uint64{2}, first.Uids)
+
+	// A negative first is unbounded as far as the read is concerned, so it is served from the
+	// memoized slice, whole. The poisoned values are what tell the paths apart: {100, 101} could
+	// only have come from the memo, and both of them coming back is what shows it is not trimmed.
+	negative, err := l.Uids(ListOptions{ReadTs: 10, First: -1})
+	require.NoError(t, err)
+	require.Equal(t, []uint64{100, 101}, negative.Uids)
+
+	intersect, err := l.Uids(ListOptions{
+		ReadTs:    10,
+		Intersect: &pb.List{Uids: []uint64{3}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []uint64{3}, intersect.Uids)
+}
+
+// A negative first must not be applied by Uids at all. For an index read the worker post-filters
+// the list it gets back -- handleCompareFunction against the real values when the tokenizer is
+// lossy, filterGeoFunction against the real geometry -- and a uid trimmed off here is one that
+// filter never sees. The query layer applies the count itself, over the filtered result, with
+// x.PageRange. Both read paths are checked, because they reach the tail differently.
+func TestUidsDoesNotApplyANegativeFirst(t *testing.T) {
+	next := 0
+	build := func(warmed bool) *List {
+		next++
+		key := x.DataKey(x.AttrInRootNamespace(fmt.Sprintf("negativeFirstNotApplied%d", next)), 7)
+		txn := NewTxn(5)
+		l, err := txn.Get(key)
+		require.NoError(t, err)
+		for _, uid := range []uint64{2, 4, 6, 8, 10} {
+			addMutationHelper(t, l, &pb.DirectedEdge{ValueId: uid}, Set, txn)
+		}
+		require.NoError(t, l.commitMutation(5, 10))
+		if warmed {
+			_, err := l.calculateUids()
+			require.NoError(t, err)
+			require.True(t, l.canUseCalculatedUids(10))
+		} else {
+			require.False(t, l.mutationMap.isUidsCalculated)
+		}
+		return l
+	}
+
+	all := []uint64{2, 4, 6, 8, 10}
+	for _, first := range []int{-1, -2, -4, -5, -9, math.MinInt32, math.MinInt} {
+		for _, warmed := range []bool{false, true} {
+			got, err := build(warmed).Uids(ListOptions{ReadTs: 10, First: first})
+			require.NoError(t, err)
+			require.Equal(t, all, got.Uids, "first: %d, warmed: %t", first, warmed)
+		}
+	}
+
+	// AfterUid still applies: it bounds which uids exist for this read, rather than how many of
+	// them to return.
+	for _, warmed := range []bool{false, true} {
+		got, err := build(warmed).Uids(ListOptions{ReadTs: 10, First: -2, AfterUid: 4})
+		require.NoError(t, err)
+		require.Equal(t, []uint64{6, 8, 10}, got.Uids, "warmed: %t", warmed)
 	}
 }

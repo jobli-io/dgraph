@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -26,7 +26,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
@@ -36,9 +35,18 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/tools/go/packages"
 
+	"github.com/dgraph-io/dgraph/v25/buildvars"
+	"github.com/dgraph-io/dgraph/v25/testutil"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/testutil"
-	"github.com/hypermodeinc/dgraph/v25/x"
+)
+
+const (
+	// Cluster configuration constants
+	NumZeroNodes  = 3
+	NumAlphaNodes = 6
+	ZeroPort      = 6080
+	AlphaPort     = 8080
 )
 
 var (
@@ -79,13 +87,19 @@ var (
 		"Don't bring up a cluster, instead use an existing cluster with this prefix.")
 	skipSlow = pflag.BoolP("skip-slow", "s", false,
 		"If true, don't run tests on slow packages.")
-	suite = pflag.String("suite", "unit", "This flag is used to specify which "+
-		"test suites to run. Possible values are all, ldbc, load, unit, systest, vector, core. Multiple suites can be "+
-		"selected like --suite=ldbc,load")
+	suite = pflag.String("suite", "integration", "This flag is used to specify which "+
+		"test suites to run. Possible values are all, ldbc, load, unit, integration, systest, "+
+		"systest-baseline, systest-heavy, vector, core. Multiple suites can be "+
+		"selected like --suite=ldbc,load. "+
+		"unit = true unit tests only (no Docker, no integration tag). "+
+		"integration = everything except ldbc, load, and systest-heavy (with Docker). "+
+		"systest = systest-baseline + systest-heavy.")
 	tmp               = pflag.String("tmp", "", "Temporary directory used to download data.")
 	downloadResources = pflag.BoolP("download", "d", true,
 		"Flag to specify whether to download resources or not")
-	race = pflag.Bool("race", false, "Set true to build with race")
+	race        = pflag.Bool("race", false, "Set true to build with race")
+	testTimeout = pflag.String("timeout", "",
+		"Timeout for each test package (e.g. 60m, 2h). Defaults to 30m (180m with --race).")
 	skip = pflag.String("skip", "",
 		"comma separated list of packages that needs to be skipped. "+
 			"Package Check uses string.Contains(). Please check the flag carefully")
@@ -143,9 +157,9 @@ func commandWithContext(ctx context.Context, args ...string) *exec.Cmd {
 		cmd.Env = append(cmd.Env, "COVERAGE_OUTPUT=--test.coverprofile=coverage.out")
 	}
 	if runtime.GOARCH == "arm64" {
-		cmd.Env = append(cmd.Env, "MINIO_IMAGE_ARCH=RELEASE.2020-11-13T20-10-18Z-arm64")
 		cmd.Env = append(cmd.Env, "NFS_SERVER_IMAGE_ARCH=11-arm")
 	}
+	cmd.Env = append(cmd.Env, EnvForCompose()...)
 
 	return cmd
 }
@@ -162,34 +176,148 @@ func command(args ...string) *exec.Cmd {
 	return commandWithContext(ctxb, args...)
 }
 
-func startCluster(composeFile, prefix string) error {
-	cmd := command(
-		"docker", "compose", "--compatibility", "-f", composeFile, "-p", prefix,
-		"up", "--force-recreate", "--build", "--remove-orphans", "--detach")
-	cmd.Stderr = nil
+// ensureGoPathLinuxBinEnvVarSet sets LINUX_GOBIN environment variable if not already set.
+// On Linux, it defaults to $GOPATH/bin. On other systems (macOS, etc.), it defaults
+// to $GOPATH/linux_$GOARCH/bin to support cross-compiled Linux binaries for Docker tests.
+func ensureGoPathLinuxBinEnvVarSet() {
+	if os.Getenv("LINUX_GOBIN") != "" {
+		return // already set
+	}
 
-	fmt.Printf("Bringing up cluster %s for package: %s ...\n", prefix, composeFile)
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(os.Getenv("HOME"), "go")
+	}
+
+	var gopathLinuxBin string
+	if runtime.GOOS == "linux" {
+		gopathLinuxBin = filepath.Join(gopath, "bin")
+	} else {
+		gopathLinuxBin = filepath.Join(gopath, "linux_"+runtime.GOARCH)
+	}
+	os.Setenv("LINUX_GOBIN", gopathLinuxBin)
+}
+
+// ensureDgraphLinuxBinary checks if the dgraph binary exists under LINUX_GOBIN.
+// If not found, it runs make install to build it.
+func ensureDgraphLinuxBinary() error {
+	ensureGoPathLinuxBinEnvVarSet()
+	gopathLinuxBin := os.Getenv("LINUX_GOBIN")
+	dgraphBin := filepath.Join(gopathLinuxBin, buildvars.BinaryName.Get())
+
+	if _, err := os.Stat(dgraphBin); err == nil {
+		return nil // binary exists
+	}
+
+	fmt.Printf("Dgraph binary not found at %s, building...\n", dgraphBin)
+	var cmd *exec.Cmd
+	if *race {
+		cmd = command("make", "BUILD_RACE=y", "install")
+	} else {
+		cmd = command("make", "install")
+	}
+	cmd.Dir = *baseDir
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("While running command: %q Error: %v\n",
-			strings.Join(cmd.Args, " "), err)
+		return fmt.Errorf("failed to build dgraph binary: %w", err)
+	}
+	fmt.Printf("Dgraph binary built successfully at %s\n", dgraphBin)
+	return nil
+}
+
+func startCluster(composeFile, prefix string) error {
+	ensureGoPathLinuxBinEnvVarSet()
+
+	if os.Getenv("GOPATH") == "" {
+		return fmt.Errorf("GOPATH environment variable is required but not set")
+	}
+
+	if err := ensureDgraphLinuxBinary(); err != nil {
 		return err
+	}
+	// + --project-directory so relative bind-mount sources resolve against the
+	// pristine test package dir.
+	composeArgs := ComposeFileArgs(composeFile, *baseDir)
+	upArgs := append([]string{"docker", "compose", "--compatibility"},
+		append(composeArgs, "-p", prefix, "up", "--force-recreate", "--build", "--remove-orphans", "--detach")...)
+
+	// docker compose `up` on a shared named volume can race on initial
+	// volume population when multiple containers using the same volume
+	// start concurrently ("failed to mkdir .../_data/<entry>: file exists").
+	// Retry once after a full `down -v` — the second attempt finds a fresh
+	// volume and succeeds. One retry is enough in practice for this class
+	// of race; anything persistent is a real configuration error.
+	const upAttempts = 3
+	var lastErr error
+	var cmdStderr strings.Builder
+	fmt.Printf("Bringing up cluster %s for package: %s ...\n", prefix, composeFile)
+	for attempt := 1; attempt <= upAttempts; attempt++ {
+		cmdStderr.Reset()
+		cmd := command(upArgs...)
+		cmd.Stderr = &cmdStderr
+		if err := cmd.Run(); err == nil {
+			lastErr = nil
+			break
+		} else {
+			lastErr = err
+			stderr := cmdStderr.String()
+			fmt.Printf("Bring-up attempt %d/%d failed: %v\n", attempt, upAttempts, err)
+			if stderr != "" {
+				fmt.Printf("docker compose stderr:\n%s\n", stderr)
+			}
+			if attempt < upAttempts {
+				// Tear down any partial state so the retry starts from a
+				// clean volume/network baseline. Run `down -v` to remove
+				// the volume the next attempt will recreate, then sleep
+				// briefly so docker has time to release the mount points
+				// before the next `up` tries to populate a fresh volume.
+				// Without the sleep, the retry can hit the same volume-
+				// init race the first attempt did.
+				downArgs := append([]string{"docker", "compose", "--compatibility"},
+					append(composeArgs, "-p", prefix, "down", "-v")...)
+				downCmd := command(downArgs...)
+				downCmd.Stderr = nil
+				_ = downCmd.Run()
+				time.Sleep(2 * time.Second)
+				fmt.Printf("Retrying cluster bring-up (attempt %d/%d) after `down -v`...\n", attempt+1, upAttempts)
+			}
+		}
+	}
+	if lastErr != nil {
+		fmt.Printf("While running command: %q Error: %v\n",
+			strings.Join(upArgs, " "), lastErr)
+		return lastErr
 	}
 	fmt.Printf("CLUSTER UP: %s. Package: %s\n", prefix, composeFile)
 
-	// Wait for cluster to be healthy.
-	for i := 1; i <= 3; i++ {
-		in := testutil.GetContainerInstance(prefix, "zero"+strconv.Itoa(i))
-		if err := in.BestEffortWaitForHealthy(6080); err != nil {
-			fmt.Printf("Error while checking zero health %s. Error %v", in.Name, err)
-		}
+	// Wait for cluster to be healthy using concurrent health checks
+	var wg sync.WaitGroup
 
+	// Check zero nodes health concurrently
+	for i := 1; i <= NumZeroNodes; i++ {
+		wg.Add(1)
+		go func(nodeNum int) {
+			defer wg.Done()
+			in := testutil.GetContainerInstance(prefix, "zero"+strconv.Itoa(nodeNum))
+			if err := in.BestEffortWaitForHealthy(ZeroPort); err != nil {
+				fmt.Printf("Error while checking zero health %s. Error %v\n", in.Name, err)
+			}
+		}(i)
 	}
-	for i := 1; i <= 6; i++ {
-		in := testutil.GetContainerInstance(prefix, "alpha"+strconv.Itoa(i))
-		if err := in.BestEffortWaitForHealthy(8080); err != nil {
-			fmt.Printf("Error while checking alpha health %s. Error %v", in.Name, err)
-		}
+
+	// Check alpha nodes health concurrently
+	for i := 1; i <= NumAlphaNodes; i++ {
+		wg.Add(1)
+		go func(nodeNum int) {
+			defer wg.Done()
+			in := testutil.GetContainerInstance(prefix, "alpha"+strconv.Itoa(nodeNum))
+			if err := in.BestEffortWaitForHealthy(AlphaPort); err != nil {
+				fmt.Printf("Error while checking alpha health %s. Error %v\n", in.Name, err)
+			}
+		}(i)
 	}
+
+	// Wait for all health checks to complete
+	wg.Wait()
 	return nil
 }
 
@@ -210,26 +338,39 @@ func outputLogs(prefix string) {
 			fmt.Printf("error closing file: %v", err)
 		}
 	}()
-	printLogs := func(container string) {
-		in := testutil.GetContainerInstance(prefix, container)
-		c := in.GetContainer()
+	printLogs := func(c *container.Summary) {
 		if c == nil {
 			return
 		}
 		logCmd := exec.Command("docker", "logs", c.ID)
 		out, err := logCmd.CombinedOutput()
-		x.Check(err)
-		if _, err := f.Write(out); err != nil {
-			fmt.Printf("error writing container logs to file: %v", err)
+		if err != nil {
+			fmt.Printf("error fetching docker logs for %s: %v\n", c.ID, err)
 		}
-		fmt.Printf("Docker logs for %s is %s with error %+v ", c.ID, string(out), err)
+		if _, werr := f.Write(out); werr != nil {
+			fmt.Printf("error writing container logs to file: %v\n", werr)
+		}
+		// Stream to stdout so CI captures the logs, with a clear header
+		// per-container that `gh run view --log` can grep for. The
+		// previous implementation wrote a single long line; switch to a
+		// fenced block so a failing test is easy to triage from the log.
+		name := ""
+		if len(c.Names) > 0 {
+			name = c.Names[0]
+		}
+		fmt.Printf("\n===== DOCKER LOGS %s (%s) =====\n%s===== END LOGS %s =====\n",
+			name, c.ID, string(out), name)
 	}
-	for i := 0; i <= 3; i++ {
-		printLogs("zero" + strconv.Itoa(i))
+	// Iterate every container in the prefix group rather than guessing
+	// names: backup/encryption has alpha1-3, minio, zero1; cloud has
+	// alpha1, minio, zero1-3; upstream clusters have alpha0 etc.
+	// AllContainers returns every container with the project prefix.
+	containers := testutil.AllContainers(prefix)
+	if len(containers) == 0 {
+		fmt.Printf("---> NO CONTAINERS FOUND for prefix %s; nothing to log.\n", prefix)
 	}
-
-	for i := 0; i <= 6; i++ {
-		printLogs("alpha" + strconv.Itoa(i))
+	for i := range containers {
+		printLogs(&containers[i])
 	}
 	s := fmt.Sprintf("---> LOGS for %s written to %s .\n", prefix, f.Name())
 	_, err = oc.Write([]byte(s))
@@ -237,11 +378,14 @@ func outputLogs(prefix string) {
 }
 
 func stopCluster(composeFile, prefix string, wg *sync.WaitGroup, err error) {
+	composeArgs := ComposeFileArgs(composeFile, *baseDir)
 	go func() {
 		if err != nil {
 			outputLogs(prefix)
 		}
-		cmd := command("docker", "compose", "--compatibility", "-f", composeFile, "-p", prefix, "stop")
+		stopArgs := append([]string{"docker", "compose", "--compatibility"},
+			append(composeArgs, "-p", prefix, "stop")...)
+		cmd := command(stopArgs...)
 		cmd.Stderr = nil
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("Error while bringing down cluster. Prefix: %s. Error: %v\n",
@@ -285,7 +429,9 @@ func stopCluster(composeFile, prefix string, wg *sync.WaitGroup, err error) {
 			}
 		}
 
-		cmd = command("docker", "compose", "--compatibility", "-f", composeFile, "-p", prefix, "down", "-v")
+		downArgs := append([]string{"docker", "compose", "--compatibility"},
+			append(composeArgs, "-p", prefix, "down", "-v")...)
+		cmd = command(downArgs...)
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("Error while bringing down cluster. Prefix: %s. Error: %v\n",
 				prefix, err)
@@ -341,16 +487,55 @@ func sanitizeFilename(pkg string) string {
 	return strings.ReplaceAll(pkg, "/", "_")
 }
 
+// gotestsumBin returns the absolute path to gotestsum inside $GOPATH/bin.
+// This avoids relying on $PATH, which may not include $GOPATH/bin on all machines
+// (the check-deps-gotestsum.sh script validates at this same path).
+func gotestsumBin() string {
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(os.Getenv("HOME"), "go")
+	}
+	return filepath.Join(gopath, "bin", "gotestsum")
+}
+
+// testTags returns the comma-joined build-tag list for test
+// compilation. Starts from `integration` (unless unit-only), then appends
+// every extra tag in buildvars.GoRunTags so fork-specific tag-guarded
+// files compile into the test binary. In upstream builds GoRunTags is
+// empty, so the result is just "integration".
+func testTags(baseTag string) string {
+	tags := []string{}
+	if baseTag != "" {
+		tags = append(tags, baseTag)
+	}
+	if extra := strings.TrimSpace(buildvars.GoRunTags.Get()); extra != "" {
+		// Support space- or comma-separated extras.
+		for _, t := range strings.FieldsFunc(extra, func(r rune) bool { return r == ' ' || r == ',' }) {
+			if t != "" {
+				tags = append(tags, t)
+			}
+		}
+	}
+	return strings.Join(tags, ",")
+}
+
 func runTestsFor(ctx context.Context, pkg, prefix string, xmlFile string) error {
-	args := []string{"gotestsum", "--junitfile", xmlFile, "--format", "standard-verbose", "--max-fails", "1", "--",
-		"-v", "-failfast", "-tags=integration"}
-	if *race {
+	args := []string{gotestsumBin(), "--junitfile", xmlFile, "--format", "standard-verbose", "--max-fails", "1", "--",
+		"-v", "-failfast"}
+	if !isUnitOnly() {
+		args = append(args, "-tags="+testTags("integration"))
+	} else if tags := testTags(""); tags != "" {
+		args = append(args, "-tags="+tags)
+	}
+	switch {
+	case *testTimeout != "":
+		args = append(args, "-timeout", *testTimeout)
+	case *race:
 		args = append(args, "-timeout", "180m")
-		// Todo: There are few race errors in tests itself. Enable this once that is fixed.
-		// args = append(args, "-race")
-	} else {
+	default:
 		args = append(args, "-timeout", "30m")
 	}
+	// Todo: There are few race errors in tests itself. Enable -race once that is fixed.
 
 	if *count > 0 {
 		args = append(args, "-count="+strconv.Itoa(*count))
@@ -372,7 +557,11 @@ func runTestsFor(ctx context.Context, pkg, prefix string, xmlFile string) error 
 	if err != nil {
 		return fmt.Errorf("while getting absolute path of tmp directory: %v Error: %v", *tmp, err)
 	}
-	cmd.Env = append(cmd.Env, "TEST_DATA_DIRECTORY="+abs)
+	dataDir := abs
+	if strings.Contains(pkg, "/ldbc") {
+		dataDir = filepath.Join(abs, "ldbc")
+	}
+	cmd.Env = append(cmd.Env, "TEST_DATA_DIRECTORY="+dataDir)
 	// Use failureCatcher.
 	cmd.Stdout = oc
 
@@ -404,7 +593,7 @@ func runTestsFor(ctx context.Context, pkg, prefix string, xmlFile string) error 
 }
 
 func hasTestFiles(pkg string) bool {
-	dir := strings.Replace(pkg, "github.com/hypermodeinc/dgraph/v25/", "", 1)
+	dir := strings.Replace(pkg, "github.com/dgraph-io/dgraph/v25/", "", 1)
 	dir = filepath.Join(*baseDir, dir)
 
 	hasTests := false
@@ -447,19 +636,21 @@ func runTests(taskCh chan task, closer *z.Closer) error {
 	prefix := getClusterPrefix()
 
 	var started, stopped bool
-	start := func() {
-		if len(*useExisting) > 0 || started {
-			return
+	start := func() error {
+		if isUnitOnly() || len(*useExisting) > 0 || started {
+			return nil
 		}
 		err := startCluster(defaultCompose, prefix)
 		if err != nil {
 			closer.Signal()
+			return err
 		}
 		started = true
+		return nil
 	}
 
 	stop := func() {
-		if *keepCluster || stopped {
+		if isUnitOnly() || *keepCluster || stopped {
 			return
 		}
 		wg.Add(1)
@@ -492,6 +683,85 @@ func runTests(taskCh chan task, closer *z.Closer) error {
 		}
 	}()
 
+	// defaultPaused tracks whether the default cluster has been stopped to
+	// free memory for custom-cluster tests.
+	var defaultPaused bool
+
+	// pauseDefault stops the default cluster containers (without removing
+	// them) so that custom-cluster tests have the full Docker memory
+	// budget.  On macOS/Docker-Desktop the VM is memory-constrained and
+	// running 16+ Dgraph processes simultaneously causes OOM kills.
+	pauseDefault := func() {
+		if !started || stopped {
+			return
+		}
+		pauseArgs := append([]string{"docker", "compose", "--compatibility"},
+			append(ComposeFileArgs(defaultCompose, *baseDir), "-p", prefix, "stop")...)
+		cmd := command(pauseArgs...)
+		cmd.Stderr = nil
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("Warning: failed to pause default cluster %s: %v\n", prefix, err)
+		} else {
+			defaultPaused = true
+			fmt.Printf("DEFAULT CLUSTER PAUSED: %s\n", prefix)
+		}
+	}
+
+	// resumeDefault restarts the stopped default cluster containers and
+	// waits for them to become healthy.
+	resumeDefault := func() error {
+		if !started || stopped {
+			return start()
+		}
+		if !defaultPaused {
+			return nil // already running
+		}
+		resumeArgs := append([]string{"docker", "compose", "--compatibility"},
+			append(ComposeFileArgs(defaultCompose, *baseDir), "-p", prefix, "start")...)
+		cmd := command(resumeArgs...)
+		cmd.Stderr = nil
+		if err := cmd.Run(); err != nil {
+			fmt.Printf("Warning: failed to resume default cluster %s: %v\n", prefix, err)
+			// If resume fails, recreate the cluster from scratch.
+			started = false
+			return start()
+		}
+		fmt.Printf("DEFAULT CLUSTER RESUMED: %s\n", prefix)
+
+		// Wait for health after resume.
+		var resumeWg sync.WaitGroup
+		for i := 1; i <= NumZeroNodes; i++ {
+			resumeWg.Add(1)
+			go func(n int) {
+				defer resumeWg.Done()
+				in := testutil.GetContainerInstance(prefix, "zero"+strconv.Itoa(n))
+				if err := in.BestEffortWaitForHealthy(ZeroPort); err != nil {
+					fmt.Printf("Warning: zero%d health check after resume: %v\n", n, err)
+				}
+			}(i)
+		}
+		for i := 1; i <= NumAlphaNodes; i++ {
+			resumeWg.Add(1)
+			go func(n int) {
+				defer resumeWg.Done()
+				in := testutil.GetContainerInstance(prefix, "alpha"+strconv.Itoa(n))
+				if err := in.BestEffortWaitForHealthy(AlphaPort); err != nil {
+					fmt.Printf("Warning: alpha%d health check after resume: %v\n", n, err)
+				}
+			}(i)
+		}
+		resumeWg.Wait()
+		// HTTP /health returns OK before alpha has fully re-established its
+		// internal connection pool to zero after a docker-compose `start`.
+		// The first test to run immediately after resume occasionally hits
+		// "No connection exists" in DropAll/Alter because groups().Leader(0)
+		// is still nil. Sleep a few seconds so membership sync can complete.
+		// Cheap compared to a whole cluster restart on failure.
+		time.Sleep(5 * time.Second)
+		defaultPaused = false
+		return nil
+	}
+
 	for task := range taskCh {
 		if ctx.Err() != nil {
 			err = ctx.Err()
@@ -508,12 +778,23 @@ func runTests(taskCh chan task, closer *z.Closer) error {
 				// If we only need to run custom cluster tests, then skip this one.
 				continue
 			}
-			start()
+			if !isUnitOnly() {
+				if err := resumeDefault(); err != nil {
+					return err
+				}
+			}
 			if err = runTestsFor(ctx, task.pkg.ID, prefix, xmlFile); err != nil {
 				// fmt.Printf("ERROR for package: %s. Err: %v\n", task.pkg.ID, err)
 				return err
 			}
 		} else {
+			if isUnitOnly() {
+				// Skip custom-cluster packages entirely in unit mode —
+				// they only contain integration tests.
+				continue
+			}
+			// Pause the default cluster to free memory for the custom cluster.
+			pauseDefault()
 			// we are not using err variable here because we dont want to
 			// print logs of default cluster in case of custom test fail.
 			if cerr := runCustomClusterTest(ctx, task.pkg.ID, wg, xmlFile); cerr != nil {
@@ -552,7 +833,14 @@ func runCustomClusterTest(ctx context.Context, pkg string, wg *sync.WaitGroup, x
 	}
 	if !*keepCluster {
 		wg.Add(1)
-		defer stopCluster(compose, prefix, wg, err)
+		// Wrap in a closure so the `err` read by stopCluster is the
+		// value AT DEFER RUN TIME (i.e. after runTestsFor returns).
+		// The original form `defer stopCluster(..., err)` captured err
+		// at defer-STATEMENT time, which is always nil here, so
+		// stopCluster never dumped container logs on test failure.
+		defer func() {
+			stopCluster(compose, prefix, wg, err)
+		}()
 	}
 
 	err = runTestsFor(ctx, pkg, prefix, xmlFile)
@@ -630,7 +918,7 @@ func (o *outputCatcher) Print() {
 		if dur.dur < time.Second {
 			continue
 		}
-		pkg := strings.Replace(dur.pkg, "github.com/hypermodeinc/dgraph/v25/", "", 1)
+		pkg := strings.Replace(dur.pkg, "github.com/dgraph-io/dgraph/v25/", "", 1)
 		fmt.Printf("[%6s]%s[%d] %s took: %s\n", dur.ts.Sub(baseTs).Round(time.Second),
 			strings.Repeat("   ", int(dur.threadId)), dur.threadId, pkg,
 			dur.dur.Round(time.Second))
@@ -648,14 +936,17 @@ type task struct {
 
 // for custom cluster tests (i.e. those not using default docker-compose.yml)
 func composeFileFor(pkg string) string {
-	dir := strings.Replace(pkg, "github.com/hypermodeinc/dgraph/v25/", "", 1)
+	dir := strings.Replace(pkg, "github.com/dgraph-io/dgraph/v25/", "", 1)
+	// Return the pristine source path; ComposeFileArgs (called from
+	// startCluster/stopCluster) handles the overlay rewrite + project-
+	// directory anchoring when the file is in the generator manifest.
 	return filepath.Join(*baseDir, dir, "docker-compose.yml")
 }
 
 func getPackages() []task {
 	has := func(list []string, in string) bool {
 		for _, l := range list {
-			if len(l) > 0 && strings.Contains(in+"/", "github.com/hypermodeinc/dgraph/v25/"+l+"/") {
+			if len(l) > 0 && strings.Contains(in+"/", "github.com/dgraph-io/dgraph/v25/"+l+"/") {
 				return true
 			}
 		}
@@ -687,7 +978,19 @@ func getPackages() []task {
 		}
 		return out
 	}
-	cfg := &packages.Config{BuildFlags: []string{"-tags=integration"}}
+	// When running unit-only, don't add --tags=integration so that only true
+	// unit tests (without //go:build integration) are discovered and compiled.
+	// Always thread GO_RUN_TAGS through so fork-tagged files participate in
+	// package discovery (e.g. tag-guarded init hooks for test harness).
+	var buildFlags []string
+	if tags := testTags("integration"); isUnitOnly() {
+		if extraOnly := testTags(""); extraOnly != "" {
+			buildFlags = []string{"-tags=" + extraOnly}
+		}
+	} else {
+		buildFlags = []string{"-tags=" + tags}
+	}
+	cfg := &packages.Config{BuildFlags: buildFlags}
 
 	pkgs, err := packages.Load(cfg, *baseDir+"/...")
 	x.Check(err)
@@ -759,7 +1062,7 @@ func removeAllTestContainers() {
 	var wg sync.WaitGroup
 	for _, c := range containers {
 		wg.Add(1)
-		go func(c types.Container) {
+		go func(c container.Summary) {
 			defer wg.Done()
 			o := container.StopOptions{Timeout: &dur}
 			err := cli.ContainerStop(ctxb, c.ID, o)
@@ -807,6 +1110,22 @@ var loadPackages = []string{
 	"/dgraph/cmd/bulk/systest",
 }
 
+// heavyPackages lists resource-intensive systest packages separated into
+// the systest-heavy suite. These spin up large Docker clusters (20-112
+// services) and can cause OOM on macOS Docker Desktop.
+// Use --suite=systest-heavy to run them, or --suite=systest for both.
+var heavyPackages = []string{
+	"/systest/backup/minio",
+	"/systest/backup/minio-large",
+	"/systest/backup/nfs-backup",
+	"/systest/backup/advanced-scenarios/",
+	"/systest/backup/encryption",
+	"/systest/backup/multi-tenancy",
+	"/systest/tracing/jaeger1",
+	"/systest/tracing/jaeger2",
+	"/systest/online-restore",
+}
+
 func testSuiteContains(suite string) bool {
 	for _, str := range testsuite {
 		if suite == str {
@@ -814,6 +1133,22 @@ func testSuiteContains(suite string) bool {
 		}
 	}
 	return false
+}
+
+func testSuiteContainsAny(suites ...string) bool {
+	for _, suite := range suites {
+		if testSuiteContains(suite) {
+			return true
+		}
+	}
+	return false
+}
+
+// isUnitOnly returns true when the suite is exactly "unit" with nothing else.
+// In unit-only mode, the runner skips Docker clusters and --tags=integration,
+// running only tests that don't require the integration build tag.
+func isUnitOnly() bool {
+	return len(testsuite) == 1 && testsuite[0] == "unit"
 }
 
 func isValidPackageForSuite(pkg string) bool {
@@ -827,22 +1162,28 @@ func isValidPackageForSuite(pkg string) bool {
 	if testSuiteContains("load") {
 		valid = valid || isLoadPackage(pkg)
 	}
+	// "unit" = true unit tests (no --tags=integration, same package scope as integration)
 	if testSuiteContains("unit") {
-		valid = valid || (!isLoadPackage(pkg) && !isLDBCPackage(pkg))
+		valid = valid || (!isLoadPackage(pkg) && !isLDBCPackage(pkg) && !isHeavyPackage(pkg))
+	}
+	// "integration" replaces old "unit" — everything except ldbc, load, and systest-heavy
+	if testSuiteContains("integration") {
+		valid = valid || (!isLoadPackage(pkg) && !isLDBCPackage(pkg) && !isHeavyPackage(pkg))
 	}
 	if testSuiteContains("vector") {
 		valid = valid || isVectorPackage(pkg)
 	}
-	if testSuiteContains("systest") {
-		valid = valid || isSystestPackage(pkg)
+	// "systest" = both systest-baseline and systest-heavy (backward compatible)
+	if testSuiteContainsAny("systest", "systest-baseline") {
+		valid = valid || (isSystestPackage(pkg) && !isHeavyPackage(pkg))
+	}
+	if testSuiteContainsAny("systest", "systest-heavy") {
+		valid = valid || isHeavyPackage(pkg)
 	}
 	if testSuiteContains("core") {
 		valid = valid || isCorePackage(pkg)
 	}
-	if valid {
-		return valid
-	}
-	return false
+	return valid
 }
 
 func isLoadPackage(pkg string) bool {
@@ -880,15 +1221,24 @@ func isVectorPackage(pkg string) bool {
 	return strings.HasSuffix(pkg, "/vector")
 }
 
-var datafiles = map[string]string{
-	"1million-noindex.schema": "https://raw.githubusercontent.com/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/1million-noindex.schema",
-	"1million.schema":         "https://raw.githubusercontent.com/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/1million.schema",
-	"1million.rdf.gz":         "https://media.githubusercontent.com/media/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/1million.rdf.gz",
-	"21million.schema":        "https://raw.githubusercontent.com/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/21million.schema",
-	"21million.rdf.gz":        "https://media.githubusercontent.com/media/hypermodeinc/dgraph-benchmarks/refs/heads/main/data/21million.rdf.gz",
+func isHeavyPackage(pkg string) bool {
+	for _, p := range heavyPackages {
+		if strings.HasSuffix(pkg, p) || strings.Contains(pkg, p) {
+			return true
+		}
+	}
+	return false
 }
 
-var baseUrl = "https://media.githubusercontent.com/media/hypermodeinc/dgraph-benchmarks/refs/heads/main/ldbc/sf0.3/ldbc_rdf_0.3/"
+var datafiles = map[string]string{
+	"1million-noindex.schema": "https://raw.githubusercontent.com/dgraph-io/dgraph-benchmarks/refs/heads/main/data/1million-noindex.schema",
+	"1million.schema":         "https://raw.githubusercontent.com/dgraph-io/dgraph-benchmarks/refs/heads/main/data/1million.schema",
+	"1million.rdf.gz":         "https://media.githubusercontent.com/media/dgraph-io/dgraph-benchmarks/refs/heads/main/data/1million.rdf.gz",
+	"21million.schema":        "https://raw.githubusercontent.com/dgraph-io/dgraph-benchmarks/refs/heads/main/data/21million.schema",
+	"21million.rdf.gz":        "https://media.githubusercontent.com/media/dgraph-io/dgraph-benchmarks/refs/heads/main/data/21million.rdf.gz",
+}
+
+var baseUrl = "https://media.githubusercontent.com/media/dgraph-io/dgraph-benchmarks/refs/heads/main/ldbc/sf0.3/ldbc_rdf_0.3/"
 var suffix = "?raw=true"
 
 var rdfFileNames = [...]string{
@@ -918,7 +1268,7 @@ var rdfFileNames = [...]string{
 	"workAt_0.rdf"}
 
 var ldbcDataFiles = map[string]string{
-	"ldbcTypes.schema": "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/ldbc/sf0.3/ldbcTypes.schema?raw=true",
+	"ldbcTypes.schema": "https://github.com/dgraph-io/dgraph-benchmarks/blob/main/ldbc/sf0.3/ldbcTypes.schema?raw=true",
 }
 
 func downloadDataFiles() {
@@ -937,7 +1287,7 @@ func downloadDataFiles() {
 	}
 }
 
-func downloadLDBCFiles() {
+func downloadLDBCFiles(dir string) {
 	if !*downloadResources {
 		fmt.Print("Skipping downloading of resources\n")
 		return
@@ -955,12 +1305,12 @@ func downloadLDBCFiles() {
 			defer wg.Done()
 			start := time.Now()
 			cmd := exec.Command("wget", "-O", fname, link)
-			cmd.Dir = *tmp
+			cmd.Dir = dir
 			if out, err := cmd.CombinedOutput(); err != nil {
 				fmt.Printf("Error %v\n", err)
 				panic(fmt.Sprintf("error downloading a file: %s", string(out)))
 			}
-			fmt.Printf("Downloaded %s to %s in %s \n", fname, *tmp, time.Since(start))
+			fmt.Printf("Downloaded %s to %s in %s \n", fname, dir, time.Since(start))
 		}(fname, link, &wg)
 	}
 	wg.Wait()
@@ -1068,6 +1418,18 @@ func run() error {
 	fmt.Printf("Proc ID is %d\n", procId)
 	fmt.Printf("Detected architecture: %s", runtime.GOARCH)
 
+	// Ensure $GOPATH/bin is in PATH so that tools installed via `go install`
+	// (e.g. protoc-gen-go) are found by subprocesses like protoc.
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(os.Getenv("HOME"), "go")
+	}
+	gopathBin := filepath.Join(gopath, "bin")
+	currentPath := os.Getenv("PATH")
+	if !strings.Contains(currentPath, gopathBin) {
+		os.Setenv("PATH", gopathBin+string(os.PathListSeparator)+currentPath)
+	}
+
 	start := time.Now()
 	oc.Took(0, "START", time.Millisecond)
 
@@ -1098,8 +1460,11 @@ func run() error {
 	closer := z.NewCloser(N)
 	testCh := make(chan task)
 	errCh := make(chan error, 1000)
+	var runWg sync.WaitGroup
 	for range N {
+		runWg.Add(1)
 		go func() {
+			defer runWg.Done()
 			if err := runTests(testCh, closer); err != nil {
 				errCh <- err
 				closer.Signal()
@@ -1124,24 +1489,25 @@ func run() error {
 	}()
 	signal.Notify(sdCh, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
-	// pkgs, err := packages.Load(nil, "github.com/hypermodeinc/dgraph/v25/...")
+	// pkgs, err := packages.Load(nil, "github.com/dgraph-io/dgraph/v25/...")
 	go func() {
 		defer close(testCh)
 		valid := getPackages()
-
-		if testSuiteContains("load") || testSuiteContains("all") {
-			if *tmp == "" {
-				*tmp = os.TempDir()
-			}
+		needsData := testSuiteContainsAny("load", "ldbc", "all")
+		if needsData && *tmp == "" {
+			*tmp = filepath.Join(os.TempDir(), "dgraph-test-data")
 			x.Check(testutil.MakeDirEmpty([]string{*tmp}))
+		}
+		if testSuiteContainsAny("load", "all") {
 			downloadDataFiles()
 		}
-		if testSuiteContains("ldbc") || testSuiteContains("all") {
-			if *tmp == "" {
-				*tmp = filepath.Join(os.TempDir(), "/ldbcdata")
-			}
-			x.Check(testutil.MakeDirEmpty([]string{*tmp}))
-			downloadLDBCFiles()
+		if testSuiteContainsAny("ldbc", "all") {
+			// LDBC files go into a subdirectory because the LDBC test bulk-loads
+			// the entire directory (-f <dir>). Mixing load data (1million, 21million)
+			// with LDBC data causes schema mismatches.
+			ldbcDir := filepath.Join(*tmp, "ldbc")
+			x.Check(os.MkdirAll(ldbcDir, 0755))
+			downloadLDBCFiles(ldbcDir)
 		}
 		for i, task := range valid {
 			select {
@@ -1154,6 +1520,7 @@ func run() error {
 	}()
 
 	closer.Wait()
+	runWg.Wait() // Ensure wrapper goroutines finish sending to errCh before closing it.
 	close(errCh)
 	for err := range errCh {
 		if err != nil {
@@ -1170,7 +1537,7 @@ func run() error {
 
 func validateAllowed(testSuite []string) {
 
-	allowed := []string{"all", "ldbc", "load", "unit", "systest", "vector", "core"}
+	allowed := []string{"all", "ldbc", "load", "unit", "integration", "systest", "systest-baseline", "systest-heavy", "vector", "core"}
 	for _, str := range testSuite {
 		onlyAllowed := false
 		for _, allowedStr := range allowed {
@@ -1179,7 +1546,7 @@ func validateAllowed(testSuite []string) {
 			}
 		}
 		if !onlyAllowed {
-			log.Fatalf("Allowed options for suite are only all, load, ldbc or unit; passed in %+v", testSuite)
+			log.Fatalf("Allowed options for suite are: %s; passed in %+v", strings.Join(allowed, ", "), testSuite)
 		}
 	}
 }

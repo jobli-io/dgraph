@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -32,14 +32,14 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	bpb "github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/dgraph/v25/conn"
+	"github.com/dgraph-io/dgraph/v25/posting"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/raftwal"
+	"github.com/dgraph-io/dgraph/v25/schema"
+	"github.com/dgraph-io/dgraph/v25/types"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/conn"
-	"github.com/hypermodeinc/dgraph/v25/posting"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/raftwal"
-	"github.com/hypermodeinc/dgraph/v25/schema"
-	"github.com/hypermodeinc/dgraph/v25/types"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type operation struct {
@@ -689,8 +689,66 @@ func (n *node) applyCommitted(proposal *pb.Proposal, key uint64) error {
 			attribute.Int64("key", int64(key))))
 		return n.commitOrAbort(key, proposal.Delta)
 
-	case proposal.Drainmode != nil:
-		x.UpdateDrainingMode(proposal.Drainmode.State)
+	case proposal.ExtSnapshotState != nil:
+		// Handle ExtSnapshotState proposal with two distinct scenarios:
+		// 1. Node was offline during streaming and is now rejoining so this we are figuring out using
+		//    x.ExtSnapshotStreamingState if that is true then we can say node is rejoined because
+		//    we are disabling it after completion of streaming:
+		//     - We request and populate snapshot from the group leader
+		//     - After receiving the snapshot, we perform post-stream processing to ensure data consistency
+		//
+		// 2. Node was online during streaming:
+		//     - If the node was online during streaming, we only need to disable drain mode
+		//     - No additional data synchronization is required since the node was already receiving updates
+		//
+		// Drop Data Handling:
+		// - When DropData is true, we clear all data from the node
+		// - This is used as a safety measure when:
+		//   - Something went wrong with other groups/nodes
+		//   - The node needs to be brought back in sync with the cluster
+		//   - Ensures the node reaches a clean, consistent state
+		switch {
+		case proposal.ExtSnapshotState.Start:
+			x.ExtSnapshotStreamingState(true)
+			return nil
+		case proposal.ExtSnapshotState.DropData:
+			// When DropData is true, it implies that there was some issue with import (e.g. some group
+			// may have started streaming but not finished or streaming never started because p directory
+			// was not there). We can't be certain if we have disabled x.UpdateExtSnapshotStreamingState or
+			// not, so we are disabling it here:
+			x.ExtSnapshotStreamingState(false)
+			if err := posting.DeleteAll(); err != nil {
+				glog.Errorf("[import] failed to delete all data: %v", err)
+				return err
+			}
+			return nil
+		case proposal.ExtSnapshotState.Finish && x.IsExtSnapshotStreamingStateTrue():
+			lastApplied := n.Applied.LastIndex()
+			pl := groups().Leader(n.gid)
+			if pl == nil {
+				glog.Errorf("[import] failed to get connection pool for group %d", n.gid)
+				return errors.Errorf("failed to get connection pool for group %d", n.gid)
+			}
+			glog.Infof("[import] requesting snapshot from leader")
+			snap := &pb.Snapshot{
+				Context: n.RaftContext,
+				Index:   lastApplied,
+				ReadTs:  State.GetTimestamp(false),
+			}
+			// Request and populate snapshot
+			if err := n.populateSnapshot(snap, pl); err != nil {
+				glog.Errorf("[import] failed to populate snapshot for rejoining node: %v", err)
+				return errors.Wrapf(err, "failed to populate snapshot for rejoining node")
+			}
+
+			if err := postStreamProcessing(ctx); err != nil {
+				glog.Errorf("[import] failed to post stream processing for rejoining node: %v", err)
+				return errors.Wrapf(err, "failed to post stream processing for rejoining node")
+			}
+			glog.Infof("[import] successfully rejoined node")
+			x.ExtSnapshotStreamingState(false)
+		}
+
 		return nil
 
 	case proposal.Snapshot != nil:
@@ -771,15 +829,14 @@ func (n *node) applyCommitted(proposal *pb.Proposal, key uint64) error {
 }
 
 func (n *node) processTabletSizes() {
-	defer n.closer.Done()                   // CLOSER:1
-	tick := time.NewTicker(5 * time.Minute) // Once every 5 minutes seems alright.
-	defer tick.Stop()
+	defer n.closer.Done()              // CLOSER:1
+	tick := time.Tick(5 * time.Minute) // Once every 5 minutes seems alright.
 
 	for {
 		select {
 		case <-n.closer.HasBeenClosed():
 			return
-		case <-tick.C:
+		case <-tick:
 			n.calculateTabletSizes()
 		}
 	}
@@ -883,8 +940,7 @@ func (n *node) processApplyCh() {
 	}
 
 	maxAge := 10 * time.Minute
-	tick := time.NewTicker(maxAge / 2)
-	defer tick.Stop()
+	tick := time.Tick(maxAge / 2)
 
 	for {
 		select {
@@ -893,7 +949,7 @@ func (n *node) processApplyCh() {
 				return
 			}
 			handle(entries)
-		case <-tick.C:
+		case <-tick:
 			// We use this ticker to clear out previous map.
 			now := time.Now()
 			for key, p := range previous {
@@ -1137,9 +1193,8 @@ func (n *node) updateRaftProgress() error {
 }
 
 func (n *node) checkpointAndClose(done chan struct{}) {
-	slowTicker := time.NewTicker(time.Minute)
+	slowTicker := time.Tick(time.Minute)
 	lastSnapshotTime := time.Now()
-	defer slowTicker.Stop()
 
 	snapshotAfterEntries := x.WorkerConfig.Raft.GetUint64("snapshot-after-entries")
 	x.AssertTruef(snapshotAfterEntries > 10, "raft.snapshot-after must be a number greater than 10")
@@ -1148,7 +1203,7 @@ func (n *node) checkpointAndClose(done chan struct{}) {
 
 	for {
 		select {
-		case <-slowTicker.C:
+		case <-slowTicker:
 			// Do these operations asynchronously away from the main Run loop to allow heartbeats to
 			// be sent on time. Otherwise, followers would just keep running elections.
 
@@ -1261,8 +1316,7 @@ func (n *node) Run() {
 	// "tick missed to fire" logs. Etcd uses 100ms and they haven't seen those issues.
 	// Additionally, using 100ms for ticks does not cause proposals to slow down, because they get
 	// sent out asap and don't rely on ticks. So, setting this to 100ms instead of 20ms is a NOOP.
-	ticker := time.NewTicker(tickDur)
-	defer ticker.Stop()
+	ticker := time.Tick(tickDur)
 
 	done := make(chan struct{})
 	go n.checkpointAndClose(done)
@@ -1297,7 +1351,7 @@ func (n *node) Run() {
 			// time and if the leader does not send heartbeats out during this time, the followers
 			// start an election process. And that election process would just continue to happen
 			// indefinitely because checkpoints and snapshots are being calculated indefinitely.
-		case <-ticker.C:
+		case <-ticker:
 			n.Raft().Tick()
 
 		case rd := <-n.Raft().Ready():
@@ -1979,9 +2033,9 @@ func (n *node) AmLeader() bool {
 }
 
 func (n *node) monitorRaftMetrics() {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
+	ticker := time.Tick(5 * time.Second)
+
+	for range ticker {
 		curPendingSize := atomic.LoadInt64(&n.pendingSize)
 		ostats.Record(n.ctx, x.RaftPendingSize.M(curPendingSize))
 		ostats.Record(n.ctx, x.RaftApplyCh.M(int64(len(n.applyCh))))

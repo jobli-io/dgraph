@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,7 +13,7 @@ import (
 	"github.com/blevesearch/bleve/v2/analysis/tokenizer/unicode"
 	"github.com/blevesearch/bleve/v2/registry"
 
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 const unicodenormName = "unicodenorm_nfkc"
@@ -61,7 +61,7 @@ func setupBleve() {
 
 // uniqueTerms takes a token stream and returns a string slice of unique terms.
 func uniqueTerms(tokens analysis.TokenStream) []string {
-	var terms []string
+	terms := make([]string, 0, len(tokens))
 	for i := range tokens {
 		terms = append(terms, string(tokens[i].Term))
 	}

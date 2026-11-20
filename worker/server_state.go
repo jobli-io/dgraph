@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -14,10 +14,10 @@ import (
 	"github.com/golang/glog"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/raftwal"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/raftwal"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 const (
@@ -32,17 +32,17 @@ const (
 	BadgerDefaults = `compression=snappy; numgoroutines=8;`
 	RaftDefaults   = `learner=false; snapshot-after-entries=10000; ` +
 		`snapshot-after-duration=30m; pending-proposals=256; idx=; group=;`
-	SecurityDefaults = `token=; whitelist=;`
+	SecurityDefaults = `token=; whitelist=; anonymous=full;`
 	CDCDefaults      = `file=; kafka=; sasl_user=; sasl_password=; ca_cert=; client_cert=; ` +
 		`client_key=; sasl-mechanism=PLAIN; tls=false;`
 	LimitDefaults = `mutations=allow; query-edge=1000000; normalize-node=10000; ` +
 		`mutations-nquad=1000000; disallow-drop=false; query-timeout=0ms; txn-abort-after=5m; ` +
-		` max-retries=10;max-pending-queries=10000;shared-instance=false;type-filter-uid-limit=10`
+		`max-retries=10; max-pending-queries=10000; shared-instance=false; type-filter-uid-limit=10`
 	ZeroLimitsDefaults = `uid-lease=0; refill-interval=30s; disable-admin-http=false;`
 	GraphQLDefaults    = `introspection=true; debug=false; extensions=true; poll-interval=1s; ` +
 		`lambda-url=;`
-	CacheDefaults        = `size-mb=1024; percentage=40,40,20; remove-on-update=false`
-	FeatureFlagsDefaults = `normalize-compatibility-mode=; enable-detailed-metrics=false`
+	CacheDefaults        = `size-mb=4096; percentage=40,40,20; remove-on-update=false`
+	FeatureFlagsDefaults = `normalize-compatibility-mode=; enable-detailed-metrics=false; log-slow-query-threshold=0`
 )
 
 // ServerState holds the state of the Dgraph server.

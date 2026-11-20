@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -7,7 +7,7 @@
 package dql
 
 import (
-	"github.com/hypermodeinc/dgraph/v25/lex"
+	"github.com/dgraph-io/dgraph/v25/lex"
 )
 
 const (
@@ -131,7 +131,7 @@ func lexContent(l *lex.Lexer, leftRune, rightRune rune, returnTo lex.StateFn) le
 			return l.Errorf("Matching brackets not found")
 		case quote:
 			if err := l.LexQuotedString(); err != nil {
-				return l.Errorf(err.Error())
+				return l.Errorf("%s", err.Error())
 			}
 		case leftRune:
 			depth++
@@ -291,7 +291,7 @@ func lexFuncOrArg(l *lex.Lexer) lex.StateFn {
 			{
 				empty = false
 				if err := l.LexQuotedString(); err != nil {
-					return l.Errorf(err.Error())
+					return l.Errorf("%s", err.Error())
 				}
 				l.Emit(itemName)
 			}
@@ -306,6 +306,18 @@ func lexFuncOrArg(l *lex.Lexer) lex.StateFn {
 			l.Emit(itemLeftSquare)
 		case r == rightSquare:
 			l.Emit(itemRightSquare)
+		case r == leftCurl:
+			empty = false
+			l.Emit(itemLeftCurl)
+			// Design decision: Emit brace tokens without affecting ArgDepth tracking.
+			// The parser validates whether braces are legal in context.
+			// Trade-off: Queries with multiple syntax errors (e.g., missing ')' AND stray '}')
+			// will report structural errors (Unclosed Brackets) rather than character-specific
+			// errors. This is acceptable as the query is still rejected with a clear error.
+		case r == rightCurl:
+			l.Emit(itemRightCurl)
+			// Don't decrement ArgDepth for braces; let parser validate context.
+			// See leftCurl case above for full rationale.
 		case r == '#':
 			return lexComment
 		case r == '.':
@@ -376,6 +388,9 @@ func lexIdentifyMutationOrQuery(l *lex.Lexer) lex.StateFn {
 			// else it is a query
 			l.Emit(itemName)
 			return lexQuery
+		case r == lsThan:
+			l.Backup()
+			return lexQuery
 		case r == '#':
 			return lexComment
 		case r == lex.EOF:
@@ -437,7 +452,7 @@ func lexQuery(l *lex.Lexer) lex.StateFn {
 
 func lexIRIRef(l *lex.Lexer) lex.StateFn {
 	if err := lex.IRIRef(l, itemName); err != nil {
-		return l.Errorf(err.Error())
+		return l.Errorf("%s", err.Error())
 	}
 	return l.Mode
 }

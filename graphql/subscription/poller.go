@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -23,9 +23,9 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/golang/glog"
 
-	"github.com/hypermodeinc/dgraph/v25/graphql/resolve"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/graphql/resolve"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 // TriggerPayload specifies metadata passed to a reactive poller re-evaluation.
@@ -112,6 +112,24 @@ func (p *Poller) OnInvalidate(msg *InvalidationMessage) {
 			}
 		}
 	}
+}
+
+// subscriberContext builds the context each subscription query runs under, from
+// the headers the subscriber presented when it connected.
+//
+// It resolves identity the same way the HTTP edge does, through
+// x.AttachRequestIdentity, rather than attaching only the access JWT. A poll is a
+// fresh query on every tick with no request of its own behind it, so these stored
+// headers are the only place a credential can come from. With the JWT alone, the
+// --security auth token never reached the context and no Principal was ever
+// resolved, so under --security "anonymous=none" every poll was refused -- even for
+// a subscriber that had presented a valid token or ACL JWT.
+//
+// The synthetic request has no RemoteAddr, so no peer is attached. Nothing on this
+// path reads one: a subscription runs ordinary GraphQL queries, which are
+// authorized on identity and predicates, never on the caller's address.
+func subscriberContext(h http.Header) context.Context {
+	return x.AttachRequestIdentity(context.Background(), &http.Request{Header: h})
 }
 
 // AddSubscriber handles registration for a subscriber, switching the engine to reactive mode.
@@ -215,8 +233,7 @@ func (p *Poller) AddSubscriber(req *schema.Request) (*SubscriberResponse, error)
 	}
 
 	// 1. Run the initial query synchronously to return the starting state to the client
-	res := resolver.Resolve(x.AttachAccessJwt(context.Background(),
-		&http.Request{Header: req.Header}), req)
+	res := resolver.Resolve(subscriberContext(req.Header), req)
 	if len(res.Errors) != 0 {
 		return nil, res.Errors
 	}
@@ -351,7 +368,7 @@ func (p *Poller) poll(req *pollRequest) {
 		}
 
 		// Execute consistent read (guaranteeing Tr >= Tw)
-		ctx := x.AttachAccessJwt(context.Background(), &http.Request{Header: req.graphqlReq.Header})
+		ctx := subscriberContext(req.graphqlReq.Header)
 		if trigger.CommitTs > 0 {
 			// Set Dgraph consistent read context details
 			ctx = context.WithValue(ctx, "read_ts", trigger.CommitTs)

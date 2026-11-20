@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,6 +13,13 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// defaultWhitelist is the --security whitelist every dgraphtest cluster gets
+// unless a test overrides it with WithWhitelist. It has to stay wide open:
+// LocalCluster.Start() probes GraphQL with an admin mutation, and every admin
+// GraphQL operation carries IpWhitelistingMW, so a narrower default would break
+// every existing test rather than only the ones doing admin work.
+const defaultWhitelist = "0.0.0.0/0"
 
 // UpgradeCombo represents a version combination before and
 // after the upgrade, and the strategy for upgrading
@@ -106,14 +113,13 @@ type ClusterConfig struct {
 	lambdaURL             string
 	featureFlags          []string
 	customPlugins         bool
+	startupArgs           []string
 	snapShotAfterEntries  uint64
 	snapshotAfterDuration time.Duration
 	repoDir               string
-}
-
-func (cc ClusterConfig) WithGraphqlLambdaURL(url string) ClusterConfig {
-	cc.lambdaURL = url
-	return cc
+	mcp                   bool
+	securityToken         string
+	whitelist             string
 }
 
 // NewClusterConfig generates a default ClusterConfig
@@ -133,6 +139,8 @@ func NewClusterConfig() ClusterConfig {
 		uidLease:       50,
 		portOffset:     -1,
 		customPlugins:  false,
+		mcp:            false,
+		whitelist:      defaultWhitelist,
 	}
 }
 
@@ -166,6 +174,36 @@ func (cc ClusterConfig) WithReplicas(n int) ClusterConfig {
 // WithVerbosity sets the verbosity level for the logs
 func (cc ClusterConfig) WithVerbosity(v int) ClusterConfig {
 	cc.verbosity = v
+	return cc
+}
+
+// WithSecurityToken sets the --security auth-token (poor man's auth) for admin operations.
+func (cc ClusterConfig) WithSecurityToken(token string) ClusterConfig {
+	cc.securityToken = token
+	return cc
+}
+
+// WithWhitelist sets the Alpha's --security whitelist for admin operations,
+// REPLACING the wide-open default rather than adding to it. Zero is unaffected: it
+// reads its own whitelist from DGRAPH_ZERO_SECURITY, because older zero binaries used
+// in upgrade tests would fail to start on an unrecognized flag.
+//
+// The value is the flag's own syntax: a comma-separated list of IP addresses,
+// a.b.c.d:w.x.y.z ranges, CIDR blocks, or hostnames, e.g.
+// "192.168.0.0/16,host.docker.internal".
+//
+// Replacing is the point. The default is 0.0.0.0/0, so an additive option could never
+// express a cluster that denies anyone, which is the only configuration worth a test.
+// Note that loopback is admitted unconditionally by x.isIpWhitelisted regardless of
+// this setting, so a test that wants a denial has to reach the alpha over a
+// non-loopback source — which a published Docker port gives it on Linux, though not
+// necessarily on Docker Desktop.
+//
+// Setting a whitelist other than the default makes Start() wait on /probe/graphql
+// instead of the admin GraphQL mutation it normally probes with; see
+// LocalCluster.waitUntilGraphqlHealthCheck for why.
+func (cc ClusterConfig) WithWhitelist(spec string) ClusterConfig {
+	cc.whitelist = spec
 	return cc
 }
 
@@ -237,6 +275,25 @@ func (cc ClusterConfig) WithNormalizeCompatibilityMode(mode string) ClusterConfi
 // Enables generation of the custom_plugins in testutil/custom_plugins
 func (cc ClusterConfig) WithCustomPlugins() ClusterConfig {
 	cc.customPlugins = true
+	return cc
+}
+
+// WithGraphqlLambdaURL sets the graphql lambda url for alpha
+func (cc ClusterConfig) WithGraphqlLambdaURL(url string) ClusterConfig {
+	cc.lambdaURL = url
+	return cc
+}
+
+// WithStartupArg appends an extra flag to the Alpha startup command in the form
+// --arg=value. It may be called multiple times to accumulate additional flags.
+func (cc ClusterConfig) WithStartupArg(arg, value string) ClusterConfig {
+	cc.startupArgs = append(cc.startupArgs, fmt.Sprintf("--%s=%s", arg, value))
+	return cc
+}
+
+// WithMcp sets the mcp flag for alpha
+func (cc ClusterConfig) WithMCP() ClusterConfig {
+	cc.mcp = true
 	return cc
 }
 

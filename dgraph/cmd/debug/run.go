@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -28,13 +28,13 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	bpb "github.com/dgraph-io/badger/v4/pb"
+	"github.com/dgraph-io/dgraph/v25/codec"
+	"github.com/dgraph-io/dgraph/v25/posting"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/raftwal"
+	"github.com/dgraph-io/dgraph/v25/types"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/codec"
-	"github.com/hypermodeinc/dgraph/v25/posting"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/raftwal"
-	"github.com/hypermodeinc/dgraph/v25/types"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -603,7 +603,7 @@ func printKeys(db *badger.DB) {
 		}
 
 		var sz, deltaCount int64
-		pl, err := posting.GetNew(key, db, opt.readTs)
+		pl, err := posting.GetNew(key, db, opt.readTs, false)
 		if err == nil {
 			pl.RLock()
 			c := pl.GetLength(math.MaxUint64)
@@ -943,7 +943,7 @@ func run() {
 	go func() {
 		for i := 8080; i < 9080; i++ {
 			fmt.Printf("Listening for /debug HTTP requests at port: %d\n", i)
-			if err := http.ListenAndServe(fmt.Sprintf("localhost:%d", i), nil); err != nil {
+			if err := http.ListenAndServe(fmt.Sprintf("localhost:%d", i), x.SanitizedDefaultServeMux()); err != nil {
 				fmt.Println("Port busy. Trying another one...")
 				continue
 			}

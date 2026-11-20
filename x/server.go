@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -9,6 +9,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"expvar"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -27,17 +29,17 @@ var (
 	ServerCloser = z.NewCloser(0)
 )
 
-func StartListenHttpAndHttps(l net.Listener, tlsCfg *tls.Config, closer *z.Closer) {
+func StartListenHttpAndHttps(l net.Listener, tlsCfg *tls.Config, closer *z.Closer, h http.Handler) {
 	defer closer.Done()
 	m := cmux.New(l)
-	startServers(m, tlsCfg)
+	startServers(m, tlsCfg, h)
 	err := m.Serve()
 	if err != nil {
 		glog.Errorf("error from cmux serve: %v", err)
 	}
 }
 
-func startServers(m cmux.CMux, tlsConf *tls.Config) {
+func startServers(m cmux.CMux, tlsConf *tls.Config, h http.Handler) {
 	httpRule := m.Match(func(r io.Reader) bool {
 		// no tls config is provided. http is being used.
 		if tlsConf == nil {
@@ -53,19 +55,20 @@ func startServers(m cmux.CMux, tlsConf *tls.Config) {
 		// monitoring tools which operate without authentication.
 		return strings.HasPrefix(path, "/health")
 	})
-	go startListen(httpRule)
+	go startListen(httpRule, h)
 
 	// if tls is enabled, make tls encryption based connections as default
 	if tlsConf != nil {
 		httpsRule := m.Match(cmux.Any())
 		// this is chained listener. tls listener will decrypt
 		// the message and send it in plain text to HTTP server
-		go startListen(tls.NewListener(httpsRule, tlsConf))
+		go startListen(tls.NewListener(httpsRule, tlsConf), h)
 	}
 }
 
-func startListen(l net.Listener) {
+func startListen(l net.Listener, h http.Handler) {
 	srv := &http.Server{
+		Handler:           h, // nil falls back to http.DefaultServeMux
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      600 * time.Second,
 		IdleTimeout:       2 * time.Minute,
@@ -90,4 +93,43 @@ func parseRequestPath(r io.Reader) (path string, ok bool) {
 	}
 
 	return request.URL.Path, true
+}
+
+// filteredExpvarHandler serves /debug/vars but omits the "cmdline" key that
+// expvar publishes by default (os.Args), which may contain the admin token
+// from --security "token=...".
+func filteredExpvarHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	fmt.Fprintf(w, "{\n")
+	first := true
+	expvar.Do(func(kv expvar.KeyValue) {
+		if kv.Key == "cmdline" {
+			return
+		}
+		if !first {
+			fmt.Fprintf(w, ",\n")
+		}
+		first = false
+		fmt.Fprintf(w, "%q: %s", kv.Key, kv.Value)
+	})
+	fmt.Fprintf(w, "\n}\n")
+}
+
+// SanitizedDefaultServeMux returns an http.Handler that wraps
+// http.DefaultServeMux but blocks endpoints that expose the full process
+// command line (which may include the admin token from --security "token=..."):
+//   - /debug/pprof/cmdline — registered by net/http/pprof
+//   - /debug/vars          — served with a filtered handler that omits "cmdline"
+func SanitizedDefaultServeMux() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/debug/pprof/cmdline" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/debug/vars" {
+			filteredExpvarHandler(w, r)
+			return
+		}
+		http.DefaultServeMux.ServeHTTP(w, r)
+	})
 }

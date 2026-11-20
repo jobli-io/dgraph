@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -18,10 +18,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 var errNotScalar = errors.New("provided value is not a scalar, can't convert it to string")
@@ -32,8 +32,10 @@ type QueryResolver interface {
 }
 
 // A QueryRewriter can build a Dgraph dql.GraphQuery from a GraphQL query,
+// along with any DQL variable bindings (e.g. for parameterized password
+// queries) that must be supplied to the executor.
 type QueryRewriter interface {
-	Rewrite(ctx context.Context, q schema.Query) ([]*dql.GraphQuery, error)
+	Rewrite(ctx context.Context, q schema.Query) ([]*dql.GraphQuery, map[string]string, error)
 }
 
 // QueryResolverFunc is an adapter that allows to build a QueryResolver from
@@ -124,7 +126,7 @@ func (qr *queryResolver) rewriteAndExecute(ctx context.Context, query schema.Que
 		}
 	}
 
-	dgQuery, err := qr.queryRewriter.Rewrite(ctx, query)
+	dgQuery, vars, err := qr.queryRewriter.Rewrite(ctx, query)
 	if err != nil {
 		return emptyResult(schema.GQLWrapf(err, "couldn't rewrite query %s",
 			query.ResponseName()))
@@ -140,7 +142,8 @@ func (qr *queryResolver) rewriteAndExecute(ctx context.Context, query schema.Que
 	if query.QueryType() == schema.GroupByQuery {
 		execField = nil
 	}
-	resp, err := qr.executor.Execute(ctx, &dgoapi.Request{Query: qry, ReadOnly: true}, execField)
+	resp, err := qr.executor.Execute(ctx,
+		&dgoapi.Request{Query: qry, Vars: vars, ReadOnly: true}, execField)
 	queryTimer.Stop()
 
 	if err != nil && !x.IsGqlErrorList(err) {

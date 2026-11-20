@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 const ExportRequest = `mutation {
@@ -91,11 +91,12 @@ func MakeGQLRequestWithAccessJwt(t *testing.T, params *GraphQLParams, accessToke
 func MakeGQLRequestWithAccessJwtAndTLS(t *testing.T, params *GraphQLParams,
 	tls *tls.Config, accessToken string) *GraphQLResponse {
 
+	ensureAddressesInitialized()
 	var adminUrl string
 	if tls != nil {
-		adminUrl = "https://" + SockAddrHttp + "/admin"
+		adminUrl = "https://" + GetSockAddrHttp() + "/admin"
 	} else {
-		adminUrl = "http://" + SockAddrHttp + "/admin"
+		adminUrl = "http://" + GetSockAddrHttp() + "/admin"
 	}
 
 	b, err := json.Marshal(params)
@@ -274,7 +275,14 @@ func AppendAuthInfo(schema []byte, algo, publicKeyFile string, closedByDefault b
 	var verificationKey string
 	switch algo {
 	case "HS256":
-		verificationKey = "secretkey"
+		// Widened from the original 9-byte "secretkey" to meet the 14-byte
+		// (112-bit) HMAC key minimum that NIST SP 800-131A requires and
+		// that some FIPS-validated crypto providers (e.g. the OpenSSL FIPS
+		// provider used by Chainguard go-fips / Microsoft Go FIPS-mode builds)
+		// enforce at EVP_MAC_init. Benign for non-FIPS builds — a longer
+		// HMAC key is always acceptable. See graphql/resolve/auth_test.go
+		// for the matching hardcoded JWT tokens signed with this value.
+		verificationKey = "secretkey-long-enough"
 	case "RS256":
 		keyData, err := os.ReadFile(publicKeyFile)
 		if err != nil {

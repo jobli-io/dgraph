@@ -14,9 +14,9 @@ import (
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
 	exprlib "github.com/expr-lang/expr"
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
 )
 
 // CascadeDeleteCollector pre-queries and collects all nodes that must be deleted

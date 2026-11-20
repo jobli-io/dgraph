@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -20,9 +20,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -91,6 +91,18 @@ func (p *Pools) GetAll() []*Pool {
 	return pool
 }
 
+// RemoveAll removes all pool entries.
+func (p *Pools) RemoveAll() {
+	p.Lock()
+	defer p.Unlock()
+
+	for k, pool := range p.all {
+		glog.Warningf("CONN: Disconnecting from %s\n", k)
+		delete(p.all, k)
+		pool.shutdown()
+	}
+}
+
 // RemoveInvalid removes invalid nodes from the list of pools.
 func (p *Pools) RemoveInvalid(state *pb.MembershipState) {
 	// Keeps track of valid IP addresses, assigned to active nodes. We do this
@@ -110,6 +122,12 @@ func (p *Pools) RemoveInvalid(state *pb.MembershipState) {
 			p.remove(member.Addr)
 		}
 	}
+}
+
+// Remove disconnects and removes the pool for addr. It is a no-op if addr is
+// not in the pool. Used to clean up stale connections after an address change.
+func (p *Pools) Remove(addr string) {
+	p.remove(addr)
 }
 
 func (p *Pools) remove(addr string) {
@@ -241,11 +259,10 @@ func (p *Pool) listenToHeartbeat() error {
 	}()
 
 	threshold := time.Now().Add(10 * time.Second)
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	ticker := time.Tick(time.Second)
 	for {
 		select {
-		case <-ticker.C:
+		case <-ticker:
 			// Don't check before at least 10s since start.
 			if time.Now().Before(threshold) {
 				continue
@@ -277,11 +294,19 @@ func (p *Pool) MonitorHealth() {
 
 	// We might have lost connection to the destination. In that case, re-dial
 	// the connection.
-	reconnect := func() {
+	// Returns true, if reconnection was successful
+	reconnect := func() bool {
+		reconnectionTicker := time.Tick(time.Second)
 		for {
-			time.Sleep(time.Second)
+			select {
+			case <-p.closer.HasBeenClosed():
+				glog.Infof("CONN: Returning from MonitorHealth for %s", p.Addr)
+				return false
+			case <-reconnectionTicker:
+			}
+
 			if err := p.closer.Ctx().Err(); err != nil {
-				return
+				return false
 			}
 			ctx, cancel := context.WithTimeout(p.closer.Ctx(), 10*time.Second)
 			conn, err := grpc.NewClient(p.Addr, p.dialOpts...)
@@ -298,7 +323,7 @@ func (p *Pool) MonitorHealth() {
 				}
 				p.conn = conn
 				p.Unlock()
-				return
+				return true
 			}
 			glog.Errorf("CONN: Unable to connect with %s : %s\n", p.Addr, err)
 			if conn != nil {
@@ -309,19 +334,20 @@ func (p *Pool) MonitorHealth() {
 		}
 	}
 
+	ticker := time.Tick(time.Second)
 	for {
 		select {
 		case <-p.closer.HasBeenClosed():
 			glog.Infof("CONN: Returning from MonitorHealth for %s", p.Addr)
 			return
-		default:
-			err := p.listenToHeartbeat()
-			if err != nil {
-				reconnect()
+		case <-ticker:
+		}
+
+		err := p.listenToHeartbeat()
+		if err != nil {
+			if reconnect() {
 				glog.Infof("CONN: Re-established connection with %s.\n", p.Addr)
 			}
-			// Sleep for a bit before retrying.
-			time.Sleep(echoDuration)
 		}
 	}
 }

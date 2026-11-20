@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -8,6 +8,7 @@ package resolve
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"regexp"
 	"sort"
@@ -20,11 +21,11 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/edgraph"
-	"github.com/hypermodeinc/dgraph/v25/graphql/api"
-	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/edgraph"
+	"github.com/dgraph-io/dgraph/v25/graphql/api"
+	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 type resolveCtxKey string
@@ -484,6 +485,14 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 		endTime := time.Now()
 		resp.Extensions.Tracing.EndTime = endTime.Format(time.RFC3339Nano)
 		resp.Extensions.Tracing.Duration = endTime.Sub(startTime).Nanoseconds()
+
+		// Log slow queries with structured fields for observability
+		if x.WorkerConfig.SlowQueryLogThreshold > 0 {
+			x.LogSlowOperation(ctx, "query", "graphql", gqlReq.Query, &x.SlowOperationLatency{
+				Start:      startTime,
+				Processing: endTime.Sub(startTime),
+			})
+		}
 	}()
 	ctx = context.WithValue(ctx, resolveStartTime, startTime)
 
@@ -494,7 +503,12 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 		return
 	}
 
-	ctx = x.AttachJWTNamespace(ctx)
+	ctx, err = x.ResolveTenant(ctx)
+	if err != nil {
+		resp.Errors = schema.AsGQLErrors(err)
+		return
+	}
+
 	op, err := r.schema.Operation(gqlReq)
 	if err != nil {
 		resp.Errors = schema.AsGQLErrors(err)
@@ -510,8 +524,12 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 			if err != nil {
 				glog.Infof("Failed to marshal variables for logging : %s", err)
 			}
-			glog.Infof("Resolving GQL request: \n%s\nWith Variables: \n%s\n",
-				gqlReq.Query, string(b))
+			traceID := ""
+			if span.SpanContext().IsValid() {
+				traceID = fmt.Sprintf(" [trace_id=%s]", span.SpanContext().TraceID().String())
+			}
+			glog.Infof("Resolving GQL request: \n%s\nWith Variables: \n%s%s",
+				gqlReq.Query, string(b), traceID)
 
 			// Log decoded JWT auth payload so scope/azp/sub/ws are visible per-request.
 			if claims, claimsErr := r.schema.Meta().AuthMeta().ExtractCustomClaims(ctx); claimsErr == nil {

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,9 +13,9 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/hypermodeinc/dgraph/v25/algo"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/types"
+	"github.com/dgraph-io/dgraph/v25/algo"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/types"
 )
 
 type groupPair struct {
@@ -278,7 +278,7 @@ func (sg *SubGraph) formResult(ul *pb.List, doneVars map[string]varValue) (*grou
 			vMap, ok := doneVars[child.Params.Var]
 			if ok {
 				for _, srcUid := range ul.Uids {
-					val, ok := vMap.Vals[srcUid]
+					val, ok := vMap.Vals.Get(srcUid)
 					if !ok {
 						continue
 					}
@@ -434,7 +434,7 @@ func (sg *SubGraph) fillGroupedVars(doneVars map[string]varValue, path []*SubGra
 		}
 		chVar := child.Params.Var
 
-		tempMap := make(map[uint64]types.Val)
+		tempMap := types.NewShardedMap()
 		for _, grp := range res.group {
 			if len(grp.keys) == 0 {
 				continue
@@ -449,7 +449,7 @@ func (sg *SubGraph) fillGroupedVars(doneVars map[string]varValue, path []*SubGra
 			}
 			// grp.aggregates could be empty if schema conversion failed during aggregation
 			if len(grp.aggregates) > 0 {
-				tempMap[uid] = grp.aggregates[len(grp.aggregates)-1].key
+				tempMap.Set(uid, grp.aggregates[len(grp.aggregates)-1].key)
 			}
 		}
 		doneVars[chVar] = varValue{

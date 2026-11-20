@@ -9,13 +9,13 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
-	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/graphql/test"
-	"github.com/hypermodeinc/dgraph/v25/testutil"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/authorization"
+	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/graphql/test"
+	"github.com/dgraph-io/dgraph/v25/testutil"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 func TestCascadeAuthDQL_UserQueryDebug(t *testing.T) {
@@ -230,7 +230,7 @@ query RestoreAppContext($workspaceId: ID!, $email: String!) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -502,7 +502,7 @@ query GetCompany($id: ID) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -595,7 +595,7 @@ func TestBypassAuth(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -668,7 +668,7 @@ func TestInterfaceMemberTypesFilterAuthOptimization(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -718,7 +718,7 @@ func TestFilterLookupStrategy(t *testing.T) {
 	`
 	op1, err := gqlSchema.Operation(&schema.Request{Query: gqlQuery1})
 	require.NoError(t, err)
-	dgQry1, err := NewQueryRewriter().Rewrite(context.Background(), test.GetQuery(t, op1))
+	dgQry1, _, err := NewQueryRewriter().Rewrite(context.Background(), test.GetQuery(t, op1))
 	require.NoError(t, err)
 	actual1 := dgraph.AsString(dgQry1)
 	t.Logf("Query 1 DQL:\n%s", actual1)
@@ -736,7 +736,7 @@ func TestFilterLookupStrategy(t *testing.T) {
 	`
 	op2, err := gqlSchema.Operation(&schema.Request{Query: gqlQuery2})
 	require.NoError(t, err)
-	dgQry2, err := NewQueryRewriter().Rewrite(context.Background(), test.GetQuery(t, op2))
+	dgQry2, _, err := NewQueryRewriter().Rewrite(context.Background(), test.GetQuery(t, op2))
 	require.NoError(t, err)
 	actual2 := dgraph.AsString(dgQry2)
 	t.Logf("Query 2 DQL:\n%s", actual2)
@@ -755,7 +755,7 @@ func TestFilterLookupStrategy(t *testing.T) {
 	`
 	op3, err := gqlSchema.Operation(&schema.Request{Query: gqlQuery3})
 	require.NoError(t, err)
-	dgQry3, err := NewQueryRewriter().Rewrite(context.Background(), test.GetQuery(t, op3))
+	dgQry3, _, err := NewQueryRewriter().Rewrite(context.Background(), test.GetQuery(t, op3))
 	require.NoError(t, err)
 	actual3 := dgraph.AsString(dgQry3)
 	t.Logf("Query 3 DQL:\n%s", actual3)
@@ -838,7 +838,7 @@ func TestForwardStrategyVariableUnification(t *testing.T) {
 	ctx, err := metaInfo.AddClaimsToContext(context.Background())
 	require.NoError(t, err)
 
-	dgQry, err := NewQueryRewriter().Rewrite(ctx, test.GetQuery(t, op))
+	dgQry, _, err := NewQueryRewriter().Rewrite(ctx, test.GetQuery(t, op))
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQry)
@@ -918,7 +918,7 @@ func TestCascadeAuthDQL_JobAdAggregateCountDebug(t *testing.T) {
 	ctx, err := metaInfo.AddClaimsToContext(context.Background())
 	require.NoError(t, err)
 
-	dgQry, err := NewQueryRewriter().Rewrite(ctx, test.GetQuery(t, op))
+	dgQry, _, err := NewQueryRewriter().Rewrite(ctx, test.GetQuery(t, op))
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQry)
@@ -1049,7 +1049,7 @@ func TestInterfaceMemberTypesMultiple(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -1125,7 +1125,7 @@ func TestHighSelectivityCascadeAuthForward(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -1206,7 +1206,7 @@ func TestMultipleUIDInversionCandidates(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -1277,7 +1277,7 @@ func TestRecursiveSelectiveFilterPromotion(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)

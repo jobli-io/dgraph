@@ -1,7 +1,7 @@
 //go:build integration2
 
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -11,7 +11,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"testing"
 	"time"
@@ -20,12 +19,26 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
-	"github.com/hypermodeinc/dgraph/v25/dgraphtest"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/buildvars"
+	"github.com/dgraph-io/dgraph/v25/dgraphapi"
+	"github.com/dgraph-io/dgraph/v25/dgraphtest"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
+// skipIfFIPS skips the current test when buildvars.FIPS140CryptoRestricted
+// is true. Upgrade-path tests pin a specific upstream SHA for the "old"
+// binary; that commit predates any FIPS-enforcing toolchain, so building
+// it under a FIPS configuration fails outright or produces a binary that
+// refuses to start. The test remains semantically valid in non-FIPS
+// builds.
+func skipIfFIPS(t *testing.T) {
+	if buildvars.FIPS140CryptoRestricted {
+		t.Skip("upgrade-path test pins a pre-FIPS upstream SHA; skipping under FIPS build")
+	}
+}
+
 func TestCheckUpgrade(t *testing.T) {
+	skipIfFIPS(t)
 	conf := dgraphtest.NewClusterConfig().WithNumAlphas(1).WithNumZeros(1).WithReplicas(1).
 		WithACL(time.Hour).WithVersion("57aa5c4ac")
 	c, err := dgraphtest.NewLocalCluster(conf)
@@ -81,7 +94,7 @@ func TestCheckUpgrade(t *testing.T) {
 		"--namespace", "1",
 	}
 
-	cmd := exec.Command(filepath.Join(c1.GetTempDir(), "dgraph"), args...)
+	cmd := exec.Command(c1.HostDgraphBinaryPath(), args...)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err)
 	actualOutput := string(out)
@@ -97,11 +110,12 @@ func TestCheckUpgrade(t *testing.T) {
 }
 
 func TestQueryDuplicateNodes(t *testing.T) {
+	skipIfFIPS(t)
 	conf := dgraphtest.NewClusterConfig().WithNumAlphas(1).WithNumZeros(1).WithReplicas(1).
 		WithACL(time.Hour).WithVersion("57aa5c4ac").WithAclAlg(jwt.GetSigningMethod("HS256"))
 	c, err := dgraphtest.NewLocalCluster(conf)
 	require.NoError(t, err)
-	// defer func() { c.Cleanup(t.Failed()) }()
+	defer func() { c.Cleanup(t.Failed()) }()
 	require.NoError(t, c.Start())
 	gc, cleanup, err := c.Client()
 	require.NoError(t, err)

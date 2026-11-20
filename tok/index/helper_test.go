@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -15,9 +15,8 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	c "github.com/hypermodeinc/dgraph/v25/tok/constraints"
-	"github.com/viterin/vek/vek32"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	c "github.com/dgraph-io/dgraph/v25/tok/constraints"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -292,15 +291,6 @@ func BenchmarkDotProduct(b *testing.B) {
 		b.Skip()
 	}
 
-	b.Run(fmt.Sprintf("vek:size=%d", len(data)),
-		func(b *testing.B) {
-			temp := make([]float32, num)
-			BytesAsFloatArray[float32](data, &temp, 32)
-			for k := 0; k < b.N; k++ {
-				vek32.Dot(temp, temp)
-			}
-		})
-
 	b.Run(fmt.Sprintf("dotProduct:size=%d", len(data)),
 		func(b *testing.B) {
 
@@ -366,7 +356,7 @@ func littleEndianBytesAsFloatArray[T c.Float](encoded []byte, retVal *[]T, float
 		// Assume LittleEndian for encoding since this is
 		// the assumption elsewhere when reading from client.
 		// See dgraph-io/dgo/protos/api.pb.go
-		// See also hypermodeinc/dgraph/types/conversion.go
+		// See also dgraph-io/dgraph/types/conversion.go
 		// This also seems to be the preference from many examples
 		// I have found via Google search. It's unclear why this
 		// should be a preference.

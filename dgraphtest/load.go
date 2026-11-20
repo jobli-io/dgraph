@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -17,22 +17,46 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
 	"github.com/pkg/errors"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
-	"github.com/hypermodeinc/dgraph/v25/enc"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/buildvars"
+	"github.com/dgraph-io/dgraph/v25/dgraphapi"
+	"github.com/dgraph-io/dgraph/v25/enc"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
+// hostBinaryFileName is the conventional filename for the host-OS-native
+// dgraph binary when it differs from the container binary (non-Linux).
+// On Linux the host and container binaries share the same file name,
+// returned by buildvars.BinaryName.Get(), and this constant is unused.
+const hostBinaryFileName = "dgraph_host"
+
+// HostDgraphBinaryPath returns the path to the host-OS-native dgraph
+// binary in tempBinDir. On Linux this is the same binary used by Docker
+// containers, named by buildvars.BinaryName.Get() (typically "dgraph").
+// On non-Linux (macOS) it is a separate native binary staged as
+// hostBinaryFileName by setupBinary(). The HostBinaryName hook lets a
+// fork override the filename entirely.
+func (c *LocalCluster) HostDgraphBinaryPath() string {
+	if name := HostBinaryName(); name != "" {
+		return filepath.Join(c.tempBinDir, name)
+	}
+	if runtime.GOOS == "linux" {
+		return filepath.Join(c.tempBinDir, buildvars.BinaryName.Get())
+	}
+	return filepath.Join(c.tempBinDir, hostBinaryFileName)
+}
+
 var datafiles = map[string]string{
-	"1million.schema":  "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/data/1million.schema?raw=true",
-	"1million.rdf.gz":  "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/data/1million.rdf.gz?raw=true",
-	"21million.schema": "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/data/21million.schema?raw=true",
-	"21million.rdf.gz": "https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/data/21million.rdf.gz?raw=true",
+	"1million.schema":  "https://github.com/dgraph-io/dgraph-benchmarks/blob/main/data/1million.schema?raw=true",
+	"1million.rdf.gz":  "https://github.com/dgraph-io/dgraph-benchmarks/blob/main/data/1million.rdf.gz?raw=true",
+	"21million.schema": "https://github.com/dgraph-io/dgraph-benchmarks/blob/main/data/21million.schema?raw=true",
+	"21million.rdf.gz": "https://github.com/dgraph-io/dgraph-benchmarks/blob/main/data/21million.rdf.gz?raw=true",
 }
 
 type DatasetType int
@@ -245,7 +269,7 @@ func (c *LocalCluster) LiveLoad(opts LiveOpts) error {
 	}
 
 	log.Printf("[INFO] running live loader with args: [%v]", strings.Join(args, " "))
-	cmd := exec.Command(filepath.Join(c.tempBinDir, "dgraph"), args...)
+	cmd := exec.Command(c.HostDgraphBinaryPath(), args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return errors.Wrapf(err, "error running live loader: %v", string(out))
 	} else {
@@ -463,10 +487,16 @@ func (c *LocalCluster) LiveLoadFromExport(exportDir string) error {
 }
 
 type BulkOpts struct {
-	DataFiles      []string
-	SchemaFiles    []string
-	GQLSchemaFiles []string
-	OutDir         string
+	DataFiles           []string
+	SchemaFiles         []string
+	GQLSchemaFiles      []string
+	OutDir              string
+	MapShards           int    // Number of map shards (0 = auto based on numAlphas/replicas)
+	ReduceShards        int    // Number of reduce shards (0 = auto based on numAlphas/replicas)
+	SkipReducePhase     bool   // Stop after map phase; preserve tmp dir for later reduce
+	SkipMapPhase        bool   // Skip map phase; assumes map output files already exist
+	TmpDir              string // Custom tmp directory (required when splitting map/reduce runs)
+	TabletPlacementFile string // JSON file pinning predicates to groups (--tablet_placement)
 }
 
 func (c *LocalCluster) BulkLoad(opts BulkOpts) error {
@@ -482,15 +512,39 @@ func (c *LocalCluster) BulkLoad(opts BulkOpts) error {
 		outDir = c.conf.bulkOutDirForMount
 	}
 
-	shards := c.conf.numAlphas / c.conf.replicas
+	// Determine shard counts - use explicit values if provided, otherwise calculate from cluster config
+	mapShards := opts.MapShards
+	reduceShards := opts.ReduceShards
+	if mapShards == 0 {
+		mapShards = c.conf.numAlphas / c.conf.replicas
+	}
+	if reduceShards == 0 {
+		reduceShards = c.conf.numAlphas / c.conf.replicas
+	}
+
 	args := []string{"bulk",
 		"--store_xids=true",
 		"--zero", zeroURL,
-		"--reduce_shards", strconv.Itoa(shards),
-		"--map_shards", strconv.Itoa(shards),
+		"--reduce_shards", strconv.Itoa(reduceShards),
+		"--map_shards", strconv.Itoa(mapShards),
 		"--out", outDir,
 		// we had to create the dir for setting up docker, hence, replacing it here.
 		"--replace_out",
+		// Use :0 to let OS assign random available port for pprof, avoids conflicts in tests
+		"--http", ":0",
+	}
+
+	if opts.TmpDir != "" {
+		args = append(args, "--tmp", opts.TmpDir)
+	}
+	if opts.SkipReducePhase {
+		args = append(args, "--skip_reduce_phase")
+	}
+	if opts.SkipMapPhase {
+		args = append(args, "--skip_map_phase")
+	}
+	if opts.TabletPlacementFile != "" {
+		args = append(args, "--tablet_placement", opts.TabletPlacementFile)
 	}
 
 	if len(opts.DataFiles) > 0 {
@@ -504,7 +558,7 @@ func (c *LocalCluster) BulkLoad(opts BulkOpts) error {
 	}
 
 	log.Printf("[INFO] running bulk loader with args: [%v]", strings.Join(args, " "))
-	cmd := exec.Command(filepath.Join(c.tempBinDir, "dgraph"), args...)
+	cmd := exec.Command(c.HostDgraphBinaryPath(), args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return errors.Wrapf(err, "error running bulk loader: %v", string(out))
 	} else {
@@ -569,8 +623,8 @@ func downloadFile(fname, url string) error {
 	cmd := exec.Command("wget", "-O", fname, url)
 	cmd.Dir = datasetFilesPath
 
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("error downloading file %s: %s", fname, string(out))
+	if _, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("error downloading file %s: %w", fname, err)
 	}
 	return nil
 }

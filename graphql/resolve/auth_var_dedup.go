@@ -36,7 +36,7 @@ package resolve
 import (
 	"strings"
 
-	"github.com/hypermodeinc/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/dql"
 )
 
 // deduplicateAuthVarBlocks deduplicates semantically identical DQL var blocks

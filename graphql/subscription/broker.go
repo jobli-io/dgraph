@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/hypermodeinc/dgraph/v25/conn"
+	"github.com/dgraph-io/dgraph/v25/conn"
 )
 
 // InvalidationMessage is the payload distributed across the cluster when a mutation succeeds.

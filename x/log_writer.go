@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -10,8 +10,10 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,7 +30,7 @@ const (
 	backupTimeFormat = "2006-01-02T15-04-05.000"
 	bufferSize       = 256 * 1024
 	flushInterval    = 10 * time.Second
-	//  old logs before https://github.com/hypermodeinc/dgraph/pull/8323 contain deprecated verification text in header
+	//  old logs before https://github.com/dgraph-io/dgraph/pull/8323 contain deprecated verification text in header
 	VerificationTextDeprecated = "Hello World"
 	VerificationText           = "dlroW olloH"
 )
@@ -43,12 +45,15 @@ type LogWriter struct {
 	Compress      bool
 	EncryptionKey []byte
 
-	mu          sync.Mutex
-	size        int64
-	file        *os.File
-	writer      *bufio.Writer
-	flushTicker *time.Ticker
-	closer      *z.Closer
+	mu     sync.Mutex
+	size   int64
+	file   *os.File
+	writer *bufio.Writer
+	closer *z.Closer
+	// now supplies the time for backup file names; nil means time.Now. Tests
+	// pin it so that rotations collide at the millisecond resolution of the
+	// name on any storage, instead of only when they finish inside one.
+	now func() time.Time
 	// To manage order of cleaning old logs files
 	manageChannel chan bool
 }
@@ -76,7 +81,6 @@ func (l *LogWriter) Init() (*LogWriter, error) {
 		}
 	}()
 
-	l.flushTicker = time.NewTicker(flushInterval)
 	go l.flushPeriodic()
 	return l, nil
 }
@@ -138,7 +142,6 @@ func (l *LogWriter) Close() error {
 		return nil
 	}
 	l.flush()
-	l.flushTicker.Stop()
 	close(l.manageChannel)
 	_ = l.file.Close()
 	l.writer = nil
@@ -151,10 +154,11 @@ func (l *LogWriter) flushPeriodic() {
 	if l == nil {
 		return
 	}
+	ticker := time.Tick(flushInterval)
 	defer l.closer.Done()
 	for {
 		select {
-		case <-l.flushTicker.C:
+		case <-ticker:
 			l.mu.Lock()
 			l.flush()
 			l.mu.Unlock()
@@ -201,6 +205,14 @@ func (l *LogWriter) rotate() error {
 		return nil
 	}
 
+	// Pick the backup name before touching the open file. A filesystem error
+	// here then leaves the current file open and the writer usable, instead of
+	// returning with a closed file that every later Write would fail on.
+	newname, err := l.nextBackupName()
+	if err != nil {
+		return fmt.Errorf("can't pick a backup name for log file: %s", err)
+	}
+
 	l.flush()
 	if err := l.file.Close(); err != nil {
 		return err
@@ -208,7 +220,6 @@ func (l *LogWriter) rotate() error {
 
 	if _, err := os.Stat(l.FilePath); err == nil {
 		// move the existing file
-		newname := backupName(l.FilePath)
 		if err := os.Rename(l.FilePath, newname); err != nil {
 			return fmt.Errorf("can't rename log file: %s", err)
 		}
@@ -216,6 +227,44 @@ func (l *LogWriter) rotate() error {
 
 	l.manageChannel <- true
 	return l.open()
+}
+
+// nextBackupName returns a backup file name that nothing on disk uses yet, so a
+// rotation can never rename onto an earlier backup. It starts at the current
+// millisecond, the resolution of backupTimeFormat, and steps forward past every
+// name that exists, plain or compressed. Earlier rotations of this writer are
+// on disk, so no extra state is needed to keep names unique, and backups left
+// by a previous writer on the same path are skipped the same way.
+// Caller must hold l.mu.
+func (l *LogWriter) nextBackupName() (string, error) {
+	now := time.Now
+	if l.now != nil {
+		now = l.now
+	}
+	for t := now().UTC().Truncate(time.Millisecond); ; t = t.Add(time.Millisecond) {
+		name := backupName(l.FilePath, t)
+		taken, err := backupExists(name)
+		if err != nil {
+			return "", err
+		}
+		if !taken {
+			return name, nil
+		}
+	}
+}
+
+// backupExists reports whether name or its compressed form is already on disk.
+func backupExists(name string) (bool, error) {
+	for _, candidate := range []string{name, name + ".gz"} {
+		_, err := os.Lstat(candidate)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func (l *LogWriter) open() error {
@@ -308,10 +357,10 @@ func (l *LogWriter) open() error {
 	return nil
 }
 
-func backupName(name string) string {
+func backupName(name string, t time.Time) string {
 	dir := filepath.Dir(name)
 	prefix, ext := prefixAndExt(name)
-	timestamp := time.Now().UTC().Format(backupTimeFormat)
+	timestamp := t.UTC().Format(backupTimeFormat)
 	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, timestamp, ext))
 }
 
@@ -426,8 +475,13 @@ func processOldLogFiles(fp string, maxAge int64) ([]string, []string, error) {
 			continue
 		}
 
-		_, e := prefixAndExt(fp)
-		tsString := f.Name()[len(defPrefix) : len(f.Name())-len(e)]
+		// a compressed backup carries an extra .gz after the normal extension;
+		// a plain backup of a file that is itself named *.gz must keep its own
+		name := f.Name()
+		if strings.HasSuffix(name, defExt+".gz") {
+			name = strings.TrimSuffix(name, ".gz")
+		}
+		tsString := name[len(defPrefix) : len(name)-len(defExt)]
 		ts, err := time.Parse(backupTimeFormat, tsString)
 		if err != nil {
 			continue

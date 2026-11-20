@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -21,25 +21,27 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/hypermodeinc/dgraph/v25/acl"
-	"github.com/hypermodeinc/dgraph/v25/audit"
-	"github.com/hypermodeinc/dgraph/v25/backup"
-	checkupgrade "github.com/hypermodeinc/dgraph/v25/check_upgrade"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/alpha"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/bulk"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/cert"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/conv"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/debug"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/debuginfo"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/decrypt"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/increment"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/live"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/mcp"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/migrate"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/version"
-	"github.com/hypermodeinc/dgraph/v25/dgraph/cmd/zero"
-	"github.com/hypermodeinc/dgraph/v25/upgrade"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/acl"
+
+	"github.com/dgraph-io/dgraph/v25/audit"
+	"github.com/dgraph-io/dgraph/v25/backup"
+	checkupgrade "github.com/dgraph-io/dgraph/v25/check_upgrade"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/alpha"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/bulk"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/cert"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/conv"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/debug"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/debuginfo"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/decrypt"
+	dgraphimport "github.com/dgraph-io/dgraph/v25/dgraph/cmd/dgraphimport"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/increment"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/live"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/mcp"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/migrate"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/version"
+	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/zero"
+	"github.com/dgraph-io/dgraph/v25/upgrade"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 // RootCmd represents the base command when called without any subcommands
@@ -79,7 +81,7 @@ var subcommands = []*x.SubCommand{
 	&bulk.Bulk, &cert.Cert, &conv.Conv, &live.Live, &alpha.Alpha, &zero.Zero, &version.Version,
 	&debug.Debug, &migrate.Migrate, &debuginfo.DebugInfo, &upgrade.Upgrade, &decrypt.Decrypt, &increment.Increment,
 	&checkupgrade.CheckUpgrade, &backup.Restore, &backup.LsBackup, &backup.ExportBackup, &acl.CmdAcl,
-	&audit.CmdAudit, &mcp.Mcp,
+	&audit.CmdAudit, &mcp.Mcp, &dgraphimport.ImportCmd,
 }
 
 func initCmds() {
@@ -94,8 +96,6 @@ func initCmds() {
 			"overridden to values set with environment variables and flags.")
 	RootCmd.PersistentFlags().Bool("bindall", true,
 		"Use 0.0.0.0 instead of localhost to bind to all addresses on local machine.")
-	RootCmd.PersistentFlags().Bool("expose_trace", false,
-		"Allow trace endpoint to be accessible from remote")
 	x.Check(rootConf.BindPFlags(RootCmd.PersistentFlags()))
 
 	// Add all existing global flag (eg: from glog) to rootCmd's flags
@@ -105,6 +105,10 @@ func initCmds() {
 	x.Check(RootCmd.PersistentFlags().Set("stderrthreshold", "0"))
 	x.Check(RootCmd.PersistentFlags().MarkDeprecated("stderrthreshold",
 		"Dgraph always sets this flag to 0. It can't be overwritten."))
+	RootCmd.PersistentFlags().Bool("expose_trace", false,
+		"Dgraph always sets this flag to false. It can't be overwritten.")
+	x.Check(RootCmd.PersistentFlags().MarkDeprecated("expose_trace",
+		"This flag has been removed. In future releases using this flag will result in an error."))
 
 	for _, sc := range subcommands {
 		RootCmd.AddCommand(sc.Cmd)
@@ -149,6 +153,7 @@ func initCmds() {
 			if err != nil {
 				x.Fatalf("unable to open config file for reading: %v", err)
 			}
+			defer cfgFile.Close()
 			cfgData, err := io.ReadAll(cfgFile)
 			if err != nil {
 				x.Fatalf("unable to read config file: %v", err)

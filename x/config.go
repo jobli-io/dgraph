@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -7,6 +7,7 @@ package x
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net"
 	"time"
 
@@ -71,7 +72,8 @@ type IPRange struct {
 }
 
 // WorkerOptions stores the options for the worker package. It's declared here
-// since it's used by multiple packages.
+// since it's used by multiple packages. Note the String override for this type,
+// added to prevent sensitive information from being logged.
 type WorkerOptions struct {
 	// TmpDir is a directory to store temporary buffers.
 	TmpDir string
@@ -121,7 +123,11 @@ type WorkerOptions struct {
 	//
 	// whitelist string - comma separated IP addresses
 	// token string - if set, all Admin requests to Dgraph will have this token.
+	// anonymous string - what a caller with no verified identity may do.
 	Security *z.SuperFlag
+	// Anonymous is the parsed --security "anonymous=..." posture. Its zero value is
+	// AnonymousFull, which is the behavior every release before the flag existed.
+	Anonymous AnonymousPosture
 	// EncryptionKey is the key used for encryption at rest, backups, exports.
 	EncryptionKey Sensitive
 	// LogDQLRequest indicates whether alpha should log all query/mutation requests coming to it.
@@ -129,6 +135,9 @@ type WorkerOptions struct {
 	// queries hence it has been kept as int32. LogDQLRequest value 1 enables logging of requests
 	// coming to alphas and 0 disables it.
 	LogDQLRequest int32
+	// SlowQueryLogThreshold is the duration after which a query is considered slow and logged
+	// with structured fields including trace ID. Zero disables slow query logging.
+	SlowQueryLogThreshold time.Duration
 	// If true, we should call msync or fsync after every write to survive hard reboots.
 	HardSync bool
 	// Audit contains the audit flags that enables the audit.
@@ -146,4 +155,16 @@ func (w *WorkerOptions) Parse(conf *viper.Viper) {
 	AssertTruef(survive == "process" || survive == "filesystem",
 		"Invalid survival mode: %s", survive)
 	w.HardSync = survive == "filesystem"
+}
+
+// String implements the Stringer interface to redact sensitive fields when logging.
+func (w WorkerOptions) String() string {
+	return fmt.Sprintf("{TmpDir:%s ExportPath:%s MyAddr:%s ZeroAddr:%v Raft:%v "+
+		"WhiteListedIPRanges:%v StrictMutations:%v AclEnabled:%v AclJwtAlg:%v "+
+		"AclPublicKey:**** AbortOlderThan:%v ProposedGroupId:%d StartTime:%v "+
+		"Security:**** EncryptionKey:**** LogDQLRequest:%d SlowQueryThreshold:%v HardSync:%v Audit:%v}",
+		w.TmpDir, w.ExportPath, w.MyAddr, w.ZeroAddr, w.Raft,
+		w.WhiteListedIPRanges, w.StrictMutations, w.AclEnabled, w.AclJwtAlg,
+		w.AbortOlderThan, w.ProposedGroupId, w.StartTime,
+		w.LogDQLRequest, w.SlowQueryLogThreshold, w.HardSync, w.Audit)
 }

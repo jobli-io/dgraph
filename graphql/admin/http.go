@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -23,14 +23,14 @@ import (
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
 
+	"github.com/dgraph-io/dgraph/v25/audit"
+	"github.com/dgraph-io/dgraph/v25/edgraph"
+	"github.com/dgraph-io/dgraph/v25/graphql/api"
+	"github.com/dgraph-io/dgraph/v25/graphql/resolve"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/graphql/subscription"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/graphql-transport-ws/graphqlws"
-	"github.com/hypermodeinc/dgraph/v25/audit"
-	"github.com/hypermodeinc/dgraph/v25/edgraph"
-	"github.com/hypermodeinc/dgraph/v25/graphql/api"
-	"github.com/hypermodeinc/dgraph/v25/graphql/resolve"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/graphql/subscription"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 type Headerkey string
@@ -193,8 +193,11 @@ func (gs *graphqlSubscription) Subscribe(
 	}
 
 	audit.AuditWebSockets(ctx, req)
-	namespace := x.ExtractNamespaceHTTP(&http.Request{Header: reqHeader})
-	glog.Infof("namespace: %d. Got GraphQL request over websocket.", namespace)
+	namespace, err := x.ResolveTenantHTTP(&http.Request{Header: reqHeader})
+	if err != nil {
+		return nil, err
+	}
+	glog.V(2).Infof("namespace: %d. Got GraphQL request over HTTP.", namespace)
 	// first load the schema, then do anything else
 	if err := LazyLoadSchema(namespace); err != nil {
 		return nil, err
@@ -253,7 +256,7 @@ func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	ns, _ := strconv.ParseUint(r.Header.Get("resolver"), 10, 64)
-	glog.Infof("namespace: %d. Got GraphQL request over HTTP.", ns)
+	glog.V(2).Infof("namespace: %d. Got GraphQL request over HTTP.", ns)
 	if err := gh.isValid(ns); err != nil {
 		glog.Errorf("namespace: %d. graphqlHandler not initialised: %s", ns, err)
 		WriteErrorResponse(w, r, errors.New(resolve.ErrInternal))
@@ -270,11 +273,14 @@ func (gh *graphqlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pass in PoorMan's auth, ACL and IP information if present.
-	ctx = x.AttachAccessJwt(ctx, r)
-	ctx = x.AttachRemoteIP(ctx, r)
-	ctx = x.AttachAuthToken(ctx, r)
-	ctx = x.AttachJWTNamespace(ctx)
+	// Pass in PoorMan's auth, ACL and IP information if present, and resolve the
+	// caller's identity from it.
+	ctx = x.AttachRequestIdentity(ctx, r)
+	ctx, err := x.ResolveTenant(ctx)
+	if err != nil {
+		WriteErrorResponse(w, r, err)
+		return
+	}
 
 	var res *schema.Response
 	gqlReq, err := getRequest(r)

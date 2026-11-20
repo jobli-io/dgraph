@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/gqlparser/v2/ast"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/stretchr/testify/require"
 )
 

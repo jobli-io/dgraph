@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/minio/minio-go/v6"
+	"github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/dgraph-io/dgraph/v25/testutil"
 )
 
 var rootDir = "./data"
@@ -68,15 +68,15 @@ func newSuiteInternal(t *testing.T, opts suiteOpts) *bsuite {
 
 		mc, err := testutil.NewMinioClient()
 		require.NoError(t, err)
-		if ok, err := mc.BucketExists(rootBucket); !ok {
+		if ok, err := mc.BucketExists(t.Context(), rootBucket); !ok {
 			require.NoError(t, err)
-			require.NoError(t, mc.MakeBucket(rootBucket, ""))
+			require.NoError(t, mc.MakeBucket(t.Context(), rootBucket, minio.MakeBucketOptions{}))
 		}
-		_, err = mc.FPutObject(rootBucket, "rdfs.rdf", rdfFile, minio.PutObjectOptions{})
+		_, err = mc.FPutObject(t.Context(), rootBucket, "rdfs.rdf", rdfFile, minio.PutObjectOptions{})
 		require.NoError(t, err)
-		_, err = mc.FPutObject(rootBucket, "schema.txt", schemaFile, minio.PutObjectOptions{})
+		_, err = mc.FPutObject(t.Context(), rootBucket, "schema.txt", schemaFile, minio.PutObjectOptions{})
 		require.NoError(t, err)
-		_, err = mc.FPutObject(rootBucket, "gql_schema.txt", gqlSchemaFile, minio.PutObjectOptions{})
+		_, err = mc.FPutObject(t.Context(), rootBucket, "gql_schema.txt", gqlSchemaFile, minio.PutObjectOptions{})
 		require.NoError(t, err)
 	}
 
@@ -122,7 +122,10 @@ func newSuiteFromFile(t *testing.T, schemaFile, rdfFile, gqlSchemaFile string) *
 func (s *bsuite) setup(t *testing.T, schemaFile, rdfFile, gqlSchemaFile string) {
 	var env []string
 	if s.opts.remote {
-		env = append(env, "MINIO_ACCESS_KEY=accesskey", "MINIO_SECRET_KEY=secretkey")
+		// Secret key padded to 14+ bytes so "AWS4"+secret satisfies the
+		// OpenSSL FIPS provider's HMAC key-length minimum (matches
+		// dgraph/minio.env, systest/backup.env).
+		env = append(env, "MINIO_ACCESS_KEY=accesskey", "MINIO_SECRET_KEY=secretkey-long-enough")
 	}
 
 	require.NoError(s.t, makeDirEmpty(filepath.Join(rootDir, "out", "0")))

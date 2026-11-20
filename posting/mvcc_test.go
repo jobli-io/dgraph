@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -10,6 +10,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -17,10 +18,11 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/dgraph/v25/codec"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 func TestIncrRollupGetsCancelledQuickly(t *testing.T) {
@@ -135,7 +137,7 @@ func BenchmarkTestCache(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			key := keys[rand.Intn(NInt-1)]
-			_, err = getNew(key, pstore, math.MaxUint64)
+			_, err = getNew(key, pstore, math.MaxUint64, false)
 			if err != nil {
 				panic(err)
 			}
@@ -168,7 +170,7 @@ func TestRollupTimestamp(t *testing.T) {
 	l.mutationMap.setTs(9)
 	addMutation(t, l, edge, Del, 9, 10, false)
 
-	nl, err := getNew(key, pstore, math.MaxUint64)
+	nl, err := getNew(key, pstore, math.MaxUint64, false)
 	require.NoError(t, err)
 
 	uidList, err = nl.Uids(ListOptions{ReadTs: 11})
@@ -182,12 +184,431 @@ func TestRollupTimestamp(t *testing.T) {
 	require.Equal(t, uint64(10), kvs[0].Version)
 }
 
+// TestCacheStaleWhenMaxTsLessThanReadTs tests that readFromCache
+// returns nil (cache miss) when cacheMaxTs < readTs, forcing a disk read.
+// Issue #9597: Without the maxTs >= readTs check, stale cache data is returned.
+func TestCacheStaleWhenMaxTsLessThanReadTs(t *testing.T) {
+	require.NoError(t, pstore.DropAll())
+
+	// Re-initialize MemoryLayer with cache enabled (10MB) for this test
+	// The default test setup uses cache size 0 which disables caching
+	origMemLayer := MemLayerInstance
+	MemLayerInstance = initMemoryLayer(10<<20, false)
+	t.Cleanup(func() {
+		MemLayerInstance = origMemLayer
+	})
+
+	attr := x.AttrInRootNamespace("issue9597")
+	key := x.IndexKey(attr, "test")
+
+	// Step 1: Write UID 1 at commitTs=10 and populate cache via UpdateCachedKeys
+	p1 := new(pb.PostingList)
+	p1.Postings = []*pb.Posting{{
+		Uid:      1,
+		StartTs:  5,
+		CommitTs: 10,
+		Op:       1,
+	}}
+	delta1, err := proto.Marshal(p1)
+	require.NoError(t, err)
+
+	txn1 := Oracle().RegisterStartTs(5)
+	txn1.cache.deltas[string(key)] = delta1
+
+	writer1 := NewTxnWriter(pstore)
+	require.NoError(t, txn1.CommitToDisk(writer1, 10))
+	require.NoError(t, writer1.Flush())
+
+	// Read at ts=10 to populate the cache (this triggers saveInCache in ReadData)
+	l1, err := GetNoStore(key, 10)
+	require.NoError(t, err)
+	require.Equal(t, 1, l1.mutationMap.listLen(10))
+
+	// Wait for ristretto to process the cache set
+	MemLayerInstance.wait()
+
+	// Verify cache is populated
+	cacheItem, cacheOk := MemLayerInstance.cache.get(key)
+	require.True(t, cacheOk, "Cache should have entry after first read")
+	require.NotNil(t, cacheItem.list)
+	cacheMaxTsBefore := cacheItem.list.maxTs
+
+	// Step 2: Write UID 2 at commitTs=20 to disk, but DON'T call UpdateCachedKeys
+	// This simulates the race where disk has newer data than cache
+	p2 := new(pb.PostingList)
+	p2.Postings = []*pb.Posting{{
+		Uid:      2,
+		StartTs:  15,
+		CommitTs: 20,
+		Op:       1,
+	}}
+	delta2, err := proto.Marshal(p2)
+	require.NoError(t, err)
+
+	txn2 := Oracle().RegisterStartTs(15)
+	txn2.cache.deltas[string(key)] = delta2
+
+	writer2 := NewTxnWriter(pstore)
+	require.NoError(t, txn2.CommitToDisk(writer2, 20))
+	require.NoError(t, writer2.Flush())
+	// NOTE: We intentionally skip UpdateCachedKeys to keep cache stale
+
+	// Verify cache is still stale (maxTs unchanged)
+	cacheItem2, _ := MemLayerInstance.cache.get(key)
+	require.Equal(t, cacheMaxTsBefore, cacheItem2.list.maxTs, "Cache should still be stale")
+
+	// Step 3: Read at readTs=25 (greater than cache maxTs)
+	// With the fix: cache miss (maxTs < readTs), reads from disk, gets both UIDs
+	// Without fix: cache hit (minTs <= readTs), returns stale data without UID 2
+	l2, err := GetNoStore(key, 25)
+	require.NoError(t, err)
+
+	uidList, err := l2.Uids(ListOptions{ReadTs: 25})
+	require.NoError(t, err)
+
+	// Should see UID 2 (from disk read)
+	hasUid2 := slices.Contains(uidList.Uids, 2)
+	if !hasUid2 {
+		t.Fatalf("Expected UID 2 in result, got UIDs: %v", uidList.Uids)
+	}
+	require.True(t, hasUid2, "UID 2 missing - cache returned stale data (maxTs < readTs)")
+}
+
+func TestReadUidsHonorsPostingListCache(t *testing.T) {
+	require.NoError(t, pstore.DropAll())
+	useMemoryLayer(t, 0)
+
+	attr := x.AttrInRootNamespace("readUidsCache")
+	key := x.DataKey(attr, 1)
+	addEdgeToUID(t, attr, 1, 2, 1, 2)
+	addEdgeToUID(t, attr, 1, 3, 3, 4)
+
+	l, err := getNew(key, pstore, math.MaxUint64, true)
+	require.NoError(t, err)
+	require.False(t, l.mutationMap.isUidsCalculated,
+		"readUids should not materialize UIDs when posting-list cache is disabled")
+
+	useMemoryLayer(t, 10<<20)
+	l, err = getNew(key, pstore, math.MaxUint64, true)
+	require.NoError(t, err)
+	require.True(t, l.mutationMap.isUidsCalculated,
+		"readUids should still warm calculated UIDs when posting-list cache is enabled")
+}
+
+func TestReadUidsWarmsCachedPostingList(t *testing.T) {
+	require.NoError(t, pstore.DropAll())
+	useMemoryLayer(t, 10<<20)
+
+	attr := x.AttrInRootNamespace("readUidsCacheHit")
+	key := x.DataKey(attr, 1)
+	addEdgeToUID(t, attr, 1, 2, 1, 2)
+	addEdgeToUID(t, attr, 1, 3, 3, 4)
+
+	l, err := getNew(key, pstore, math.MaxUint64, false)
+	require.NoError(t, err)
+	require.False(t, l.mutationMap.isUidsCalculated)
+	MemLayerInstance.wait()
+
+	cacheItem, ok := MemLayerInstance.cache.get(key)
+	require.True(t, ok)
+	require.False(t, cacheItem.list.mutationMap.isUidsCalculated)
+	readTs := cacheItem.list.maxTs
+	cacheSizeBefore := cacheItem.list.ApproximateSize()
+	remainingCostBefore := MemLayerInstance.cache.data.RemainingCost()
+
+	l, err = getNew(key, pstore, readTs, true)
+	require.NoError(t, err)
+	require.True(t, l.mutationMap.isUidsCalculated)
+	MemLayerInstance.wait()
+
+	cacheItem, ok = MemLayerInstance.cache.get(key)
+	require.True(t, ok)
+	require.True(t, cacheItem.list.mutationMap.isUidsCalculated)
+	cacheSizeAfter := cacheItem.list.ApproximateSize()
+	require.Greater(t, cacheSizeAfter, cacheSizeBefore)
+	require.Equal(t, int64(cacheSizeAfter-cacheSizeBefore),
+		remainingCostBefore-MemLayerInstance.cache.data.RemainingCost())
+}
+
+// cacheUidList publishes a posting list of uidCount refs under key and returns its cached entry.
+func cacheUidList(t *testing.T, key []byte, uidCount uint64) *CachePL {
+	encoder := codec.Encoder{BlockSize: 256}
+	for uid := uint64(1); uid <= uidCount; uid++ {
+		encoder.Add(uid)
+	}
+	pack := encoder.Done()
+	t.Cleanup(func() {
+		codec.FreePack(pack)
+	})
+
+	MemLayerInstance.saveInCache(key, &List{
+		key:         key,
+		plist:       &pb.PostingList{Pack: pack},
+		mutationMap: newMutableLayer(),
+		minTs:       1,
+		maxTs:       1,
+	})
+	MemLayerInstance.wait()
+
+	cacheItem, ok := MemLayerInstance.cache.get(key)
+	require.True(t, ok)
+	return cacheItem
+}
+
+// useMemoryLayer swaps in a posting-list cache of the given size for the duration of the test.
+func useMemoryLayer(t *testing.T, cacheSize int64) {
+	orig := MemLayerInstance
+	MemLayerInstance = initMemoryLayer(cacheSize, false)
+	t.Cleanup(func() {
+		MemLayerInstance = orig
+	})
+}
+
+func TestReadUidsWarmsCachedPostingListConcurrently(t *testing.T) {
+	require.NoError(t, pstore.DropAll())
+	useMemoryLayer(t, 10<<20)
+
+	const uidCount = 4096
+	key := x.DataKey(x.AttrInRootNamespace("readUidsConcurrentCacheHit"), 1)
+	cacheUidList(t, key, uidCount)
+
+	const readers = 32
+	start := make(chan struct{})
+	type readResult struct {
+		list *List
+		err  error
+	}
+	results := make(chan readResult, readers)
+	for range readers {
+		go func() {
+			<-start
+			l, err := getNew(key, pstore, 1, true)
+			results <- readResult{list: l, err: err}
+		}()
+	}
+	close(start)
+
+	// Drain every reader before asserting, so that a failure cannot run the cleanup that restores
+	// MemLayerInstance while readers are still using it.
+	collected := make([]readResult, 0, readers)
+	for range readers {
+		collected = append(collected, <-results)
+	}
+
+	// Only one reader materializes the uids; the rest are served an unwarmed copy. Every one of them
+	// has to return the same answer either way.
+	for _, result := range collected {
+		require.NoError(t, result.err)
+		uids, err := result.list.Uids(ListOptions{ReadTs: 1})
+		require.NoError(t, err)
+		require.Len(t, uids.Uids, uidCount)
+	}
+
+	MemLayerInstance.wait()
+	cacheItem, ok := MemLayerInstance.cache.get(key)
+	require.True(t, ok)
+	require.True(t, cacheItem.list.canUseCalculatedUids(1))
+	require.Len(t, cacheItem.list.mutationMap.calculatedUids, uidCount)
+}
+
+func TestWarmCachedUidsWalksWithoutTheCachedListsWriteLock(t *testing.T) {
+	require.NoError(t, pstore.DropAll())
+	useMemoryLayer(t, 10<<20)
+
+	const uidCount = 4096
+	key := x.DataKey(x.AttrInRootNamespace("readUidsWarmWithoutWriteLock"), 1)
+	cacheItem := cacheUidList(t, key, uidCount)
+	cached := cacheItem.list
+
+	cached.RLock()
+	lCopy := copyList(cached)
+	cached.RUnlock()
+
+	warmed := make(chan struct{})
+	go func() {
+		defer close(warmed)
+		MemLayerInstance.warmCachedUids(key, cacheItem, lCopy)
+	}()
+
+	func() {
+		// Hold the published list's read lock for the whole walk. A warm that took its write lock
+		// would deadlock here, and would also shut out every other reader, because Go's RWMutex stops
+		// admitting readers once a writer is queued. The commit path takes that same write lock from
+		// the serial Raft apply loop, so the walk has to stay off it.
+		cached.RLock()
+		defer cached.RUnlock()
+
+		require.Eventually(t, func() bool {
+			lCopy.RLock()
+			defer lCopy.RUnlock()
+			return lCopy.mutationMap.isUidsCalculated
+		}, 30*time.Second, time.Millisecond,
+			"materializing calculated UIDs blocked on the published list's write lock")
+	}()
+
+	<-warmed
+
+	// The handover is the only part that needs the write lock, and it hands over the same slice.
+	// require.Same rather than require.Equal: Equal follows both pointers and compares the uids
+	// they address, so it passes for two distinct arrays that happen to start with the same uid.
+	require.True(t, cached.canUseCalculatedUids(1))
+	require.Len(t, cached.mutationMap.calculatedUids, uidCount)
+	require.Same(t, &lCopy.mutationMap.calculatedUids[0], &cached.mutationMap.calculatedUids[0])
+}
+
+func TestReadUidsDoesNotWaitForAnInFlightWarm(t *testing.T) {
+	require.NoError(t, pstore.DropAll())
+	useMemoryLayer(t, 10<<20)
+
+	const uidCount = 512
+	key := x.DataKey(x.AttrInRootNamespace("readUidsInFlightWarm"), 1)
+	cacheItem := cacheUidList(t, key, uidCount)
+
+	// Stand in for another reader's warm that is still walking the list.
+	require.True(t, cacheItem.list.tryStartUidWarm())
+	t.Cleanup(cacheItem.list.finishUidWarm)
+
+	l, err := getNew(key, pstore, 1, true)
+	require.NoError(t, err)
+	require.False(t, l.canUseCalculatedUids(1),
+		"a reader that loses the warm election should be served an unwarmed copy instead of waiting")
+
+	// Unwarmed is still correct: the reader walks the list as it did before the optimization.
+	uids, err := l.Uids(ListOptions{ReadTs: 1})
+	require.NoError(t, err)
+	require.Len(t, uids.Uids, uidCount)
+}
+
+func TestWarmCachedUidsGivesUpAfterAFailedWalk(t *testing.T) {
+	require.NoError(t, pstore.DropAll())
+	useMemoryLayer(t, 10<<20)
+
+	key := x.DataKey(x.AttrInRootNamespace("readUidsWarmFailure"), 1)
+
+	// A list that claims a split which was never written, so every walk of it fails on the Badger
+	// read for that part. This is the shape of the failure the give-up exists for.
+	MemLayerInstance.saveInCache(key, &List{
+		key:         key,
+		plist:       &pb.PostingList{Splits: []uint64{1}},
+		mutationMap: newMutableLayer(),
+		minTs:       1,
+		maxTs:       1,
+	})
+	MemLayerInstance.wait()
+
+	cacheItem, ok := MemLayerInstance.cache.get(key)
+	require.True(t, ok)
+	cached := cacheItem.list
+
+	// The read still succeeds, unmaterialized, and the failure is not reported to the caller.
+	l, err := getNew(key, pstore, 1, true)
+	require.NoError(t, err)
+	require.False(t, l.canUseCalculatedUids(1))
+	require.Equal(t, uidWarmAbandoned, cached.uidWarmState.Load(),
+		"a failed walk should give up on the entry instead of leaving it open to retries")
+
+	// A later reader neither retries the walk nor wins an election, so the cost is paid once for
+	// the entry rather than once per read.
+	require.False(t, cached.tryStartUidWarm())
+	l, err = getNew(key, pstore, 1, true)
+	require.NoError(t, err)
+	require.False(t, l.canUseCalculatedUids(1))
+	require.Equal(t, uidWarmAbandoned, cached.uidWarmState.Load())
+
+	// Giving up is per List, so a fresh entry for the same key starts willing to try again.
+	replacement := cacheUidList(t, key, 8)
+	require.Equal(t, uidWarmIdle, replacement.list.uidWarmState.Load())
+}
+
+func TestCommitLetsAnAbandonedWarmTryAgain(t *testing.T) {
+	l := &List{key: x.DataKey(x.AttrInRootNamespace("abandonedWarmReset"), 1), mutationMap: newMutableLayer()}
+
+	require.True(t, l.tryStartUidWarm())
+	l.abandonUidWarm()
+	require.False(t, l.tryStartUidWarm())
+
+	// A commit applies in place on the cached list, because remove-on-update defaults to false, so
+	// the give-up has to lift here or a single failure would stick for the life of the entry.
+	l.setMutationAfterCommit(5, 10, &pb.PostingList{
+		Postings: []*pb.Posting{{Uid: 2, PostingType: pb.Posting_REF, Op: Set}},
+	}, true)
+
+	require.Equal(t, uidWarmIdle, l.uidWarmState.Load(),
+		"a commit changes the list, so a warm that failed against the old state should get another try")
+	require.True(t, l.tryStartUidWarm())
+}
+
+func TestFinishUidWarmLeavesAnAbandonedListAlone(t *testing.T) {
+	l := &List{mutationMap: newMutableLayer()}
+
+	require.True(t, l.tryStartUidWarm())
+	l.abandonUidWarm()
+	// finishUidWarm is deferred on the same path that abandons, so it must not reopen the list.
+	l.finishUidWarm()
+	require.Equal(t, uidWarmAbandoned, l.uidWarmState.Load())
+	require.False(t, l.tryStartUidWarm())
+
+	other := &List{mutationMap: newMutableLayer()}
+	require.True(t, other.tryStartUidWarm())
+	other.finishUidWarm()
+	require.Equal(t, uidWarmIdle, other.uidWarmState.Load())
+	require.True(t, other.tryStartUidWarm())
+}
+
+func TestPublishCalculatedUidsDropsAStaleWalk(t *testing.T) {
+	l := &List{mutationMap: newMutableLayer()}
+	l.mutationMap.committedUidsTime = 7
+
+	// A commit landed while the copy was being walked, so the result describes an older snapshot.
+	require.False(t, l.publishCalculatedUids(5, []uint64{1, 2}))
+	require.False(t, l.mutationMap.isUidsCalculated)
+	require.Empty(t, l.mutationMap.calculatedUids)
+
+	require.True(t, l.publishCalculatedUids(7, []uint64{1, 2}))
+	require.True(t, l.mutationMap.isUidsCalculated)
+	require.Equal(t, []uint64{1, 2}, l.mutationMap.calculatedUids)
+
+	// An already warmed list is left alone.
+	require.False(t, l.publishCalculatedUids(7, []uint64{3}))
+	require.Equal(t, []uint64{1, 2}, l.mutationMap.calculatedUids)
+}
+
+func TestResetIfCurrentLeavesADroppedEntryOut(t *testing.T) {
+	require.NoError(t, pstore.DropAll())
+	useMemoryLayer(t, 10<<20)
+
+	key := x.DataKey(x.AttrInRootNamespace("resetIfCurrent"), 1)
+	cacheItem := cacheUidList(t, key, 8)
+
+	require.True(t, MemLayerInstance.resetIfCurrent(key, cacheItem))
+	MemLayerInstance.wait()
+	_, ok := MemLayerInstance.cache.get(key)
+	require.True(t, ok)
+
+	// A rollup drops the entry while the warm is still running. Re-setting it would resurrect it.
+	MemLayerInstance.del(key)
+	MemLayerInstance.wait()
+	require.False(t, MemLayerInstance.resetIfCurrent(key, cacheItem))
+	MemLayerInstance.wait()
+	_, ok = MemLayerInstance.cache.get(key)
+	require.False(t, ok, "a dropped cache entry should stay dropped")
+
+	// Same for an entry that was replaced by a newer read of the key.
+	replacement := cacheUidList(t, key, 16)
+	require.NotSame(t, cacheItem, replacement)
+	require.False(t, MemLayerInstance.resetIfCurrent(key, cacheItem))
+	MemLayerInstance.wait()
+	current, ok := MemLayerInstance.cache.get(key)
+	require.True(t, ok)
+	require.Same(t, replacement, current)
+}
+
 func TestPostingListRead(t *testing.T) {
 	attr := x.AttrInRootNamespace("emptypl")
 	key := x.DataKey(attr, 1)
 
 	assertLength := func(readTs, sz int) {
-		nl, err := getNew(key, pstore, math.MaxUint64)
+		nl, err := getNew(key, pstore, math.MaxUint64, false)
 		require.NoError(t, err)
 		uidList, err := nl.Uids(ListOptions{ReadTs: uint64(readTs)})
 		require.NoError(t, err)
@@ -201,7 +622,7 @@ func TestPostingListRead(t *testing.T) {
 	require.NoError(t, writer.SetAt(key, []byte{}, BitEmptyPosting, 6))
 	require.NoError(t, writer.Flush())
 	// Delete the key from cache as we have just updated it
-	memoryLayer.del(key)
+	MemLayerInstance.del(key)
 	assertLength(7, 0)
 
 	addEdgeToUID(t, attr, 1, 4, 7, 8)
@@ -214,7 +635,7 @@ func TestPostingListRead(t *testing.T) {
 	writer = NewTxnWriter(pstore)
 	require.NoError(t, writer.SetAt(key, data, BitCompletePosting, 10))
 	require.NoError(t, writer.Flush())
-	memoryLayer.del(key)
+	MemLayerInstance.del(key)
 	assertLength(10, 0)
 
 	addEdgeToUID(t, attr, 1, 5, 11, 12)

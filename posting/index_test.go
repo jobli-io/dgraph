@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -15,10 +15,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/badger/v4"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/schema"
-	"github.com/hypermodeinc/dgraph/v25/types"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/schema"
+	"github.com/dgraph-io/dgraph/v25/types"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 func uids(l *List, readTs uint64) []uint64 {
@@ -172,7 +172,8 @@ func TestTokensTable(t *testing.T) {
 
 	attr := x.AttrInRootNamespace("name")
 	key := x.DataKey(attr, 1)
-	l, err := getNew(key, ps, math.MaxUint64)
+	l, err := getNew(key, ps, math.MaxUint64, false)
+	l.mutationMap.readTs = 1
 	require.NoError(t, err)
 
 	edge := &pb.DirectedEdge{
@@ -261,7 +262,7 @@ func addEdgeToUID(t *testing.T, attr string, src uint64,
 
 func TestCountReverseIndexWithData(t *testing.T) {
 	require.NoError(t, pstore.DropAll())
-	memoryLayer.clear()
+	MemLayerInstance.clear()
 	indexNameCountVal := "testcount: [uid] @count @reverse ."
 
 	attr := x.AttrInRootNamespace("testcount")
@@ -296,7 +297,7 @@ func TestCountReverseIndexWithData(t *testing.T) {
 
 func TestCountReverseIndexEmptyPosting(t *testing.T) {
 	require.NoError(t, pstore.DropAll())
-	memoryLayer.clear()
+	MemLayerInstance.clear()
 	indexNameCountVal := "testcount: [uid] @count @reverse ."
 
 	attr := x.AttrInRootNamespace("testcount")

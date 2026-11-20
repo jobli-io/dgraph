@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -20,10 +20,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/hypermodeinc/dgraph/v25/conn"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/conn"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 const baseTimeout time.Duration = 4 * time.Second
@@ -50,10 +50,9 @@ type rateLimiter struct {
 // account. We however, limit solely based on feedback, allowing a certain
 // number of ops to remain pending, and not anymore.
 func (rl *rateLimiter) bleed() {
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
+	tick := time.Tick(time.Second)
 
-	for range tick.C {
+	for range tick {
 		rl.c.L.Lock()
 		iou := rl.iou
 		rl.c.L.Unlock()
@@ -172,8 +171,10 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 			su, ok := schema.State().Get(ctx, edge.Attr)
 			if !ok {
 				// We don't allow mutations for reserved predicates if the schema for them doesn't
-				// already exist.
-				if x.IsReservedPredicate(edge.Attr) {
+				// already exist. A predicate owned by a registered ReservedNamespace
+				// (see x.RegisterReservedNamespace) is an exception — its owner registers it via
+				// Alter as schemas are written.
+				if x.IsReservedPredicate(edge.Attr) && !x.IsRegisteredReservedPredicate(edge.Attr) {
 					return errors.Errorf("Can't store predicate `%s` as it is prefixed with "+
 						"`dgraph.` which is reserved as the namespace for dgraph's internal "+
 						"types/predicates.",
@@ -238,7 +239,6 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 		}
 
 		timer := time.NewTimer(timeout)
-		defer timer.Stop()
 
 		for {
 			select {

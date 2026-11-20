@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -34,7 +34,9 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
 	"go.opencensus.io/plugin/ocgrpc"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/term"
 	"google.golang.org/grpc"
@@ -148,6 +150,11 @@ func init() {
 	GrootUid.Store(RootNamespace, 0)
 }
 
+// SafeUTF8 sanitizes a string for OTLP export by replacing invalid UTF-8 sequences.
+func SafeUTF8(s string) string {
+	return strings.ToValidUTF8(s, "?")
+}
+
 // ShouldCrash returns true if the error should cause the process to crash.
 func ShouldCrash(err error) bool {
 	if err == nil {
@@ -242,14 +249,6 @@ func GqlErrorf(message string, args ...interface{}) *GqlError {
 	}
 }
 
-// ExtractNamespaceHTTP parses the namespace value from the incoming HTTP request.
-func ExtractNamespaceHTTP(r *http.Request) uint64 {
-	ctx := AttachAccessJwt(context.Background(), r)
-	// Ignoring error because the default value is zero anyways.
-	namespace, _ := ExtractNamespaceFrom(ctx)
-	return namespace
-}
-
 // ExtractNamespace parses the namespace value from the incoming gRPC context. For the non-ACL mode,
 // it is caller's responsibility to set the galaxy namespace.
 func ExtractNamespace(ctx context.Context) (uint64, error) {
@@ -301,6 +300,19 @@ func ExtractJwt(ctx context.Context) (string, error) {
 	}
 
 	return accessJwt[0], nil
+}
+
+func ExtractTraceContext(ctx context.Context) context.Context {
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		carrier := propagation.HeaderCarrier{}
+		for k, vals := range md {
+			for _, v := range vals {
+				carrier.Set(k, v)
+			}
+		}
+		return otel.GetTextMapPropagator().Extract(ctx, carrier)
+	}
+	return ctx
 }
 
 // WithLocations adds a list of locations to a GqlError and returns the same
@@ -425,24 +437,6 @@ func ParseRequest(w http.ResponseWriter, r *http.Request, data interface{}) bool
 	return true
 }
 
-// AttachJWTNamespace attaches the namespace in the JWT claims to the context if present, otherwise
-// it attaches the galaxy namespace.
-func AttachJWTNamespace(ctx context.Context) context.Context {
-	if !WorkerConfig.AclEnabled {
-		return AttachNamespace(ctx, RootNamespace)
-	}
-
-	ns, err := ExtractNamespaceFrom(ctx)
-	if err == nil {
-		// Attach the namespace only if we got one from JWT.
-		// This preserves any namespace directly present in the context which is needed for
-		// requests originating from dgraph internal code like server.go::GetGQLSchema() where
-		// context is created by hand.
-		ctx = AttachNamespace(ctx, ns)
-	}
-	return ctx
-}
-
 // AttachNamespace adds given namespace to the metadata of the context.
 func AttachNamespace(ctx context.Context, namespace uint64) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -452,19 +446,6 @@ func AttachNamespace(ctx context.Context, namespace uint64) context.Context {
 	ns := strconv.FormatUint(namespace, 10)
 	md.Set("namespace", ns)
 	return metadata.NewIncomingContext(ctx, md)
-}
-
-// AttachJWTNamespaceOutgoing attaches the namespace in the JWT claims to the outgoing metadata of
-// the context.
-func AttachJWTNamespaceOutgoing(ctx context.Context) (context.Context, error) {
-	if !WorkerConfig.AclEnabled {
-		return AttachNamespaceOutgoing(ctx, RootNamespace), nil
-	}
-	ns, err := ExtractNamespaceFrom(ctx)
-	if err != nil {
-		return ctx, err
-	}
-	return AttachNamespaceOutgoing(ctx, ns), nil
 }
 
 // AttachNamespaceOutgoing adds given namespace in the outgoing metadata of the context.
@@ -532,6 +513,13 @@ func AttachRemoteIP(ctx context.Context, r *http.Request) context.Context {
 	return ctx
 }
 
+// IsIpWhitelisted checks if the given ipString is a loopback address or within one of the
+// configured whitelisted IP ranges. It is the exported entry point used by HTTP handlers that
+// need to authorize a request by its source IP (gRPC handlers should use HasWhitelistedIP).
+func IsIpWhitelisted(ipString string) bool {
+	return isIpWhitelisted(ipString)
+}
+
 // isIpWhitelisted checks if the given ipString is within the whitelisted ip range
 func isIpWhitelisted(ipString string) bool {
 	ip := net.ParseIP(ipString)
@@ -550,6 +538,76 @@ func isIpWhitelisted(ipString string) bool {
 		}
 	}
 	return false
+}
+
+// GetIPsFromString parses a --security "whitelist=..." style value into a list of IP ranges.
+// The value is a comma-separated list where each entry is a single IP or hostname, a
+// "lower:upper" IP range, or a CIDR block. An empty string yields an empty (non-nil) list.
+func GetIPsFromString(str string) ([]IPRange, error) {
+	if str == "" {
+		return []IPRange{}, nil
+	}
+
+	var ipRanges []IPRange
+	rangeStrings := strings.Split(str, ",")
+
+	for _, s := range rangeStrings {
+		isIPv6 := strings.Contains(s, "::")
+		tuple := strings.Split(s, ":")
+		switch {
+		case isIPv6 || len(tuple) == 1:
+			if !strings.Contains(s, "/") {
+				// string is hostname like host.docker.internal,
+				// or IPv4 address like 144.124.126.254,
+				// or IPv6 address like fd03:b188:0f3c:9ec4::babe:face
+				ipAddr := net.ParseIP(s)
+				if ipAddr != nil {
+					ipRanges = append(ipRanges, IPRange{Lower: ipAddr, Upper: ipAddr})
+				} else {
+					ipAddrs, err := net.LookupIP(s)
+					if err != nil {
+						return nil, errors.Errorf("invalid IP address or hostname: %s", s)
+					}
+
+					for _, addr := range ipAddrs {
+						ipRanges = append(ipRanges, IPRange{Lower: addr, Upper: addr})
+					}
+				}
+			} else {
+				// string is CIDR block like 192.168.0.0/16 or fd03:b188:0f3c:9ec4::/64
+				rangeLo, network, err := net.ParseCIDR(s)
+				if err != nil {
+					return nil, errors.Errorf("invalid CIDR block: %s", s)
+				}
+
+				addrLen, maskLen := len(rangeLo), len(network.Mask)
+				rangeHi := make(net.IP, len(rangeLo))
+				copy(rangeHi, rangeLo)
+				for i := 1; i <= maskLen; i++ {
+					rangeHi[addrLen-i] |= ^network.Mask[maskLen-i]
+				}
+
+				ipRanges = append(ipRanges, IPRange{Lower: rangeLo, Upper: rangeHi})
+			}
+		case len(tuple) == 2:
+			// string is range like a.b.c.d:w.x.y.z
+			rangeLo := net.ParseIP(tuple[0])
+			rangeHi := net.ParseIP(tuple[1])
+			switch {
+			case rangeLo == nil:
+				return nil, errors.Errorf("invalid IP address: %s", tuple[0])
+			case rangeHi == nil:
+				return nil, errors.Errorf("invalid IP address: %s", tuple[1])
+			case bytes.Compare(rangeLo, rangeHi) > 0:
+				return nil, errors.Errorf("inverted IP address range: %s", s)
+			}
+			ipRanges = append(ipRanges, IPRange{Lower: rangeLo, Upper: rangeHi})
+		default:
+			return nil, errors.Errorf("invalid IP address range: %s", s)
+		}
+	}
+
+	return ipRanges, nil
 }
 
 // HasWhitelistedIP checks whether the source IP in ctx is whitelisted or not.
@@ -1183,9 +1241,7 @@ func IsSuperAdmin(groups []string) bool {
 func RunVlogGC(store *badger.DB, closer *z.Closer) {
 	defer closer.Done()
 
-	// Runs every 1m
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
+	ticker := time.Tick(1 * time.Minute)
 
 	abs := func(a, b int64) int64 {
 		if a > b {
@@ -1212,7 +1268,7 @@ func RunVlogGC(store *badger.DB, closer *z.Closer) {
 		select {
 		case <-closer.HasBeenClosed():
 			return
-		case <-ticker.C:
+		case <-ticker:
 			runGC()
 		}
 	}
@@ -1226,10 +1282,11 @@ func StoreSync(db DB, closer *z.Closer) {
 	defer closer.Done()
 	// We technically don't need to call this due to mmap being able to survive process crashes.
 	// But, once a minute is infrequent enough that we won't lose any performance due to this.
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.Tick(time.Minute)
+
 	for {
 		select {
-		case <-ticker.C:
+		case <-ticker:
 			if err := db.Sync(); err != nil {
 				glog.Errorf("Error while calling db sync: %+v", err)
 			}
@@ -1513,13 +1570,13 @@ func (r *RateLimiter) RefillPeriodically() {
 		})
 	}
 
-	ticker := time.NewTicker(r.refillAfter)
-	defer ticker.Stop()
+	ticker := time.Tick(r.refillAfter)
+
 	for {
 		select {
 		case <-r.closer.HasBeenClosed():
 			return
-		case <-ticker.C:
+		case <-ticker:
 			refill()
 		}
 	}

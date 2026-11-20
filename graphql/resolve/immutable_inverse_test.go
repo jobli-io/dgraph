@@ -21,8 +21,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/graphql/test"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/graphql/test"
 	"github.com/stretchr/testify/require"
 )
 

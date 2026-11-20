@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -26,14 +26,14 @@ import (
 	"github.com/twpayne/go-geom/encoding/geojson"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/dgraph-io/dgraph/v25/algo"
+	gqlSchema "github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/task"
+	"github.com/dgraph-io/dgraph/v25/types"
+	"github.com/dgraph-io/dgraph/v25/types/facets"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/algo"
-	gqlSchema "github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/task"
-	"github.com/hypermodeinc/dgraph/v25/types"
-	"github.com/hypermodeinc/dgraph/v25/types/facets"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 // ToJson converts the list of subgraph into a JSON response by calling toFastJSON.
@@ -670,7 +670,7 @@ func valToBytes(v types.Val) ([]byte, error) {
 			return nil, errors.New("Unsupported floating point number in float field")
 		}
 
-		return []byte(fmt.Sprintf("%f", f)), nil
+		return []byte(fmt.Sprintf("%g", f)), nil
 	case types.BoolID:
 		if v.Value.(bool) {
 			return boolTrue, nil
@@ -1039,7 +1039,7 @@ func (sg *SubGraph) addGroupby(enc *encoder, fj fastJsonNode,
 
 func (sg *SubGraph) addAggregations(enc *encoder, fj fastJsonNode) error {
 	for _, child := range sg.Children {
-		aggVal, ok := child.Params.UidToVal[0]
+		aggVal, ok := child.Params.UidToVal.Get(0)
 		if !ok {
 			if len(child.Params.NeedsVar) == 0 {
 				return errors.Errorf("Only aggregated variables allowed within empty block.")
@@ -1303,7 +1303,7 @@ func (sg *SubGraph) aggWithVarFieldName() string {
 }
 
 func (sg *SubGraph) addInternalNode(enc *encoder, uid uint64, dst fastJsonNode) error {
-	sv, ok := sg.Params.UidToVal[uid]
+	sv, ok := sg.Params.UidToVal.Get(uid)
 	if !ok || sv.Value == nil {
 		return nil
 	}

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -50,17 +50,18 @@ Commit timestamp : %v
 Branch           : %v
 Go version       : %v
 jemalloc enabled : %v
+GOMAXPROCS       : %v
+Num CPUs         : %v
 
-For Dgraph official documentation, visit https://dgraph.io/docs.
-For discussions about Dgraph     , visit https://discuss.dgraph.io.
-For fully-managed Dgraph Cloud   , visit https://dgraph.io/cloud.
+For Dgraph official documentation, visit https://docs.dgraph.io
+For discussions about Dgraph     , visit https://github.com/orgs/dgraph-io/discussions
 
 %s.
-© Hypermode Inc.
+© Istari Digital, Inc.
 
 `,
 		dgraphVersion, dgraphCodename, ExecutableChecksum(), lastCommitSHA, lastCommitTime, gitBranch,
-		runtime.Version(), jem, licenseInfo)
+		runtime.Version(), jem, runtime.GOMAXPROCS(0), runtime.NumCPU(), licenseInfo)
 }
 
 // PrintVersion prints version and other helpful information if --version.

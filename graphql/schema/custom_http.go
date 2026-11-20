@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dgraph-io/dgraph/v25/graphql/authorization"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/golang/glog"
-	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (

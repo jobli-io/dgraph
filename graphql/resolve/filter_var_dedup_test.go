@@ -30,12 +30,12 @@ import (
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
-	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/graphql/test"
-	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/authorization"
+	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/graphql/test"
+	"github.com/dgraph-io/dgraph/v25/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -209,7 +209,7 @@ func rewriteGQL(t *testing.T, strSchema string, meta *testutil.AuthMeta, gqlQuer
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	queries, err := rewriter.Rewrite(ctx, q)
+	queries, _, err := rewriter.Rewrite(ctx, q)
 	require.NoError(t, err)
 	return queries
 }

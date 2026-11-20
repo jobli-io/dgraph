@@ -23,7 +23,7 @@ package schema
 import (
 	"testing"
 
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

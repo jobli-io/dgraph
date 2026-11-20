@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -22,10 +22,10 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
+	"github.com/dgraph-io/dgraph/v25/conn"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/x"
 	"github.com/dgraph-io/ristretto/v2/z"
-	"github.com/hypermodeinc/dgraph/v25/conn"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/x"
 )
 
 var (
@@ -61,6 +61,9 @@ type Server struct {
 
 	moveOngoing    chan struct{}
 	blockCommitsOn *sync.Map
+	// moveBackoff tracks tablets whose most recent move failed, so the automatic rebalancer
+	// does not immediately re-pick them. Maps predicate -> tabletBackoff.
+	moveBackoff *sync.Map
 
 	checkpointPerGroup map[uint32]uint64
 	// embedding the pb.UnimplementedZeroServer struct to ensure forward compatibility of the server.
@@ -88,6 +91,7 @@ func (s *Server) Init() {
 	s.closer = z.NewCloser(2) // grpc and http
 	s.blockCommitsOn = new(sync.Map)
 	s.moveOngoing = make(chan struct{}, 1)
+	s.moveBackoff = new(sync.Map)
 	s.checkpointPerGroup = make(map[uint32]uint64)
 	if opts.limiterConfig.UidLeaseLimit > 0 {
 		// rate limiting is not enabled when lease limit is set to zero.
@@ -95,19 +99,21 @@ func (s *Server) Init() {
 			opts.limiterConfig.RefillAfter, s.closer)
 	}
 
-	go s.rebalanceTablets()
+	go s.rebalanceTablets(opts.rebalanceInterval)
 }
 
 func (s *Server) periodicallyPostTelemetry() {
-	const scarfBaseUrlFmt = "https://events.hypermode.com/dgraph-deployments/%v/%v/%v/%v/%v"
+	const scarfBaseUrlFmt = "https://events.dgraph.io/dgraph-deployments/%v/%v/%v/%v/%v"
 
 	// sleep so that a leader is elected by this time
 	time.Sleep(time.Minute)
 
 	glog.Infof("Starting telemetry data collection for zero...")
 
+	ticker := time.Tick(6 * time.Hour)
+
 	var lastPostedAt time.Time
-	for ; true; <-time.Tick(time.Hour * 6) {
+	for range ticker {
 		if !s.Node.AmLeader() {
 			continue
 		}
@@ -513,6 +519,17 @@ func (s *Server) Connect(ctx context.Context,
 		return nil, err
 	}
 
+	// Ensure this Zero's own address in MembershipState reflects the current
+	// --my flag, even before ConfChangeUpdateNode has been committed through
+	// Raft. This prevents Alphas from receiving a stale address during the
+	// brief window between restart and reconciliation.
+	myAddr := s.Node.RaftContext.Addr
+	if myId := s.Node.Id; myAddr != "" {
+		if z, ok := ms.GetZeros()[myId]; ok && z.GetAddr() != myAddr {
+			z.Addr = myAddr
+		}
+	}
+
 	if m.ClusterInfoOnly {
 		// This request only wants to access the membership state, and nothing else. Most likely
 		// from our clients.
@@ -829,11 +846,11 @@ func (s *Server) StreamMembership(_ *api.Payload, stream pb.Zero_StreamMembershi
 		return err
 	}
 
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	ticker := time.Tick(time.Second)
+
 	for {
 		select {
-		case <-ticker.C:
+		case <-ticker:
 			// Send an update every second.
 			ms, err := s.latestMembershipState(ctx)
 			if err != nil {

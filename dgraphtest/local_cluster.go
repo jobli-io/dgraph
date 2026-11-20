@@ -1,14 +1,16 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
 package dgraphtest
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"log"
@@ -20,8 +22,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
@@ -34,8 +38,8 @@ import (
 
 	"github.com/dgraph-io/dgo/v250"
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/dgraphapi"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 // cluster's network struct
@@ -55,10 +59,11 @@ type LocalCluster struct {
 	customTokenizers string
 
 	// resources
-	dcli   *docker.Client
-	net    cnet
-	zeros  []*zero
-	alphas []*alpha
+	dcli     *docker.Client
+	net      cnet
+	netMutex sync.Mutex // protects network recreation
+	zeros    []*zero
+	alphas   []*alpha
 }
 
 // UpgradeStrategy is an Enum that defines various upgrade strategies
@@ -113,10 +118,22 @@ func (c *LocalCluster) init() error {
 	if err != nil {
 		return errors.Wrap(err, "error while creating tempBinDir")
 	}
+	// WidenTempDirPerms is a public hook in dgraphtest/hooks.go; the
+	// default is no-op. Downstream consumers running dgraph as a
+	// non-root user inside compose-test containers override it to
+	// widen perms on host-side temp dirs bind-mounted into containers,
+	// so the in-container uid can read and write those paths.
+	if err := WidenTempDirPerms(c.tempBinDir); err != nil {
+		return err
+	}
 	log.Printf("[INFO] tempBinDir: %v", c.tempBinDir)
 	c.tempSecretsDir, err = os.MkdirTemp("", c.conf.prefix)
 	if err != nil {
 		return errors.Wrap(err, "error while creating tempSecretsDir")
+	}
+	// Same hook, applied to the secrets temp dir.
+	if err := WidenTempDirPerms(c.tempSecretsDir); err != nil {
+		return err
 	}
 	log.Printf("[INFO] tempSecretsDir: %v", c.tempSecretsDir)
 
@@ -166,18 +183,42 @@ func (c *LocalCluster) init() error {
 
 func (c *LocalCluster) createNetwork() error {
 	c.net.name = c.conf.prefix + "-net"
+
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+
+	// Check if network already exists
+	existingNet, err := c.dcli.NetworkInspect(ctx, c.net.name, network.InspectOptions{})
+	if err == nil {
+		// Network exists, reuse it
+		log.Printf("[INFO] reusing existing network %s (ID: %s)", c.net.name, existingNet.ID)
+		c.net.id = existingNet.ID
+		return nil
+	}
+
+	// Network doesn't exist, create it
 	opts := network.CreateOptions{
 		Driver: "bridge",
 		IPAM:   &network.IPAM{Driver: "default"},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	defer cancel()
-	network, err := c.dcli.NetworkCreate(ctx, c.net.name, opts)
+	networkResp, err := c.dcli.NetworkCreate(ctx, c.net.name, opts)
 	if err != nil {
+		// If network already exists (race condition), try to inspect and reuse it
+		if strings.Contains(err.Error(), "already exists") {
+			log.Printf("[INFO] network %s already exists (race condition), inspecting", c.net.name)
+			existingNet, inspectErr := c.dcli.NetworkInspect(ctx, c.net.name, network.InspectOptions{})
+			if inspectErr == nil {
+				log.Printf("[INFO] reusing existing network %s (ID: %s)", c.net.name, existingNet.ID)
+				c.net.id = existingNet.ID
+				return nil
+			}
+			// If inspect also fails, return original create error
+			log.Printf("[WARNING] failed to inspect network after creation conflict: %v", inspectErr)
+		}
 		return errors.Wrap(err, "error creating network")
 	}
-	c.net.id = network.ID
+	c.net.id = networkResp.ID
 
 	return nil
 }
@@ -208,20 +249,40 @@ func (c *LocalCluster) setupBeforeCluster() error {
 }
 
 func (c *LocalCluster) createContainers() error {
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(c.zeros)+len(c.alphas))
+
 	for _, zo := range c.zeros {
-		cid, err := c.createContainer(zo)
-		if err != nil {
-			return err
-		}
-		zo.containerID = cid
+		wg.Add(1)
+		go func(z *zero) {
+			defer wg.Done()
+			cid, err := c.createContainer(z)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			z.containerID = cid
+		}(zo)
 	}
 
 	for _, aa := range c.alphas {
-		cid, err := c.createContainer(aa)
-		if err != nil {
-			return err
-		}
-		aa.containerID = cid
+		wg.Add(1)
+		go func(a *alpha) {
+			defer wg.Done()
+			cid, err := c.createContainer(a)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			a.containerID = cid
+		}(aa)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		return err
 	}
 
 	return nil
@@ -235,7 +296,36 @@ func (c *LocalCluster) createContainer(dc dnode) (string, error) {
 		return "", err
 	}
 
-	cconf := &container.Config{Cmd: cmd, Image: image, WorkingDir: dc.workingDir(), ExposedPorts: dc.ports()}
+	// Verify the network still exists before creating container
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	if c.net.id != "" {
+		_, err := c.dcli.NetworkInspect(ctx, c.net.id, network.InspectOptions{})
+		if err != nil {
+			// Use mutex to prevent multiple goroutines from recreating network simultaneously
+			c.netMutex.Lock()
+			// Double-check after acquiring lock - another goroutine may have recreated it
+			_, recheckErr := c.dcli.NetworkInspect(ctx, c.net.id, network.InspectOptions{})
+			if recheckErr != nil {
+				log.Printf("[WARNING] network %s (ID: %s) not found, recreating", c.net.name, c.net.id)
+				if err := c.createNetwork(); err != nil {
+					c.netMutex.Unlock()
+					return "", errors.Wrap(err, "error recreating network")
+				}
+			}
+			c.netMutex.Unlock()
+		}
+	}
+
+	cconf := &container.Config{Cmd: cmd, Image: image, WorkingDir: dc.workingDir(),
+		ExposedPorts: dc.ports(), Env: dc.env(c)}
+	// ApplyContainerUser is a public hook in dgraphtest/hooks.go; the
+	// default is no-op. Downstream consumers that run dgraph as a
+	// non-root user inside the test container override it to set
+	// cconf.User to the host's uid:gid, so files the container writes
+	// are readable on the host and bind-mounted host paths are readable
+	// inside the container.
+	ApplyContainerUser(cconf)
 	hconf := &container.HostConfig{Mounts: mts, PublishAllPorts: true, PortBindings: dc.bindings(c.conf.portOffset)}
 	networkConfig := &network.NetworkingConfig{
 		EndpointsConfig: map[string]*network.EndpointSettings{
@@ -246,8 +336,6 @@ func (c *LocalCluster) createContainer(dc dnode) (string, error) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-	defer cancel()
 	resp, err := c.dcli.ContainerCreate(ctx, cconf, hconf, networkConfig, nil, dc.cname())
 	if err != nil {
 		return "", errors.Wrapf(err, "error creating container %v", dc.cname())
@@ -260,17 +348,35 @@ func (c *LocalCluster) destroyContainers() error {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(c.zeros)+len(c.alphas))
 	ro := container.RemoveOptions{RemoveVolumes: true, Force: true}
+
 	for _, zo := range c.zeros {
-		if err := c.dcli.ContainerRemove(ctx, zo.cid(), ro); err != nil {
-			return errors.Wrapf(err, "error removing zero [%v]", zo.cname())
-		}
+		wg.Add(1)
+		go func(z *zero) {
+			defer wg.Done()
+			if err := c.dcli.ContainerRemove(ctx, z.cid(), ro); err != nil && !cerrdefs.IsNotFound(err) {
+				errChan <- errors.Wrapf(err, "error removing zero [%v]", z.cname())
+			}
+		}(zo)
 	}
 
 	for _, aa := range c.alphas {
-		if err := c.dcli.ContainerRemove(ctx, aa.cid(), ro); err != nil {
-			return errors.Wrapf(err, "error removing alpha [%v]", aa.cname())
-		}
+		wg.Add(1)
+		go func(a *alpha) {
+			defer wg.Done()
+			if err := c.dcli.ContainerRemove(ctx, a.cid(), ro); err != nil && !cerrdefs.IsNotFound(err) {
+				errChan <- errors.Wrapf(err, "error removing alpha [%v]", a.cname())
+			}
+		}(aa)
+	}
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		return err
 	}
 
 	return nil
@@ -355,16 +461,28 @@ func (c *LocalCluster) cleanupDocker() error {
 	// Prune containers
 	contsReport, err := c.dcli.ContainersPrune(ctx, filters.Args{})
 	if err != nil {
-		log.Fatalf("[ERROR] Error pruning containers: %v", err)
+		// Don't fail if prune is already running - just skip it
+		if strings.Contains(err.Error(), "already running") {
+			log.Printf("[WARNING] Skipping container prune - operation already running")
+		} else {
+			log.Printf("[WARNING] Error pruning containers: %v", err)
+		}
+	} else {
+		log.Printf("[INFO] Pruned containers: %+v\n", contsReport)
 	}
-	log.Printf("[INFO] Pruned containers: %+v\n", contsReport)
 
 	// Prune networks
 	netsReport, err := c.dcli.NetworksPrune(ctx, filters.Args{})
 	if err != nil {
-		log.Fatalf("[ERROR] Error pruning networks: %v", err)
+		// Don't fail if prune is already running - just skip it
+		if strings.Contains(err.Error(), "already running") {
+			log.Printf("[WARNING] Skipping network prune - operation already running")
+		} else {
+			log.Printf("[WARNING] Error pruning networks: %v", err)
+		}
+	} else {
+		log.Printf("[INFO] Pruned networks: %+v\n", netsReport)
 	}
-	log.Printf("[INFO] Pruned networks: %+v\n", netsReport)
 
 	return nil
 }
@@ -372,13 +490,33 @@ func (c *LocalCluster) cleanupDocker() error {
 func (c *LocalCluster) Start() error {
 	log.Printf("[INFO] starting cluster with prefix [%v]", c.conf.prefix)
 	startAll := func() error {
+		var wg sync.WaitGroup
+		errCh := make(chan error, c.conf.numZeros+c.conf.numAlphas)
+
 		for i := range c.conf.numZeros {
-			if err := c.StartZero(i); err != nil {
-				return err
-			}
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				if err := c.StartZero(id); err != nil {
+					errCh <- fmt.Errorf("failed to start zero %d: %w", id, err)
+				}
+			}(i)
 		}
+
 		for i := range c.conf.numAlphas {
-			if err := c.StartAlpha(i); err != nil {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				if err := c.StartAlpha(id); err != nil {
+					errCh <- fmt.Errorf("failed to start alpha %d: %w", id, err)
+				}
+			}(i)
+		}
+
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			if err != nil {
 				return err
 			}
 		}
@@ -434,6 +572,22 @@ func (c *LocalCluster) StartAlpha(id int) error {
 func (c *LocalCluster) startContainer(dc dnode) error {
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
+
+	// verify the container still exists
+	_, err := c.dcli.ContainerInspect(ctx, dc.cid())
+	if err != nil {
+		log.Printf("[WARNING] container %s (ID: %s) not found, attempting to recreate", dc.cname(), dc.cid())
+		newCID, createErr := c.createContainer(dc)
+		if createErr != nil {
+			return errors.Wrapf(createErr, "error recreating missing container [%v]", dc.cname())
+		}
+		switch node := dc.(type) {
+		case *alpha, *zero:
+			node.setContainerID(newCID)
+		}
+		log.Printf("[INFO] successfully recreated container %s with new ID: %s", dc.cname(), newCID)
+	}
+
 	if err := c.dcli.ContainerStart(ctx, dc.cid(), container.StartOptions{}); err != nil {
 		return errors.Wrapf(err, "error starting container [%v]", dc.cname())
 	}
@@ -461,6 +615,75 @@ func (c *LocalCluster) StopZero(id int) error {
 		return fmt.Errorf("invalid id of zero: %v", id)
 	}
 	return c.stopContainer(c.zeros[id])
+}
+
+// GetZeroContainerName returns the Docker container name for the specified Zero,
+// which also serves as a DNS alias on the cluster network.
+func (c *LocalCluster) GetZeroContainerName(id int) (string, error) {
+	if id >= c.conf.numZeros {
+		return "", fmt.Errorf("invalid id of zero: %v", id)
+	}
+	return c.zeros[id].containerName, nil
+}
+
+// SetZeroMyAddr overrides the --my flag for the specified Zero node. The next
+// time the container is recreated (via RecreateZero), this address will be
+// used instead of the default container alias.
+func (c *LocalCluster) SetZeroMyAddr(id int, addr string) error {
+	if id >= c.conf.numZeros {
+		return fmt.Errorf("invalid id of zero: %v", id)
+	}
+	c.zeros[id].myAddrOverride = addr
+	return nil
+}
+
+// RecreateZero destroys the Zero container and creates a new one with the
+// current command-line flags (e.g. a different --my address). The Zero's data
+// directory is preserved across the recreation by extracting it from the old
+// (stopped) container and injecting it into the new one. This simulates a
+// process restart with persistent storage — the exact scenario where stale WAL
+// addresses surface.
+func (c *LocalCluster) RecreateZero(id int) error {
+	if id >= c.conf.numZeros {
+		return fmt.Errorf("invalid id of zero: %v", id)
+	}
+	z := c.zeros[id]
+
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+
+	// Extract the data directory from the stopped container so the WAL survives.
+	dataReader, _, err := c.dcli.CopyFromContainer(ctx, z.cid(), zeroWorkingDir)
+	if err != nil {
+		return errors.Wrapf(err, "error copying data from zero container [%v]", z.cname())
+	}
+	defer dataReader.Close()
+
+	// Read the tar into memory (Zero WAL is small).
+	dataTar, err := io.ReadAll(dataReader)
+	if err != nil {
+		return errors.Wrap(err, "error reading zero data tar")
+	}
+
+	ro := container.RemoveOptions{RemoveVolumes: true, Force: true}
+	if err := c.dcli.ContainerRemove(ctx, z.cid(), ro); err != nil && !cerrdefs.IsNotFound(err) {
+		return errors.Wrapf(err, "error removing zero container [%v]", z.cname())
+	}
+
+	cid, err := c.createContainer(z)
+	if err != nil {
+		return errors.Wrapf(err, "error recreating zero container [%v]", z.cname())
+	}
+	z.containerID = cid
+
+	// Inject the data directory into the new container. CopyToContainer expects
+	// a tar archive rooted at the parent of the target path.
+	if err := c.dcli.CopyToContainer(ctx, cid, "/data", bytes.NewReader(dataTar),
+		container.CopyToContainerOptions{}); err != nil {
+		return errors.Wrapf(err, "error restoring data to zero container [%v]", z.cname())
+	}
+
+	return nil
 }
 
 func (c *LocalCluster) StopAlpha(id int) error {
@@ -506,36 +729,56 @@ func (c *LocalCluster) killContainer(dc dnode) error {
 
 func (c *LocalCluster) HealthCheck(zeroOnly bool) error {
 	log.Printf("[INFO] checking health of containers")
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(c.zeros)+len(c.alphas))
+
 	for _, zo := range c.zeros {
 		if !zo.isRunning {
 			break
 		}
-		if err := c.containerHealthCheck(zo.healthURL); err != nil {
-			return err
-		}
-		log.Printf("[INFO] container [%v] passed health check", zo.containerName)
+		wg.Add(1)
+		go func(z *zero) {
+			defer wg.Done()
+			if err := c.containerHealthCheck(z.healthURL); err != nil {
+				errChan <- err
+				return
+			}
+			log.Printf("[INFO] container [%v] passed health check", z.containerName)
 
-		if err := c.checkDgraphVersion(zo.containerName); err != nil {
-			return err
+			if err := c.checkDgraphVersion(z.containerName); err != nil {
+				errChan <- err
+			}
+		}(zo)
+	}
+
+	if !zeroOnly {
+		for _, aa := range c.alphas {
+			if !aa.isRunning {
+				break
+			}
+			wg.Add(1)
+			go func(a *alpha) {
+				defer wg.Done()
+				if err := c.containerHealthCheck(a.healthURL); err != nil {
+					errChan <- err
+					return
+				}
+				log.Printf("[INFO] container [%v] passed health check", a.containerName)
+
+				if err := c.checkDgraphVersion(a.containerName); err != nil {
+					errChan <- err
+				}
+			}(aa)
 		}
 	}
-	if zeroOnly {
-		return nil
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		return err
 	}
 
-	for _, aa := range c.alphas {
-		if !aa.isRunning {
-			break
-		}
-		if err := c.containerHealthCheck(aa.healthURL); err != nil {
-			return err
-		}
-		log.Printf("[INFO] container [%v] passed health check", aa.containerName)
-
-		if err := c.checkDgraphVersion(aa.containerName); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -545,7 +788,7 @@ func (c *LocalCluster) containerHealthCheck(url func(c *LocalCluster) (string, e
 		return errors.Wrapf(err, "error getting health URL %v", endpoint)
 	}
 
-	for range 60 {
+	for attempt := range 120 {
 		time.Sleep(waitDurBeforeRetry)
 
 		endpoint, err = url(c)
@@ -555,12 +798,16 @@ func (c *LocalCluster) containerHealthCheck(url func(c *LocalCluster) (string, e
 
 		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 		if err != nil {
-			log.Printf("[WARNING] error building req for endpoint [%v], err: [%v]", endpoint, err)
+			if attempt > 50 {
+				log.Printf("[WARNING] problem building req for endpoint [%v], err: [%v]", endpoint, err)
+			}
 			continue
 		}
 		body, err := dgraphapi.DoReq(req)
 		if err != nil {
-			log.Printf("[WARNING] error hitting health endpoint [%v], err: [%v]", endpoint, err)
+			if attempt > 50 {
+				log.Printf("[WARNING] problem hitting health endpoint [%v], err: [%v]", endpoint, err)
+			}
 			continue
 		}
 		resp := string(body)
@@ -602,46 +849,92 @@ func (c *LocalCluster) waitUntilLogin() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
-	for range 10 {
-		err := client.Login(ctx, dgraphapi.DefaultUser, dgraphapi.DefaultPassword)
+	for attempt := range 10 {
+		err = client.Login(ctx, dgraphapi.DefaultUser, dgraphapi.DefaultPassword)
 		if err == nil {
 			log.Printf("[INFO] login succeeded")
 			return nil
 		}
-		log.Printf("[WARNING] error trying to login: %v", err)
+		if attempt > 5 {
+			log.Printf("[WARNING] problem trying to login: %v", err)
+		}
 		time.Sleep(waitDurBeforeRetry)
 	}
-	return errors.New("error during login")
+	return errors.Wrap(err, "error during login")
 }
 
 func (c *LocalCluster) waitUntilGraphqlHealthCheck() error {
+	// The probes below are admin GraphQL operations, and every admin GraphQL
+	// operation carries IpWhitelistingMW — login included. On a cluster whose
+	// whitelist does not admit this process, neither can ever succeed, so wait on
+	// /probe/graphql instead: no whitelist middleware, no auth, and its whole
+	// purpose is answering "is GraphQL serving yet".
+	if c.conf.whitelist != defaultWhitelist {
+		return c.waitUntilGraphqlProbe()
+	}
+
 	hc, err := c.HTTPClient()
 	if err != nil {
 		return errors.Wrap(err, "error creating http client while graphql health check")
 	}
 	if c.conf.acl {
-		if err := hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace); err != nil {
+		for attempt := range 10 {
+			if err = hc.LoginIntoNamespace(dgraphapi.DefaultUser, dgraphapi.DefaultPassword, x.RootNamespace); err == nil {
+				break
+			}
+			if attempt > 5 {
+				log.Printf("[WARNING] problem trying to login during graphql health check: %v", err)
+			}
+			time.Sleep(waitDurBeforeRetry)
+		}
+		if err != nil {
 			return errors.Wrap(err, "error during login while graphql health check")
 		}
 	}
 
-	for range 10 {
+	for attempt := range 10 {
+		// Sleep for a second before retrying
+		time.Sleep(waitDurBeforeRetry)
 		// we do this because before v21, we used to propose the initial schema to the cluster.
 		// This results in schema being applied and indexes being built which could delay alpha
 		// starting to serve graphql schema.
-		err := hc.DeleteUser("nonexistent")
+		err = hc.DeleteUser("nonexistent")
 		if err == nil {
-			log.Printf("[INFO] graphql health check succeeded")
+			log.Printf("[INFO] graphql health check succeeded for %v", c.conf.prefix)
 			return nil
-		} else if strings.Contains(err.Error(), "this indicates a resolver or validation bug") {
-			time.Sleep(waitDurBeforeRetry)
-			continue
-		} else {
-			return errors.Wrapf(err, "error during graphql health check")
+		}
+		if attempt > 5 {
+			log.Printf("[WARNING] problem during graphql health check: %v", err)
 		}
 	}
+	return errors.Wrap(err, "error during graphql health check")
+}
 
-	return errors.New("error during graphql health check")
+// waitUntilGraphqlProbe waits for GraphQL to serve using /probe/graphql, which
+// carries no IP-whitelist and no auth middleware. It is the probe to use when the
+// cluster's whitelist may not admit the test process.
+func (c *LocalCluster) waitUntilGraphqlProbe() error {
+	url, err := c.serverURL("alpha", "/probe/graphql")
+	if err != nil {
+		return errors.Wrap(err, "error getting graphql probe URL")
+	}
+
+	var lastErr error
+	for attempt := range 10 {
+		time.Sleep(waitDurBeforeRetry)
+		req, err := http.NewRequest(http.MethodGet, "http://"+url, nil)
+		if err != nil {
+			return errors.Wrap(err, "error building graphql probe request")
+		}
+		if _, lastErr = dgraphapi.DoReq(req); lastErr == nil {
+			log.Printf("[INFO] graphql probe succeeded for %v", c.conf.prefix)
+			return nil
+		}
+		if attempt > 5 {
+			log.Printf("[WARNING] problem during graphql probe: %v", lastErr)
+		}
+	}
+	return errors.Wrap(lastErr, "error during graphql probe")
 }
 
 // Upgrades the cluster to the provided dgraph version
@@ -771,8 +1064,7 @@ func (c *LocalCluster) Client() (*dgraphapi.GrpcClient, func(), error) {
 	var conns []*grpc.ClientConn
 	for _, aa := range c.alphas {
 		if !aa.isRunning {
-			// QUESTIONS(shivaji): Should this be 'continue' instead of a break from the loop
-			break
+			continue
 		}
 		url, err := aa.alphaURL(c)
 		if err != nil {
@@ -795,7 +1087,7 @@ func (c *LocalCluster) Client() (*dgraphapi.GrpcClient, func(), error) {
 	cleanup := func() {
 		for _, conn := range conns {
 			if err := conn.Close(); err != nil {
-				log.Printf("[WARNING] error closing connection: %v", err)
+				log.Printf("[WARNING] problem closing connection: %v", err)
 			}
 		}
 	}
@@ -816,7 +1108,7 @@ func (c *LocalCluster) AlphaClient(id int) (*dgraphapi.GrpcClient, func(), error
 	client := dgo.NewDgraphClient(api.NewDgraphClient(conn))
 	cleanup := func() {
 		if err := conn.Close(); err != nil {
-			log.Printf("[WARNING] error closing connection: %v", err)
+			log.Printf("[WARNING] problem closing connection: %v", err)
 		}
 	}
 	return &dgraphapi.GrpcClient{Dgraph: client}, cleanup, nil
@@ -834,7 +1126,21 @@ func (c *LocalCluster) HTTPClient() (*dgraphapi.HTTPClient, error) {
 		return nil, err
 	}
 
-	return dgraphapi.GetHttpClient(alphaUrl, zeroUrl)
+	hc, err := dgraphapi.GetHttpClient(alphaUrl, zeroUrl)
+	if err != nil {
+		return nil, err
+	}
+	hc.AuthToken = c.conf.securityToken
+	return hc, nil
+}
+
+func (c *LocalCluster) GetAlphaHttpClient(alphaID int) (*dgraphapi.HTTPClient, error) {
+	pubPort, err := publicPort(c.dcli, c.alphas[alphaID], alphaHttpPort)
+	if err != nil {
+		return nil, err
+	}
+	url := "0.0.0.0:" + pubPort
+	return dgraphapi.GetHttpClient(url, "")
 }
 
 // serverURL returns url to the 'server' 'endpoint'
@@ -1066,6 +1372,13 @@ func (c *LocalCluster) inspectContainer(containerID string) (string, error) {
 }
 
 func (c *LocalCluster) setupSecrets() error {
+	// WidenSecretFilePerms is a public hook in dgraphtest/hooks.go; the
+	// default is no-op. Secret files use mode 0600 (owner-only), which
+	// is correct upstream. Downstream consumers running the dgraph
+	// container as a non-root user that differs from the host owner
+	// override the hook to widen perms — for example, adding group- or
+	// world-read — so the in-container uid can read the bind-mounted
+	// secret files.
 	if c.conf.encryption {
 		// use this key because some of the data is already encrypted using this key.
 		encKey := []byte("1234567890123456")
@@ -1073,11 +1386,17 @@ func (c *LocalCluster) setupSecrets() error {
 		if err := os.WriteFile(c.encKeyPath, encKey, 0600); err != nil {
 			return err
 		}
+		if err := WidenSecretFilePerms(c.encKeyPath); err != nil {
+			return err
+		}
 	}
 
 	if c.conf.acl {
 		aclSecretPath := filepath.Join(c.tempSecretsDir, aclKeyFile)
 		if err := generateACLSecret(c.conf.aclAlg, aclSecretPath); err != nil {
+			return err
+		}
+		if err := WidenSecretFilePerms(aclSecretPath); err != nil {
 			return err
 		}
 	}
@@ -1136,6 +1455,20 @@ func runOpennssl(args ...string) error {
 }
 
 func (c *LocalCluster) GeneratePlugins(raceEnabled bool) error {
+	// GeneratePlugins is a public hook in dgraphtest/hooks.go. The
+	// upstream default returns (nil, false, nil), so the host-side
+	// `go build -buildmode=plugin` fallback below runs. Downstream
+	// consumers whose toolchain is not directly invokable on the host
+	// — for example, forks pinning a Docker-only build image —
+	// override the hook to compile plugins inside that image and
+	// return their .so paths. When handled=true the override's outcome
+	// wins and the host-side fallback is skipped.
+	if tokenizers, handled, err := GeneratePlugins(raceEnabled, c.tempBinDir, baseRepoDir); handled {
+		if err == nil {
+			c.customTokenizers = tokenizers
+		}
+		return err
+	}
 	_, curr, _, ok := runtime.Caller(0)
 	if !ok {
 		return errors.New("error while getting current file")
@@ -1153,11 +1486,19 @@ func (c *LocalCluster) GeneratePlugins(raceEnabled bool) error {
 		if raceEnabled {
 			opts = append(opts, "-race")
 		}
-		opts = append(opts, "-buildmode=plugin", "-o", so, src)
-		os.Setenv("GOOS", "linux")
-		os.Setenv("GOARCH", "amd64")
+		opts = append(opts, "-buildmode=plugin")
+		if runtime.GOOS != "linux" {
+			// Use the BFD linker; the default gold linker is not shipped
+			// with most cross-compiler toolchains.
+			opts = append(opts, "-ldflags", "-extldflags -fuse-ld=bfd")
+		}
+		opts = append(opts, "-o", so, src)
 		cmd := exec.Command("go", opts...)
 		cmd.Dir = filepath.Dir(curr)
+		cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH)
+		if runtime.GOOS != "linux" {
+			cmd.Env = append(cmd.Env, "CGO_ENABLED=1", "CC="+linuxCrossCC())
+		}
 		if out, err := cmd.CombinedOutput(); err != nil {
 			log.Printf("Error: %v\n", err)
 			log.Printf("Output: %v\n", string(out))
@@ -1176,6 +1517,22 @@ func (c *LocalCluster) GeneratePlugins(raceEnabled bool) error {
 	log.Printf("plugin build completed. Files are: %s\n", sofiles)
 
 	return nil
+}
+
+// linuxCrossCC returns the C cross-compiler for targeting Linux from the current host.
+// Respects the LINUX_CC environment variable if set.
+func linuxCrossCC() string {
+	if cc := os.Getenv("LINUX_CC"); cc != "" {
+		return cc
+	}
+	switch runtime.GOARCH {
+	case "arm64":
+		return "aarch64-unknown-linux-gnu-gcc"
+	case "amd64":
+		return "x86_64-unknown-linux-gnu-gcc"
+	default:
+		return "gcc"
+	}
 }
 
 func (c *LocalCluster) GetAlphaGrpcPublicPort(id int) (string, error) {
@@ -1200,4 +1557,91 @@ func (c *LocalCluster) GetAlphaGrpcEndpoint(id int) (string, error) {
 		return "", err
 	}
 	return "0.0.0.0:" + pubPort, nil
+}
+
+// CopyExportToHost copies exported files from the container to a host directory.
+// It returns the paths to RDF/JSON files and schema files on the host.
+func (c *LocalCluster) ReadFileFromContainer(containerPath string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+
+	ts, _, err := c.dcli.CopyFromContainer(ctx, c.alphas[0].cid(), containerPath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "error copying file from container [%v]", c.alphas[0].cname())
+	}
+	defer ts.Close()
+
+	tr := tar.NewReader(ts)
+	if _, err := tr.Next(); err != nil {
+		return nil, errors.Wrap(err, "error reading tar header")
+	}
+	data, err := io.ReadAll(tr)
+	if err != nil {
+		return nil, errors.Wrap(err, "error reading file contents from tar stream")
+	}
+	return data, nil
+}
+
+func (c *LocalCluster) CopyExportToHost(exportDir, hostDir string) (dataFiles, schemaFiles []string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+
+	// Copy the exported data from the container to host
+	ts, _, err := c.dcli.CopyFromContainer(ctx, c.alphas[0].cid(), exportDir)
+	if err != nil {
+		return nil, nil, errors.Wrapf(err, "error copying export dir from container [%v]", c.alphas[0].cname())
+	}
+	defer func() {
+		if err := ts.Close(); err != nil {
+			log.Printf("[WARNING] error closing tared stream from docker cp for [%v]", c.alphas[0].cname())
+		}
+	}()
+
+	// Extract files from tar stream
+	tr := tar.NewReader(ts)
+	for {
+		header, err := tr.Next()
+		if stderrors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return nil, nil, errors.Wrapf(err, "error reading file in tared stream: [%+v]", header)
+		}
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		fileName := filepath.Base(header.Name)
+		hostFile := filepath.Join(hostDir, fileName)
+
+		if !strings.HasPrefix(filepath.Clean(hostFile), filepath.Clean(hostDir)+string(os.PathSeparator)) {
+			return nil, nil, errors.Errorf("illegal file path in archive: %v", header.Name)
+		}
+
+		switch {
+		case strings.HasSuffix(fileName, ".rdf.gz"):
+			dataFiles = append(dataFiles, hostFile)
+		case strings.HasSuffix(fileName, ".json.gz"):
+			dataFiles = append(dataFiles, hostFile)
+		case strings.HasSuffix(fileName, ".schema.gz"):
+			schemaFiles = append(schemaFiles, hostFile)
+		case strings.HasSuffix(fileName, ".gql_schema.gz"):
+			// Skip gql schema files for now
+			continue
+		default:
+			log.Printf("[WARNING] unexpected file in export: %v", fileName)
+			continue
+		}
+
+		fd, err := os.Create(hostFile)
+		if err != nil {
+			return nil, nil, errors.Wrapf(err, "error creating file [%v]", hostFile)
+		}
+		defer fd.Close()
+
+		if _, err := io.Copy(fd, tr); err != nil {
+			return nil, nil, errors.Wrapf(err, "error writing to [%v] from: [%+v]", fd.Name(), header)
+		}
+	}
+
+	return dataFiles, schemaFiles, nil
 }

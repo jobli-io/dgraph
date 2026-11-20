@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -10,8 +10,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/hypermodeinc/dgraph/v25/acl"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/acl"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 // AclCache is the cache mapping group names to the corresponding group acls
@@ -51,9 +51,18 @@ var AclCachePtr = &AclCache{
 }
 
 func (cache *AclCache) GetUserPredPerms(userId string) map[string]int32 {
-	cache.Lock()
-	defer cache.Unlock()
-	return cache.userPredPerms[userId]
+	cache.RLock()
+	defer cache.RUnlock()
+
+	perms, found := cache.userPredPerms[userId]
+	if !found {
+		return nil
+	}
+	snapshot := make(map[string]int32, len(perms))
+	for predicate, permission := range perms {
+		snapshot[predicate] = permission
+	}
+	return snapshot
 }
 
 func (cache *AclCache) Update(ns uint64, groups []acl.Group) {
@@ -135,11 +144,14 @@ func (cache *AclCache) Update(ns uint64, groups []acl.Group) {
 		}
 	}
 
-	for _, v := range AclCachePtr.userPredPerms {
-		for k := range v {
+	for userID, perms := range AclCachePtr.userPredPerms {
+		for k := range perms {
 			if x.ParseNamespace(k) == ns {
-				delete(v, k)
+				delete(perms, k)
 			}
+		}
+		if len(perms) == 0 {
+			delete(AclCachePtr.userPredPerms, userID)
 		}
 	}
 
@@ -148,8 +160,17 @@ func (cache *AclCache) Update(ns uint64, groups []acl.Group) {
 		AclCachePtr.predPerms[k] = v
 	}
 
-	for k, v := range userPredPerms {
-		AclCachePtr.userPredPerms[k] = v
+	// User IDs are namespace-local, so the same ID can exist in multiple namespaces. Merge the
+	// namespaced predicates instead of replacing permissions collected from another namespace.
+	for userID, newPerms := range userPredPerms {
+		perms, found := AclCachePtr.userPredPerms[userID]
+		if !found {
+			perms = make(map[string]int32)
+			AclCachePtr.userPredPerms[userID] = perms
+		}
+		for predicate, permission := range newPerms {
+			perms[predicate] = permission
+		}
 	}
 }
 

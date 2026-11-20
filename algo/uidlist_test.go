@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/hypermodeinc/dgraph/v25/codec"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/codec"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
 )
 
 func newList(data []uint64) *pb.List {
@@ -70,6 +70,60 @@ func TestMergeSorted6(t *testing.T) {
 	}
 	require.Equal(t, MergeSorted(input).Uids,
 		[]uint64{1, 2, 11, 12, 13, 14, 15, 16, 17, 18, 20, 25})
+}
+
+func BenchmarkMergeSorted(b *testing.B) {
+	createList := func(n int) *pb.List {
+		list := make([]uint64, n)
+		for i := range list {
+			list[i] = uint64(rand.Int63())
+		}
+		sort.Slice(list, func(i, j int) bool {
+			return list[i] < list[j]
+		})
+		return &pb.List{Uids: list}
+	}
+
+	input := []*pb.List{}
+	for i := 0; i < 10000; i++ {
+		input = append(input, createList(100))
+	}
+
+	b.Run("MergeSorted", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			internalMergeSort(input)
+		}
+	})
+	b.Run("MergeSortedParallel", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			MergeSortedMoreMem(input)
+		}
+	})
+	b.Run("MergeSortedNew", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			MergeSorted(input)
+		}
+	})
+}
+
+func TestMergeSortedRandom(t *testing.T) {
+	createList := func(n int) *pb.List {
+		list := make([]uint64, n)
+		for i := range list {
+			list[i] = uint64(rand.Int63())
+		}
+		sort.Slice(list, func(i, j int) bool {
+			return list[i] < list[j]
+		})
+		return &pb.List{Uids: list}
+	}
+
+	input := []*pb.List{}
+	for i := 0; i < 1000; i++ {
+		input = append(input, createList(1000))
+	}
+
+	require.Equal(t, MergeSorted(input).Uids, internalMergeSort(input).Uids)
 }
 
 func TestMergeSorted7(t *testing.T) {

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -9,7 +9,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +21,8 @@ import (
 	docker "github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	"github.com/pkg/errors"
+
+	"github.com/dgraph-io/dgraph/v25/buildvars"
 )
 
 const (
@@ -75,6 +79,7 @@ type dnode interface {
 	ports() nat.PortSet
 	bindings(int) nat.PortMap
 	cmd(*LocalCluster) []string
+	env(*LocalCluster) []string
 	workingDir() string
 	mounts(*LocalCluster) ([]mount.Mount, error)
 	healthURL(*LocalCluster) (string, error)
@@ -82,14 +87,16 @@ type dnode interface {
 	alphaURL(*LocalCluster) (string, error)
 	zeroURL(*LocalCluster) (string, error)
 	changeStatus(bool)
+	setContainerID(string)
 }
 
 type zero struct {
-	id            int    // 0, 1, 2
-	containerID   string // container ID in docker world
-	containerName string // something like test-1234_zero2
-	aliasName     string // something like alpha0, zero1
-	isRunning     bool
+	id             int    // 0, 1, 2
+	containerID    string // container ID in docker world
+	containerName  string // something like test-1234_zero2
+	aliasName      string // something like alpha0, zero1
+	isRunning      bool
+	myAddrOverride string // if set, overrides the --my flag value
 }
 
 func (z *zero) cname() string {
@@ -125,7 +132,11 @@ func (z *zero) bindings(offset int) nat.PortMap {
 }
 
 func (z *zero) cmd(c *LocalCluster) []string {
-	zcmd := []string{"/gobin/dgraph", "zero", fmt.Sprintf("--my=%s:%v", z.aname(), zeroGrpcPort), "--bindall",
+	myAddr := fmt.Sprintf("%s:%v", z.aname(), zeroGrpcPort)
+	if z.myAddrOverride != "" {
+		myAddr = z.myAddrOverride
+	}
+	zcmd := []string{buildvars.GoBinDgraphPath.Get(), "zero", fmt.Sprintf("--my=%s", myAddr), "--bindall",
 		fmt.Sprintf(`--replicas=%v`, c.conf.replicas), "--logtostderr", fmt.Sprintf("-v=%d", c.conf.verbosity)}
 
 	if c.lowerThanV21 {
@@ -140,6 +151,14 @@ func (z *zero) cmd(c *LocalCluster) []string {
 	}
 
 	return zcmd
+}
+
+func (z *zero) env(c *LocalCluster) []string {
+	// Zero binaries that guard their admin HTTP endpoints read the security whitelist from
+	// the environment; older binaries used in upgrade tests simply ignore the variable. An
+	// env var is used instead of a --security flag because older zero binaries would fail
+	// to start on an unrecognized flag.
+	return []string{"DGRAPH_ZERO_SECURITY=whitelist=0.0.0.0/0"}
 }
 
 func (z *zero) workingDir() string {
@@ -166,6 +185,10 @@ func (z *zero) healthURL(c *LocalCluster) (string, error) {
 
 func (z *zero) changeStatus(isRunning bool) {
 	z.isRunning = isRunning
+}
+
+func (z *zero) setContainerID(cid string) {
+	z.containerID = cid
 }
 
 func (z *zero) assignURL(c *LocalCluster) (string, error) {
@@ -229,14 +252,17 @@ func (a *alpha) bindings(offset int) nat.PortMap {
 }
 
 func (a *alpha) cmd(c *LocalCluster) []string {
-	acmd := []string{"/gobin/dgraph", "alpha", fmt.Sprintf("--my=%s:%v", a.aname(), alphaInterPort),
+	acmd := []string{buildvars.GoBinDgraphPath.Get(), "alpha", fmt.Sprintf("--my=%s:%v", a.aname(), alphaInterPort),
 		"--bindall", "--logtostderr", fmt.Sprintf("-v=%d", c.conf.verbosity)}
 
 	if c.lowerThanV21 {
-		acmd = append(acmd, `--whitelist=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`, "--telemetry=false")
+		acmd = append(acmd, fmt.Sprintf(`--whitelist=%s`, c.conf.whitelist), "--telemetry=false")
 	} else {
-		acmd = append(acmd, `--security=whitelist=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`,
-			"--telemetry=reports=false;")
+		security := fmt.Sprintf(`--security=whitelist=%s`, c.conf.whitelist)
+		if c.conf.securityToken != "" {
+			security += fmt.Sprintf(`;token=%s`, c.conf.securityToken)
+		}
+		acmd = append(acmd, security, "--telemetry=reports=false;")
 	}
 
 	if c.conf.lambdaURL != "" {
@@ -287,7 +313,17 @@ func (a *alpha) cmd(c *LocalCluster) []string {
 				c.conf.snapShotAfterEntries, c.conf.snapshotAfterDuration)))
 	}
 
+	if c.conf.mcp {
+		acmd = append(acmd, "--mcp")
+	}
+
+	acmd = append(acmd, c.conf.startupArgs...)
+
 	return acmd
+}
+
+func (a *alpha) env(c *LocalCluster) []string {
+	return nil
 }
 
 func (a *alpha) workingDir() string {
@@ -359,12 +395,21 @@ func (a *alpha) changeStatus(isRunning bool) {
 	a.isRunning = isRunning
 }
 
+func (a *alpha) setContainerID(cid string) {
+	a.containerID = cid
+}
+
 func (a *alpha) zeroURL(c *LocalCluster) (string, error) {
 	return "", errNotImplemented
 }
 
 func publicPort(dcli *docker.Client, dc dnode, privatePort string) (string, error) {
 	// TODO(aman): we should cache the port information
+
+	if runtime.GOOS == "darwin" {
+		return getPortMappingsOnMac(dc.cid(), privatePort)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
@@ -389,6 +434,38 @@ func publicPort(dcli *docker.Client, dc dnode, privatePort string) (string, erro
 	}
 
 	return "", fmt.Errorf("no mapping found for private port [%v] for container [%v]", privatePort, dc.cname())
+}
+
+// getPortMappingsOnMac parses `docker ps` output to get accurate macOS mappings
+// because docker inspect does not know about port mappings at all.
+func getPortMappingsOnMac(containerID, privatePort string) (string, error) {
+	out, err := exec.Command("docker", "ps", "--format", "{{.ID}} {{.Ports}}").Output()
+	if err != nil {
+		return "", fmt.Errorf("docker ps failed: %w", err)
+	}
+
+	for line := range strings.SplitSeq(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.HasPrefix(containerID, fields[0]) {
+			continue
+		}
+
+		// Example: "0.0.0.0:55069->8080/tcp," => "55069"
+		for _, part := range fields[1:] {
+			if strings.Contains(part, privatePort+"/tcp") {
+				// A port entry like "8080/tcp" has no colon because the port
+				// wasn't published to the host; skip it rather than panic on
+				// an out-of-range index.
+				colonParts := strings.Split(part, ":")
+				if len(colonParts) < 2 {
+					continue
+				}
+				return strings.Split(colonParts[1], "->")[0], nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no mapping found for private port [%v] for container [%v]", privatePort, containerID)
 }
 
 func mountBinary(c *LocalCluster) (mount.Mount, error) {

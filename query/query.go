@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -12,22 +12,24 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/hypermodeinc/dgraph/v25/algo"
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/schema"
-	"github.com/hypermodeinc/dgraph/v25/types"
-	"github.com/hypermodeinc/dgraph/v25/types/facets"
-	"github.com/hypermodeinc/dgraph/v25/worker"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/algo"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/schema"
+	"github.com/dgraph-io/dgraph/v25/types"
+	"github.com/dgraph-io/dgraph/v25/types/facets"
+	"github.com/dgraph-io/dgraph/v25/worker"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 /*
@@ -138,7 +140,7 @@ type params struct {
 	// UidToVal is the mapping of uid to values. This is populated into a SubGraph from a value
 	// variable that is part of req.Vars. This value variable would have been defined
 	// in some other query.
-	UidToVal map[uint64]types.Val
+	UidToVal *types.ShardedMap
 
 	// Normalize is true if the @normalize directive is specified.
 	Normalize bool
@@ -700,6 +702,10 @@ func (args *params) fill(gq *dql.GraphQuery) error {
 			if err != nil {
 				return err
 			}
+			if numPaths > math.MaxInt {
+				return errors.Errorf("numpaths value %d exceeds maximum allowed value %d",
+					numPaths, math.MaxInt)
+			}
 			args.NumPaths = int(numPaths)
 		}
 
@@ -947,6 +953,18 @@ func createTaskQuery(ctx context.Context, sg *SubGraph) (*pb.Query, error) {
 
 	// first is to limit how many results we want.
 	first, offset := calculatePaginationParams(sg)
+	ns, err := x.ExtractNamespace(ctx)
+	if err != nil {
+		return nil, errors.Wrapf(err, "While ordering and paginating")
+	}
+	orderParams := sg.createOrderForTask(ns)
+	sortMsg := &pb.SortMessage{
+		Order:     orderParams,
+		UidMatrix: sg.uidMatrix,
+		Offset:    int32(sg.Params.Offset),
+		Count:     int32(sg.Params.Count),
+		ReadTs:    sg.ReadTs,
+	}
 
 	out := &pb.Query{
 		ReadTs:       sg.ReadTs,
@@ -962,6 +980,7 @@ func createTaskQuery(ctx context.Context, sg *SubGraph) (*pb.Query, error) {
 		ExpandAll:    sg.Params.ExpandAll,
 		First:        first,
 		Offset:       offset,
+		Order:        sortMsg,
 	}
 
 	if sg.SrcUIDs != nil {
@@ -997,7 +1016,7 @@ func calculatePaginationParams(sg *SubGraph) (int32, int32) {
 	shouldExclude := false
 	if sg.SrcFunc != nil {
 		switch sg.SrcFunc.Name {
-		case "regexp", "alloftext", "allofterms", "match":
+		case "regexp", "alloftext", "allofterms", "match", "ngram":
 			shouldExclude = true
 		default:
 			shouldExclude = false
@@ -1018,7 +1037,7 @@ func calculatePaginationParams(sg *SubGraph) (int32, int32) {
 // populated.
 type varValue struct {
 	Uids *pb.List // list of uids if this denotes a uid variable.
-	Vals map[uint64]types.Val
+	Vals *types.ShardedMap
 	path []*SubGraph // This stores the subgraph path from root to var definition.
 	// strList stores the valueMatrix corresponding to a predicate and is later used in
 	// expand(val(x)) query.
@@ -1027,8 +1046,8 @@ type varValue struct {
 
 func evalLevelAgg(
 	doneVars map[string]varValue,
-	sg, parent *SubGraph) (map[uint64]types.Val, error) {
-	var mp map[uint64]types.Val
+	sg, parent *SubGraph) (*types.ShardedMap, error) {
+	var mp *types.ShardedMap
 
 	if parent == nil {
 		return nil, ErrWrongAgg
@@ -1043,19 +1062,23 @@ func evalLevelAgg(
 		ag := aggregator{
 			name: sg.SrcFunc.Name,
 		}
-		for _, val := range vals {
+		err := vals.Iterate(func(k uint64, val types.Val) error {
 			err := ag.Apply(val)
 			if err != nil {
-				return nil, err
+				return err
 			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
 		}
 		v, err := ag.Value()
 		if err != nil && err != ErrEmptyVal {
 			return nil, err
 		}
 		if v.Value != nil {
-			mp = make(map[uint64]types.Val)
-			mp[0] = v
+			mp = types.NewShardedMap()
+			mp.Set(0, v)
 		}
 		return mp, nil
 	}
@@ -1082,14 +1105,14 @@ func evalLevelAgg(
 	}
 
 	vals := doneVars[needsVar].Vals
-	mp = make(map[uint64]types.Val)
+	mp = types.NewShardedMap()
 	// Go over the sibling node and aggregate.
 	for i, list := range relSG.uidMatrix {
 		ag := aggregator{
 			name: sg.SrcFunc.Name,
 		}
 		for _, uid := range list.Uids {
-			if val, ok := vals[uid]; ok {
+			if val, ok := vals.Get(uid); ok {
 				if err := ag.Apply(val); err != nil {
 					return nil, errors.Errorf("Error in applying aggregation %s", err)
 				}
@@ -1100,7 +1123,7 @@ func evalLevelAgg(
 			return nil, err
 		}
 		if v.Value != nil {
-			mp[relSG.SrcUIDs.Uids[i]] = v
+			mp.Set(relSG.SrcUIDs.Uids[i], v)
 		}
 	}
 	return mp, nil
@@ -1118,9 +1141,11 @@ func (mt *mathTree) extractVarNodes() []*mathTree {
 	return nodeList
 }
 
+const numThreadsVariablePropogation = 4
+
 // transformTo transforms fromNode to toNode level using the path between them and the
 // corresponding uidMatrices.
-func (fromNode *varValue) transformTo(toPath []*SubGraph) (map[uint64]types.Val, error) {
+func (fromNode *varValue) transformTo(toPath []*SubGraph) (*types.ShardedMap, error) {
 	if len(toPath) < len(fromNode.path) {
 		return fromNode.Vals, nil
 	}
@@ -1132,46 +1157,86 @@ func (fromNode *varValue) transformTo(toPath []*SubGraph) (map[uint64]types.Val,
 		}
 	}
 
-	if len(fromNode.Vals) == 0 {
+	if fromNode.Vals.Len() == 0 {
 		return fromNode.Vals, nil
 	}
 
 	newMap := fromNode.Vals
 	for ; idx < len(toPath); idx++ {
 		curNode := toPath[idx]
-		tempMap := make(map[uint64]types.Val)
 		if idx == 0 {
 			continue
 		}
 
-		for i := range curNode.uidMatrix {
-			ul := curNode.uidMatrix[i]
-			srcUid := curNode.SrcUIDs.Uids[i]
-			curVal, ok := newMap[srcUid]
-			if !ok || curVal.Value == nil {
-				continue
-			}
-			if curVal.Tid != types.IntID && curVal.Tid != types.FloatID {
-				return nil, errors.Errorf("Encountered non int/float type for summing")
-			}
-			for j := range ul.Uids {
-				dstUid := ul.Uids[j]
-				ag := aggregator{name: "sum"}
-				if err := ag.Apply(curVal); err != nil {
-					return nil, errors.Errorf("Error in applying aggregation %s", err)
-				}
-				if err := ag.Apply(tempMap[dstUid]); err != nil {
-					return nil, errors.Errorf("Error in applying aggregation %s", err)
-				}
-				val, err := ag.Value()
-				if err != nil {
+		var mutex sync.Mutex
+		var resultMap *types.ShardedMap
+
+		calculate := func(start, end int) {
+			tempMap := types.NewShardedMap()
+
+			for i := start; i < end; i++ {
+				ul := curNode.uidMatrix[i]
+				srcUid := curNode.SrcUIDs.Uids[i]
+				curVal, ok := newMap.Get(srcUid)
+				if !ok || curVal.Value == nil {
 					continue
 				}
-				tempMap[dstUid] = val
+				if curVal.Tid != types.IntID && curVal.Tid != types.FloatID {
+					return
+				}
+				ag := aggregator{name: "sum"}
+				for j := range ul.Uids {
+					ag.result = types.Val{}
+					dstUid := ul.Uids[j]
+					if err := ag.Apply(curVal); err != nil {
+						return
+					}
+					if tempVal, ok := tempMap.Get(dstUid); ok {
+						if err := ag.Apply(tempVal); err != nil {
+							return
+						}
+					}
+					val, err := ag.Value()
+					if err != nil {
+						continue
+					}
+					tempMap.Set(dstUid, val)
+				}
+			}
+
+			mutex.Lock()
+			defer mutex.Unlock()
+			if resultMap == nil {
+				resultMap = tempMap
+			} else {
+				resultMap.Merge(tempMap, func(a, b types.Val) types.Val {
+					ag := &aggregator{name: "sum"}
+					ag.Apply(a)
+					ag.Apply(b)
+					v, _ := ag.Value()
+					return v
+				})
 			}
 		}
-		newMap = tempMap
+
+		width := len(curNode.uidMatrix) / numThreadsVariablePropogation
+		var wg sync.WaitGroup
+		for i := 0; i < numThreadsVariablePropogation; i++ {
+			start := i * width
+			end := (i + 1) * width
+			if i == numThreadsVariablePropogation-1 {
+				end = len(curNode.uidMatrix)
+			}
+			wg.Add(1)
+			go func() {
+				calculate(start, end)
+				wg.Done()
+			}()
+		}
+		wg.Wait()
+		newMap = resultMap
 	}
+
 	return newMap, nil
 }
 
@@ -1189,7 +1254,7 @@ func (sg *SubGraph) transformVars(doneVars map[string]varValue, path []*SubGraph
 
 		// This is the result of setting the result of count(uid) to a variable.
 		// Treat this value as a constant.
-		if val, ok := newMap[math.MaxUint64]; ok && len(newMap) == 1 {
+		if val, ok := newMap.Get(math.MaxUint64); ok && newMap.Len() == 1 {
 			mt.Const = val
 			continue
 		}
@@ -1240,24 +1305,32 @@ func (sg *SubGraph) valueVarAggregation(doneVars map[string]varValue, path []*Su
 		}
 
 		switch {
-		case len(sg.MathExp.Val) != 0:
+		case sg.MathExp.Val.Len() != 0:
 			it := doneVars[sg.Params.Var]
 			var isInt, isFloat bool
-			for _, v := range sg.MathExp.Val {
+			err := sg.MathExp.Val.Iterate(func(k uint64, v types.Val) error {
 				if v.Tid == types.FloatID {
 					isFloat = true
 				}
 				if v.Tid == types.IntID {
 					isInt = true
 				}
+				return nil
+			})
+			if err != nil {
+				return err
 			}
 			if isInt && isFloat {
-				for k, v := range sg.MathExp.Val {
+				err := sg.MathExp.Val.Iterate(func(k uint64, v types.Val) error {
 					if v.Tid == types.IntID {
 						v.Tid = types.FloatID
 						v.Value = float64(v.Value.(int64))
 					}
-					sg.MathExp.Val[k] = v
+					sg.MathExp.Val.Set(k, v)
+					return nil
+				})
+				if err != nil {
+					return err
 				}
 			}
 
@@ -1268,21 +1341,21 @@ func (sg *SubGraph) valueVarAggregation(doneVars map[string]varValue, path []*Su
 			sg.Params.UidToVal = sg.MathExp.Val
 		case sg.MathExp.Const.Value != nil:
 			// Assign the const for all the srcUids.
-			mp := make(map[uint64]types.Val)
+			mp := types.NewShardedMap()
 			rangeOver := sg.SrcUIDs
 			if parent == nil {
 				rangeOver = sg.DestUIDs
 			}
 			if rangeOver == nil {
 				it := doneVars[sg.Params.Var]
-				mp[0] = sg.MathExp.Const
-				it.Vals = mp
+				it.Vals = types.NewShardedMap()
+				it.Vals.Set(0, sg.MathExp.Const)
 				doneVars[sg.Params.Var] = it
-				sg.Params.UidToVal = mp
+				sg.Params.UidToVal = it.Vals
 				return nil
 			}
 			for _, uid := range rangeOver.Uids {
-				mp[uid] = sg.MathExp.Const
+				mp.Set(uid, sg.MathExp.Const)
 			}
 			it := doneVars[sg.Params.Var]
 			it.Vals = mp
@@ -1310,6 +1383,7 @@ func (sg *SubGraph) valueVarAggregation(doneVars map[string]varValue, path []*Su
 
 func (sg *SubGraph) populatePostAggregation(doneVars map[string]varValue, path []*SubGraph,
 	parent *SubGraph) error {
+
 	for idx := range sg.Children {
 		child := sg.Children[idx]
 		path = append(path, sg)
@@ -1493,7 +1567,7 @@ func (sg *SubGraph) populateUidValVar(doneVars map[string]varValue, sgPath []*Su
 
 		// This implies it is a value variable.
 		doneVars[sg.Params.Var] = varValue{
-			Vals:    make(map[uint64]types.Val),
+			Vals:    types.NewShardedMap(),
 			path:    sgPath,
 			strList: sg.valueMatrix,
 		}
@@ -1502,7 +1576,7 @@ func (sg *SubGraph) populateUidValVar(doneVars map[string]varValue, sgPath []*Su
 				Tid:   types.IntID,
 				Value: int64(sg.counts[idx]),
 			}
-			doneVars[sg.Params.Var].Vals[uid] = val
+			doneVars[sg.Params.Var].Vals.Set(uid, val)
 		}
 	case sg.Params.DoCount && sg.Attr == "uid" && sg.IsInternal():
 		// 2. This is the case where count(uid) is requested in the query and stored as variable.
@@ -1510,7 +1584,7 @@ func (sg *SubGraph) populateUidValVar(doneVars map[string]varValue, sgPath []*Su
 		// math.MaxUint64 which isn't entirely correct as there could be an actual uid with that
 		// value.
 		doneVars[sg.Params.Var] = varValue{
-			Vals:    make(map[uint64]types.Val),
+			Vals:    types.NewShardedMap(),
 			path:    sgPath,
 			strList: sg.valueMatrix,
 		}
@@ -1521,7 +1595,7 @@ func (sg *SubGraph) populateUidValVar(doneVars map[string]varValue, sgPath []*Su
 			Tid:   types.IntID,
 			Value: int64(len(sg.SrcUIDs.Uids)),
 		}
-		doneVars[sg.Params.Var].Vals[math.MaxUint64] = val
+		doneVars[sg.Params.Var].Vals.Set(math.MaxUint64, val)
 	case len(sg.DestUIDs.Uids) != 0 || (sg.Attr == "uid" && sg.SrcUIDs != nil):
 		// 3. A uid variable. The variable could be defined in one of two places.
 		// a) Either on the actual predicate.
@@ -1546,7 +1620,7 @@ func (sg *SubGraph) populateUidValVar(doneVars map[string]varValue, sgPath []*Su
 			doneVars[sg.Params.Var] = varValue{
 				Uids:    uids,
 				path:    sgPath,
-				Vals:    make(map[uint64]types.Val),
+				Vals:    types.NewShardedMap(),
 				strList: sg.valueMatrix,
 			}
 			return nil
@@ -1561,7 +1635,7 @@ func (sg *SubGraph) populateUidValVar(doneVars map[string]varValue, sgPath []*Su
 		// 4. A value variable. We get the first value from every list thats part of ValueMatrix
 		// and store it corresponding to a uid in SrcUIDs.
 		if v, ok = doneVars[sg.Params.Var]; !ok {
-			v.Vals = make(map[uint64]types.Val)
+			v.Vals = types.NewShardedMap()
 			v.path = sgPath
 			v.strList = sg.valueMatrix
 		}
@@ -1578,7 +1652,7 @@ func (sg *SubGraph) populateUidValVar(doneVars map[string]varValue, sgPath []*Su
 			if err != nil {
 				continue
 			}
-			v.Vals[uid] = val
+			v.Vals.Set(uid, val)
 		}
 		doneVars[sg.Params.Var] = v
 	default:
@@ -1590,7 +1664,7 @@ func (sg *SubGraph) populateUidValVar(doneVars map[string]varValue, sgPath []*Su
 		// Insert a empty entry to keep the dependency happy.
 		doneVars[sg.Params.Var] = varValue{
 			path:    sgPath,
-			Vals:    make(map[uint64]types.Val),
+			Vals:    types.NewShardedMap(),
 			strList: sg.valueMatrix,
 		}
 	}
@@ -1614,7 +1688,7 @@ func (sg *SubGraph) populateFacetVars(doneVars map[string]varValue, sgPath []*Su
 		// Assign an empty value for every facet that was assigned to a variable and hence is part
 		// of FacetVar.
 		doneVars[fvar] = varValue{
-			Vals: make(map[uint64]types.Val),
+			Vals: types.NewShardedMap(),
 			path: sgPath,
 		}
 	}
@@ -1633,13 +1707,13 @@ func (sg *SubGraph) populateFacetVars(doneVars map[string]varValue, sgPath []*Su
 				if !ok {
 					continue
 				}
-				if pVal, ok := doneVars[fvar].Vals[uid]; !ok {
+				if pVal, ok := doneVars[fvar].Vals.Get(uid); !ok {
 					fVal, err := facets.ValFor(f)
 					if err != nil {
 						return err
 					}
 
-					doneVars[fvar].Vals[uid] = fVal
+					doneVars[fvar].Vals.Set(uid, fVal)
 				} else {
 					// If the value is int/float we add them up. Else we throw an error as
 					// many to one maps are not allowed for other types.
@@ -1663,7 +1737,7 @@ func (sg *SubGraph) populateFacetVars(doneVars map[string]varValue, sgPath []*Su
 					if err != nil {
 						continue
 					}
-					doneVars[fvar].Vals[uid] = fVal
+					doneVars[fvar].Vals.Set(uid, fVal)
 				}
 			}
 		}
@@ -1775,16 +1849,17 @@ func (sg *SubGraph) fillVars(mp map[string]varValue) error {
 			// TODO: This allows only one value var per subgraph, change it later
 			sg.Params.UidToVal = l.Vals
 
-		case (v.Typ == dql.AnyVar || v.Typ == dql.UidVar) && len(l.Vals) != 0:
+		case (v.Typ == dql.AnyVar || v.Typ == dql.UidVar) && l.Vals.Len() != 0:
 			// Derive the UID list from value var.
-			uids := make([]uint64, 0, len(l.Vals))
-			for k := range l.Vals {
-				uids = append(uids, k)
-			}
+			uids := make([]uint64, 0, l.Vals.Len())
+			l.Vals.Iterate(func(uid uint64, _ types.Val) error {
+				uids = append(uids, uid)
+				return nil
+			})
 			sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
 			lists = append(lists, &pb.List{Uids: uids})
 
-		case len(l.Vals) != 0 || l.Uids != nil:
+		case l.Vals.Len() != 0 || l.Uids != nil:
 			return errors.Errorf("Wrong variable type encountered for var(%v) %v.", v.Name, v.Typ)
 
 		default:
@@ -1820,7 +1895,7 @@ func (sg *SubGraph) replaceVarInFunc() error {
 			args = append(args, arg)
 			continue
 		}
-		if len(sg.Params.UidToVal) == 0 {
+		if sg.Params.UidToVal.Len() == 0 {
 			// This means that the variable didn't have any values and hence there is nothing to add
 			// to args.
 			break
@@ -1828,22 +1903,28 @@ func (sg *SubGraph) replaceVarInFunc() error {
 		// We don't care about uids, just take all the values and put as args.
 		// There would be only one value var per subgraph as per current assumptions.
 		seenArgs := make(map[string]struct{})
-		for _, v := range sg.Params.UidToVal {
+		err := sg.Params.UidToVal.Iterate(func(uid uint64, v types.Val) error {
 			data := types.ValueForType(types.StringID)
 			if err := types.Marshal(v, &data); err != nil {
 				return err
 			}
 			val := data.Value.(string)
 			if _, ok := seenArgs[val]; ok {
-				continue
+				return nil
 			}
 			seenArgs[val] = struct{}{}
 			args = append(args, dql.Arg{Value: val})
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 	}
 	sg.SrcFunc.Args = args
 	return nil
 }
+
+var ErrStopIteration = errors.New("stop iteration")
 
 // Used to evaluate an inequality function which uses a value variable instead of a predicate.
 // E.g.
@@ -1853,7 +1934,7 @@ func (sg *SubGraph) replaceVarInFunc() error {
 // The function filters uids corresponding to the variable which satisfy the inequality and stores
 // the filtered uids in DestUIDs.
 func (sg *SubGraph) applyIneqFunc() error {
-	if len(sg.Params.UidToVal) == 0 {
+	if sg.Params.UidToVal.Len() == 0 {
 		// Expected a valid value map. But got empty.
 		// Don't return error, return empty - issue #2610
 		return nil
@@ -1863,9 +1944,12 @@ func (sg *SubGraph) applyIneqFunc() error {
 	// Find out the type of value using the first value in the map and try to convert the function
 	// argument to that type to make sure we can compare them. If we can't return an error.
 	var typ types.TypeID
-	for _, v := range sg.Params.UidToVal {
+	err := sg.Params.UidToVal.Iterate(func(uid uint64, v types.Val) error {
 		typ = v.Tid
-		break
+		return ErrStopIteration
+	})
+	if err != nil && err != ErrStopIteration {
+		return err
 	}
 	val := sg.SrcFunc.Args[0].Value
 	src := types.Val{Tid: types.StringID, Value: []byte(val)}
@@ -1875,19 +1959,22 @@ func (sg *SubGraph) applyIneqFunc() error {
 	}
 
 	if sg.SrcUIDs != nil {
-		// This means its a filter.
 		for _, uid := range sg.SrcUIDs.Uids {
-			curVal, ok := sg.Params.UidToVal[uid]
+			curVal, ok := sg.Params.UidToVal.Get(uid)
 			if ok && types.CompareVals(sg.SrcFunc.Name, curVal, dst) {
 				sg.DestUIDs.Uids = append(sg.DestUIDs.Uids, uid)
 			}
 		}
 	} else {
 		// This means it's a function at root as SrcUIDs is nil
-		for uid, curVal := range sg.Params.UidToVal {
+		err := sg.Params.UidToVal.Iterate(func(uid uint64, curVal types.Val) error {
 			if types.CompareVals(sg.SrcFunc.Name, curVal, dst) {
 				sg.DestUIDs.Uids = append(sg.DestUIDs.Uids, uid)
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 		sort.Slice(sg.DestUIDs.Uids, func(i, j int) bool {
 			return sg.DestUIDs.Uids[i] < sg.DestUIDs.Uids[j]
@@ -2628,9 +2715,9 @@ func (sg *SubGraph) sortAndPaginateUsingVar(ctx context.Context) error {
 		uids := make([]uint64, 0, len(ul.Uids))
 		values := make([][]types.Val, 0, len(ul.Uids))
 		for _, uid := range ul.Uids {
-			v, ok := sg.Params.UidToVal[uid]
+			v, ok := sg.Params.UidToVal.Get(uid)
 			if !ok {
-				// We skip the UIDs which don't have a value.
+				// We skip the UIDs which don't have a value
 				continue
 			}
 			values = append(values, []types.Val{v})
@@ -2671,7 +2758,7 @@ func isValidArg(a string) bool {
 // isValidFuncName checks if fn passed is valid keyword.
 func isValidFuncName(f string) bool {
 	switch f {
-	case "anyofterms", "allofterms", "val", "regexp", "anyoftext", "alloftext",
+	case "anyofterms", "allofterms", "val", "regexp", "anyoftext", "alloftext", "ngram",
 		"has", "uid", "uid_in", "anyof", "allof", "type", "match", "similar_to":
 		return true
 	}
@@ -2854,17 +2941,19 @@ func (req *Request) ProcessQuery(ctx context.Context) (err error) {
 				continue
 			}
 
+			_, spana := otel.Tracer("").Start(ctx, "Recursive Fill Vars"+sg.Attr)
 			err = sg.recursiveFillVars(req.Vars)
 			if err != nil {
 				return err
 			}
+			spana.End()
 			hasExecuted[idx] = true
 			numQueriesDone++
 			idxList = append(idxList, idx)
 			// A query doesn't need to be executed if
 			// 1. It just does aggregation and math functions which is when sg.Params.IsEmpty is true.
 			// 2. Its has an inequality fn at root without any args which can happen when it uses
-			// value variables for args which don't expand to any value.
+			// value varProcessGraphiables for args which don't expand to any value.
 			if sg.Params.IsEmpty || isEmptyIneqFnWithVar(sg) {
 				errChan <- nil
 				continue
@@ -2909,13 +2998,16 @@ func (req *Request) ProcessQuery(ctx context.Context) (err error) {
 		// If the executed subgraph had some variable defined in it, Populate it in the map.
 		for _, idx := range idxList {
 			sg := req.Subgraphs[idx]
+			_, spann := otel.Tracer("").Start(ctx, "Populate Var Map "+sg.Attr)
 
 			var sgPath []*SubGraph
 			if err := sg.populateVarMap(req.Vars, sgPath); err != nil {
 				return err
 			}
-			// first time at the root here.
+			spann.End()
 
+			// first time at the root here.
+			_, spana := otel.Tracer("").Start(ctx, "Update Uid Matrix Var Map "+sg.Attr)
 			// Apply pagination at the root after @cascade.
 			if len(sg.Params.Cascade.Fields) > 0 && (sg.Params.Cascade.First != 0 || sg.Params.Cascade.Offset != 0) {
 				sg.updateUidMatrix()
@@ -2925,10 +3017,13 @@ func (req *Request) ProcessQuery(ctx context.Context) (err error) {
 					sg.uidMatrix[i].Uids = sg.uidMatrix[i].Uids[start:end]
 				}
 			}
+			spana.End()
 
+			_, spanp := otel.Tracer("").Start(ctx, "Populate Post Aggregation Var Map "+sg.Attr)
 			if err := sg.populatePostAggregation(req.Vars, []*SubGraph{}, nil); err != nil {
 				return err
 			}
+			spanp.End()
 		}
 	}
 

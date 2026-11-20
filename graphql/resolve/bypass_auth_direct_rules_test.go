@@ -7,12 +7,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/graphql/authorization"
-	"github.com/hypermodeinc/dgraph/v25/graphql/dgraph"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/graphql/test"
-	"github.com/hypermodeinc/dgraph/v25/testutil"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/authorization"
+	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/graphql/test"
+	"github.com/dgraph-io/dgraph/v25/testutil"
 )
 
 func TestBypassAuth_DirectTypeRulesExcept(t *testing.T) {
@@ -105,7 +105,7 @@ func TestBypassAuth_DirectTypeRulesExcept(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -212,7 +212,7 @@ func TestBypassAuth_DirectTypeOnlyExcept(t *testing.T) {
 	require.NoError(t, err)
 
 	rewriter := NewQueryRewriter()
-	dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+	dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 	require.NoError(t, err)
 
 	actual := dgraph.AsString(dgQuery)
@@ -296,7 +296,7 @@ func TestBypassAuth_IfCondition(t *testing.T) {
 		require.NoError(t, err)
 
 		rewriter := NewQueryRewriter()
-		dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+		dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 		require.NoError(t, err)
 
 		actual := dgraph.AsString(dgQuery)
@@ -320,7 +320,7 @@ func TestBypassAuth_IfCondition(t *testing.T) {
 		require.NoError(t, err)
 
 		rewriter := NewQueryRewriter()
-		dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+		dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 		require.NoError(t, err)
 
 		actual := dgraph.AsString(dgQuery)
@@ -343,7 +343,7 @@ func TestBypassAuth_IfCondition(t *testing.T) {
 		require.NoError(t, err)
 
 		rewriter := NewQueryRewriter()
-		dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+		dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 		require.NoError(t, err)
 
 		actual := dgraph.AsString(dgQuery)
@@ -445,7 +445,7 @@ func TestBypassAuth_IfConditionWithExcept(t *testing.T) {
 		require.NoError(t, err)
 
 		rewriter := NewQueryRewriter()
-		dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+		dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 		require.NoError(t, err)
 
 		actual := dgraph.AsString(dgQuery)
@@ -471,7 +471,7 @@ func TestBypassAuth_IfConditionWithExcept(t *testing.T) {
 		require.NoError(t, err)
 
 		rewriter := NewQueryRewriter()
-		dgQuery, err := rewriter.Rewrite(ctx, gqlQry)
+		dgQuery, _, err := rewriter.Rewrite(ctx, gqlQry)
 		require.NoError(t, err)
 
 		actual := dgraph.AsString(dgQuery)

@@ -12,18 +12,18 @@ services:
       - "9080"
     volumes:
       - type: bind
-        source: $GOPATH/bin
+        source: ${LINUX_GOBIN:-$GOPATH/bin}
         target: /gobin
         read_only: true
     command:
       /gobin/dgraph alpha --my=alpha1:7080 --zero=zero1:5080 --logtostderr -v=2 --raft='idx=1;
-      group=1;' --security "whitelist=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16;"
+      group=1;' --security "whitelist=0.0.0.0/0;"
     deploy:
       resources:
         limits:
           memory: 32G
   minio:
-    image: minio/minio:RELEASE.2020-11-13T20-10-18Z
+    image: ghcr.io/dgraph-io/minio:release.2026-09-22t19-25-18z
     ports:
       - "9001"
     env_file:
@@ -39,7 +39,7 @@ services:
       - "6080"
     volumes:
       - type: bind
-        source: $GOPATH/bin
+        source: ${LINUX_GOBIN:-$GOPATH/bin}
         target: /gobin
         read_only: true
     command:

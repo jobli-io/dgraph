@@ -1,7 +1,7 @@
 //go:build integration
 
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -24,10 +24,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 
-	"github.com/hypermodeinc/dgraph/v25/dgraphapi"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/query"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/dgraphapi"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/query"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 type res struct {
@@ -825,6 +825,41 @@ func TestHealth(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &info))
 	require.Equal(t, "alpha", info[0].Instance)
 	require.True(t, info[0].Uptime > int64(time.Duration(1)))
+}
+
+// TestCmdlineEndpointsNotExposed ensures that endpoints which expose the full
+// process command line are not reachable without authentication. Both
+// /debug/pprof/cmdline (net/http/pprof) and /debug/vars (expvar, which
+// publishes os.Args as "cmdline") can leak the admin token passed via
+// --security "token=...".
+func TestCmdlineEndpointsNotExposed(t *testing.T) {
+	// /debug/pprof/cmdline must be blocked.
+	resp, err := http.Get(fmt.Sprintf("%s/debug/pprof/cmdline", addr))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusNotFound, resp.StatusCode,
+		"/debug/pprof/cmdline should return 404; got %d", resp.StatusCode)
+
+	// /debug/vars must still be reachable but must NOT include "cmdline".
+	resp2, err := http.Get(fmt.Sprintf("%s/debug/vars", addr))
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	require.Equal(t, http.StatusOK, resp2.StatusCode,
+		"/debug/vars should return 200; got %d", resp2.StatusCode)
+	body, err := io.ReadAll(resp2.Body)
+	require.NoError(t, err)
+	var vars map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &vars))
+	_, hasCmdline := vars["cmdline"]
+	require.False(t, hasCmdline,
+		"/debug/vars response must not contain the cmdline key")
+
+	// Sanity-check that other pprof endpoints are still reachable.
+	resp3, err := http.Get(fmt.Sprintf("%s/debug/pprof/heap", addr))
+	require.NoError(t, err)
+	defer resp3.Body.Close()
+	require.Equal(t, http.StatusOK, resp3.StatusCode,
+		"/debug/pprof/heap should return 200; got %d", resp3.StatusCode)
 }
 
 func setDrainingMode(t *testing.T, enable bool, accessJwt string) {

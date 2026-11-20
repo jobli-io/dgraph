@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -28,17 +28,18 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/y"
-	"github.com/hypermodeinc/dgraph/v25/chunker"
-	"github.com/hypermodeinc/dgraph/v25/enc"
-	"github.com/hypermodeinc/dgraph/v25/filestore"
-	gqlSchema "github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
-	"github.com/hypermodeinc/dgraph/v25/xidmap"
+	"github.com/dgraph-io/dgo/v250"
+	"github.com/dgraph-io/dgraph/v25/chunker"
+	"github.com/dgraph-io/dgraph/v25/enc"
+	"github.com/dgraph-io/dgraph/v25/filestore"
+	gqlSchema "github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/xidmap"
 )
 
-type options struct {
+type BulkOptions struct {
 	DataFiles        string
 	DataFormat       string
 	SchemaFile       string
@@ -50,13 +51,17 @@ type options struct {
 	MapBufSize       uint64
 	PartitionBufSize int64
 	SkipMapPhase     bool
+	SkipReducePhase  bool
 	CleanupTmp       bool
 	NumReducers      int
 	Version          bool
 	StoreXids        bool
 	ZeroAddr         string
+	ConnStr          string
 	HttpAddr         string
 	IgnoreErrors     bool
+	LogErrors        bool
+	ErrorLogPath     string
 	CustomTokenizers string
 	NewUids          bool
 	ClientDir        string
@@ -68,6 +73,12 @@ type options struct {
 
 	Namespace uint64
 
+	// TabletPlacementFile pins predicates to groups; see x.ParseTabletPlacementFile.
+	TabletPlacementFile string
+	// tabletPlacement maps a namespaced predicate to its map/reduce shard (group - 1),
+	// built from TabletPlacementFile by buildTabletPlacement.
+	tabletPlacement map[string]int
+
 	shardOutputDirs []string
 
 	// ........... Badger options ..........
@@ -77,57 +88,136 @@ type options struct {
 	Badger badger.Options
 }
 
+// chunkWithMeta wraps a chunk buffer with metadata about the source file.
+type chunkWithMeta struct {
+	buf      *bytes.Buffer
+	filename string
+}
+
 type state struct {
-	opt           *options
+	opt           *BulkOptions
 	prog          *progress
 	xids          *xidmap.XidMap
 	schema        *schemaStore
 	shards        *shardMap
-	readerChunkCh chan *bytes.Buffer
+	readerChunkCh chan *chunkWithMeta
 	mapFileId     uint32 // Used atomically to name the output files of the mappers.
 	dbs           []*badger.DB
 	tmpDbs        []*badger.DB // Temporary DB to write the split lists to avoid ordering issues.
+	vectorTmpDb   *badger.DB   // Shared temporary DB for vector data and HNSW index building.
 	writeTs       uint64       // All badger writes use this timestamp
 	namespaces    *sync.Map    // To store the encountered namespaces.
+	errorLog      *errorLogger // Error logger for --log_errors
+}
+
+// errorLogger provides thread-safe logging of parsing errors to a file.
+type errorLogger struct {
+	mu   sync.Mutex
+	file *os.File
+}
+
+func newErrorLogger(path string) (*errorLogger, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return nil, err
+	}
+	return &errorLogger{file: f}, nil
+}
+
+func (e *errorLogger) Log(filename string, err error, extra string) {
+	if e == nil || e.file == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// Truncate very long extra info in the log
+	if len(extra) > 500 {
+		extra = extra[:500] + "..."
+	}
+	fmt.Fprintf(e.file, "file: %s\nerror: %v\n%s\n", filename, err, extra)
+}
+
+func (e *errorLogger) Close() error {
+	if e == nil || e.file == nil {
+		return nil
+	}
+	return e.file.Close()
 }
 
 type loader struct {
 	*state
 	mappers []*mapper
 	zero    *grpc.ClientConn
+	dg      *dgo.Dgraph
 }
 
-func newLoader(opt *options) *loader {
+func newLoader(opt *BulkOptions, precomputedWriteTs uint64) *loader {
 	if opt == nil {
 		log.Fatalf("Cannot create loader with nil options.")
 	}
 
-	fmt.Printf("Connecting to zero at %s\n", opt.ZeroAddr)
+	var zero *grpc.ClientConn
+	if opt.ZeroAddr != "" {
+		fmt.Printf("Connecting to zero at %s\n", opt.ZeroAddr)
 
-	tlsConf, err := x.LoadClientTLSConfigForInternalPort(Bulk.Conf)
-	x.Check(err)
-	dialOpts := []grpc.DialOption{}
-	if tlsConf != nil {
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConf)))
-	} else {
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		tlsConf, err := x.LoadClientTLSConfigForInternalPort(Bulk.Conf)
+		x.Check(err)
+		dialOpts := []grpc.DialOption{}
+		if tlsConf != nil {
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConf)))
+		} else {
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		}
+		zero, err = grpc.NewClient(opt.ZeroAddr, dialOpts...)
+		x.Checkf(err, "Unable to connect to zero, Is it running at %s?", opt.ZeroAddr)
 	}
-	zero, err := grpc.NewClient(opt.ZeroAddr, dialOpts...)
-	x.Checkf(err, "Unable to connect to zero, Is it running at %s?", opt.ZeroAddr)
+
+	var dg *dgo.Dgraph
+	if opt.ConnStr != "" {
+		fmt.Printf("Connecting to alpha at %s\n", opt.ConnStr)
+
+		var err error
+		dg, err = dgo.Open(opt.ConnStr)
+		x.Checkf(err, "Unable to connect to alpha, Is it running at %s?", opt.ConnStr)
+	}
+
+	var errLog *errorLogger
+	if opt.LogErrors {
+		if !opt.IgnoreErrors {
+			fmt.Fprintln(os.Stderr, "Warning: --log_errors requires --ignore_errors to be set")
+		}
+		var err error
+		errLog, err = newErrorLogger(opt.ErrorLogPath)
+		x.Checkf(err, "Unable to create error log file at %s", opt.ErrorLogPath)
+		fmt.Printf("Error logging enabled, writing to: %s\n", opt.ErrorLogPath)
+	}
+
+	writeTs := precomputedWriteTs
+	if writeTs == 0 {
+		writeTs = getWriteTimestamp(zero, dg)
+	}
 	st := &state{
 		opt:    opt,
 		prog:   newProgress(),
-		shards: newShardMap(opt.MapShards),
+		shards: newShardMap(opt.MapShards, unpinnedBaseShard(opt), opt.tabletPlacement),
 		// Lots of gz readers, so not much channel buffer needed.
-		readerChunkCh: make(chan *bytes.Buffer, opt.NumGoroutines),
-		writeTs:       getWriteTimestamp(zero),
+		readerChunkCh: make(chan *chunkWithMeta, opt.NumGoroutines),
+		writeTs:       writeTs,
 		namespaces:    &sync.Map{},
+		errorLog:      errLog,
 	}
-	st.schema = newSchemaStore(readSchema(opt), opt, st)
+	var parsedSchema *schema.ParsedSchema
+	if !opt.SkipMapPhase {
+		parsedSchema = readSchema(opt)
+	} else {
+		parsedSchema = &schema.ParsedSchema{}
+	}
+	st.schema = newSchemaStore(parsedSchema, opt, st)
 	ld := &loader{
 		state:   st,
 		mappers: make([]*mapper, opt.NumGoroutines),
 		zero:    zero,
+		dg:      dg,
 	}
 	for i := range opt.NumGoroutines {
 		ld.mappers[i] = newMapper(st)
@@ -136,16 +226,29 @@ func newLoader(opt *options) *loader {
 	return ld
 }
 
-func getWriteTimestamp(zero *grpc.ClientConn) uint64 {
-	client := pb.NewZeroClient(zero)
+func getWriteTimestamp(zero *grpc.ClientConn, dg *dgo.Dgraph) uint64 {
+	if zero != nil {
+		client := pb.NewZeroClient(zero)
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ts, err := client.Timestamps(ctx, &pb.Num{Val: 1})
+			cancel()
+			if err == nil {
+				return ts.GetStartId()
+			}
+			fmt.Printf("Error communicating with dgraph zero, retrying: %v", err)
+			time.Sleep(time.Second)
+		}
+	}
+
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		ts, err := client.Timestamps(ctx, &pb.Num{Val: 1})
+		_, ts, err := dg.AllocateTimestamps(ctx, 1)
 		cancel()
 		if err == nil {
-			return ts.GetStartId()
+			return ts
 		}
-		fmt.Printf("Error communicating with dgraph zero, retrying: %v", err)
+		fmt.Printf("Error communicating with dgraph alpha, retrying: %v", err)
 		time.Sleep(time.Second)
 	}
 }
@@ -166,21 +269,37 @@ func (ld *loader) leaseNamespaces() {
 		return
 	}
 
-	client := pb.NewZeroClient(ld.zero)
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		ns, err := client.AssignIds(ctx, &pb.Num{Val: maxNs, Type: pb.Num_NS_ID})
-		cancel()
-		if err == nil {
-			fmt.Printf("Assigned namespaces till %d\n", ns.GetEndId())
-			return
+	if ld.zero != nil {
+		client := pb.NewZeroClient(ld.zero)
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			ns, err := client.AssignIds(ctx, &pb.Num{Val: maxNs, Type: pb.Num_NS_ID})
+			cancel()
+			if err == nil {
+				fmt.Printf("Assigned namespaces till %d\n", ns.GetEndId())
+				return
+			}
+			fmt.Printf("Error communicating with dgraph zero, retrying: %v", err)
+			time.Sleep(time.Second)
 		}
-		fmt.Printf("Error communicating with dgraph zero, retrying: %v", err)
-		time.Sleep(time.Second)
+	}
+
+	if ld.dg != nil {
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			_, end, err := ld.dg.AllocateTimestamps(ctx, maxNs)
+			cancel()
+			if err == nil {
+				fmt.Printf("Assigned namespaces till %d\n", end)
+				return
+			}
+			fmt.Printf("Error communicating with dgraph alpha, retrying: %v", err)
+			time.Sleep(time.Second)
+		}
 	}
 }
 
-func readSchema(opt *options) *schema.ParsedSchema {
+func readSchema(opt *BulkOptions) *schema.ParsedSchema {
 	if opt.SchemaFile == "" {
 		return genDQLSchema(opt)
 	}
@@ -212,7 +331,7 @@ func readSchema(opt *options) *schema.ParsedSchema {
 	return result
 }
 
-func genDQLSchema(opt *options) *schema.ParsedSchema {
+func genDQLSchema(opt *BulkOptions) *schema.ParsedSchema {
 	gqlSchBytes := readGqlSchema(opt)
 	nsToSchemas := parseGqlSchema(string(gqlSchBytes))
 
@@ -251,6 +370,7 @@ func (ld *loader) mapStage() {
 	ld.xids = xidmap.New(xidmap.XidMapOptions{
 		UidAssigner: ld.zero,
 		DB:          db,
+		DgClient:    ld.dg,
 		Dir:         filepath.Join(ld.opt.TmpDir, bufferDir),
 	})
 
@@ -301,7 +421,7 @@ func (ld *loader) mapStage() {
 			for {
 				chunkBuf, err := chunk.Chunk(r)
 				if chunkBuf != nil && chunkBuf.Len() > 0 {
-					ld.readerChunkCh <- chunkBuf
+					ld.readerChunkCh <- &chunkWithMeta{buf: chunkBuf, filename: file}
 				}
 				if err == io.EOF {
 					break
@@ -348,7 +468,7 @@ func parseGqlSchema(s string) map[uint64]string {
 	return schemaMap
 }
 
-func readGqlSchema(opt *options) []byte {
+func readGqlSchema(opt *BulkOptions) []byte {
 	f, err := filestore.Open(opt.GqlSchemaFile)
 	x.Check(err)
 	defer func() {
@@ -400,11 +520,13 @@ func (ld *loader) processGqlSchema(loadType chunker.InputFormat) {
 		schema = strconv.Quote(schema)
 		switch loadType {
 		case chunker.RdfFormat:
-			x.Check2(gqlBuf.Write([]byte(fmt.Sprintf(rdfSchema, ns, ns, schema, ns))))
+			_, err := fmt.Fprintf(gqlBuf, rdfSchema, ns, ns, schema, ns)
+			x.Check(err)
 		case chunker.JsonFormat:
-			x.Check2(gqlBuf.Write([]byte(fmt.Sprintf(jsonSchema, ns, schema))))
+			_, err := fmt.Fprintf(gqlBuf, jsonSchema, ns, schema)
+			x.Check(err)
 		}
-		ld.readerChunkCh <- gqlBuf
+		ld.readerChunkCh <- &chunkWithMeta{buf: gqlBuf, filename: "<gql_schema>"}
 	}
 
 	buf := readGqlSchema(ld.opt)
@@ -462,6 +584,12 @@ func (ld *loader) writeSchema() {
 	// and distribute them among all the DBs.
 	for p := range ld.schema.schemaMap {
 		if _, ok := m[p]; !ok {
+			// A pinned predicate's schema key must go to its pinned group even when the
+			// load carried no data for it.
+			if shard, ok := ld.opt.tabletPlacement[p]; ok {
+				preds[shard] = append(preds[shard], p)
+				continue
+			}
 			i := adler32.Checksum([]byte(p)) % numDBs
 			preds[i] = append(preds[i], p)
 		}
@@ -481,6 +609,16 @@ func (ld *loader) cleanup() {
 		opts := db.Opts()
 		x.Check(db.Close())
 		x.Check(os.RemoveAll(opts.Dir))
+	}
+	if ld.vectorTmpDb != nil {
+		opts := ld.vectorTmpDb.Opts()
+		x.Check(ld.vectorTmpDb.Close())
+		x.Check(os.RemoveAll(opts.Dir))
+	}
+	if ld.errorLog != nil {
+		if err := ld.errorLog.Close(); err != nil {
+			glog.Warningf("error closing error log: %v", err)
+		}
 	}
 	ld.prog.endSummary()
 }

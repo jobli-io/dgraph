@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -8,10 +8,10 @@ package admin
 import (
 	"context"
 
-	"github.com/hypermodeinc/dgraph/v25/dql"
-	"github.com/hypermodeinc/dgraph/v25/graphql/resolve"
-	"github.com/hypermodeinc/dgraph/v25/graphql/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/resolve"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 type currentUserResolver struct {
@@ -28,11 +28,11 @@ func extractName(ctx context.Context) (string, error) {
 }
 
 func (gsr *currentUserResolver) Rewrite(ctx context.Context,
-	gqlQuery schema.Query) ([]*dql.GraphQuery, error) {
+	gqlQuery schema.Query) ([]*dql.GraphQuery, map[string]string, error) {
 
 	name, err := extractName(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	gqlQuery.Rename("getUser")

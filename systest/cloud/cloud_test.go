@@ -1,7 +1,7 @@
 //go:build integration
 
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -14,12 +14,13 @@ import (
 	"testing"
 	"time"
 
+	minio "github.com/minio/minio-go/v7"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
-	"github.com/hypermodeinc/dgraph/v25/graphql/e2e/common"
-	"github.com/hypermodeinc/dgraph/v25/testutil"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/graphql/e2e/common"
+	"github.com/dgraph-io/dgraph/v25/testutil"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 func setup(t *testing.T) {
@@ -150,7 +151,7 @@ func TestEnvironmentAccess(t *testing.T) {
 	bucketname := "dgraph-export"
 	mc, err := testutil.NewMinioClient()
 	require.NoError(t, err)
-	require.NoError(t, mc.MakeBucket(bucketname, ""))
+	require.NoError(t, mc.MakeBucket(context.Background(), bucketname, minio.MakeBucketOptions{}))
 	minioDest := "minio://minio:9001/dgraph-export?secure=false"
 
 	// Export without the minio creds should fail for non-galaxy.
@@ -159,11 +160,12 @@ func TestEnvironmentAccess(t *testing.T) {
 	require.Contains(t, resp.Errors.Error(), "task failed")
 
 	// Export with the minio creds should work for non-galaxy.
-	resp = testutil.Export(t, nsToken, minioDest, "accesskey", "secretkey")
+	// Secret key is padded to 14+ bytes so "AWS4"+secret satisfies the
+	// OpenSSL FIPS provider's HMAC key-length minimum (see dgraph/minio.env).
+	resp = testutil.Export(t, nsToken, minioDest, "accesskey", "secretkey-long-enough")
 	require.Zero(t, len(resp.Errors))
 
 	// Galaxy guardian should provide the credentials as well.
-	resp = testutil.Export(t, galaxyToken, minioDest, "accesskey", "secretkey")
+	resp = testutil.Export(t, galaxyToken, minioDest, "accesskey", "secretkey-long-enough")
 	require.Zero(t, len(resp.Errors))
-
 }

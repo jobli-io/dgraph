@@ -17,7 +17,7 @@ function DockerCompose {
 }
 
 Info "cloning benchmarks repo"
-BENCHMARKS_URL=https://github.com/hypermodeinc/dgraph-benchmarks/blob/main/data
+BENCHMARKS_URL=https://github.com/dgraph-io/dgraph-benchmarks/blob/main/data
 rm -rf "${BENCHMARKS_REPO}"
 mkdir -p "${BENCHMARKS_REPO}"/data
 wget -O "${NO_INDEX_SCHEMA_FILE}" "${BENCHMARKS_URL}"/1million-noindex.schema?raw=true
@@ -42,7 +42,7 @@ DockerCompose run --rm -v "${BENCHMARKS_REPO}":"${BENCHMARKS_REPO}" --name bulk_
         mkdir -p /data/alpha1
         mkdir -p /data/alpha2
         mkdir -p /data/alpha3
-        /gobin/dgraph bulk --schema=${NO_INDEX_SCHEMA_FILE} --files=${DATA_FILE} \
+        ${GOBIN_DGRAPH_PATH:-/gobin/dgraph} bulk --schema=${NO_INDEX_SCHEMA_FILE} --files=${DATA_FILE} \
                             --format=rdf --zero=zero1:5180 --out=/data/zero1/bulk \
                             --reduce_shards 3 --map_shards 9
         mv /data/zero1/bulk/0/p /data/alpha1

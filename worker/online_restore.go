@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -23,11 +23,12 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
-	"github.com/hypermodeinc/dgraph/v25/conn"
-	"github.com/hypermodeinc/dgraph/v25/posting"
-	"github.com/hypermodeinc/dgraph/v25/protos/pb"
-	"github.com/hypermodeinc/dgraph/v25/schema"
-	"github.com/hypermodeinc/dgraph/v25/x"
+	"github.com/dgraph-io/dgraph/v25/conn"
+	"github.com/dgraph-io/dgraph/v25/posting"
+	"github.com/dgraph-io/dgraph/v25/protos/pb"
+	"github.com/dgraph-io/dgraph/v25/schema"
+	"github.com/dgraph-io/dgraph/v25/tok/hnsw"
+	"github.com/dgraph-io/dgraph/v25/x"
 )
 
 const (
@@ -304,6 +305,26 @@ func handleRestoreProposal(ctx context.Context, req *pb.RestoreRequest, pidx uin
 		restorePreds = buildPredsForDefaultNamespace(restorePreds, req.FromNamespace)
 	}
 	for _, pred := range restorePreds {
+		// HNSW vector indexes produce supporting predicates (__vector_entry,
+		// __vector_, __vector_dead) that are stored alongside the base vector
+		// predicate in the same Badger instance. During normal operation these
+		// are never registered as tablets in Zero — the HNSW code writes them
+		// directly via AddMutationWithLockHeld, and transaction validation in
+		// Zero's checkPreds strips the VecKeyword suffix to resolve the base
+		// predicate's group. Registering them here would create an inconsistent
+		// state that causes backup manifest duplication and may trigger futile
+		// rebalancing attempts.
+		//
+		// Skipping ForceTablet is safe because the restore mapper decides which
+		// data keys to restore based on the manifest's predicate set (predSet),
+		// not on Zero's tablet assignments. The supporting predicate data will
+		// still be restored to the correct Alpha's Badger store.
+		if strings.HasSuffix(pred, hnsw.VecEntry) ||
+			strings.HasSuffix(pred, hnsw.VecKeyword) ||
+			strings.HasSuffix(pred, hnsw.VecDead) {
+			continue
+		}
+
 		// Force the tablet to be moved to this group, even
 		// if it's currently being served by another group.
 		tablet, err := groups().ForceTablet(pred)
@@ -445,21 +466,23 @@ func bumpLease(ctx context.Context, mr *mapResult) error {
 	}
 
 	zc := pb.NewZeroClient(pl.Get())
-	bump := func(val uint64, typ pb.NumLeaseType) error {
-		_, err := zc.AssignIds(ctx, &pb.Num{Val: val, Type: typ, Bump: true})
-		if err != nil && strings.Contains(err.Error(), "Nothing to be leased") {
-			return nil
-		}
-		return err
-	}
-
-	if err := bump(mr.maxUid, pb.Num_UID); err != nil {
+	if err := BumpLease(ctx, zc, mr.maxUid, pb.Num_UID); err != nil {
 		return errors.Wrapf(err, "cannot update max uid lease after restore.")
 	}
-	if err := bump(mr.maxNs, pb.Num_NS_ID); err != nil {
+	if err := BumpLease(ctx, zc, mr.maxNs, pb.Num_NS_ID); err != nil {
 		return errors.Wrapf(err, "cannot update max namespace lease after restore.")
 	}
 	return nil
+}
+
+// BumpLease raises Zero's lease of the given type to at least val. It is a no-op when the lease
+// already reaches val, so a restore can call it any number of times without consuming ids.
+func BumpLease(ctx context.Context, zc pb.ZeroClient, val uint64, typ pb.NumLeaseType) error {
+	_, err := zc.AssignIds(ctx, &pb.Num{Val: val, Type: typ, Bump: true})
+	if err != nil && strings.Contains(err.Error(), "Nothing to be leased") {
+		return nil
+	}
+	return err
 }
 
 // create a config object from the request for use with enc package.
@@ -538,6 +561,7 @@ func RunOfflineRestore(dir, location, backupId, keyFile string, key x.Sensitive,
 		}
 	}
 
+	var maxUid, maxNs uint64
 	for gid := range manifest.Groups {
 		req := &pb.RestoreRequest{
 			Location:          location,
@@ -556,9 +580,12 @@ func RunOfflineRestore(dir, location, backupId, keyFile string, key x.Sensitive,
 			}
 		}()
 
-		if _, err := RunMapper(req, mapDir); err != nil {
+		mapRes, err := RunMapper(req, mapDir)
+		if err != nil {
 			return LoadResult{Err: errors.Wrap(err, "RunRestore failed to map")}
 		}
+		maxUid = x.Max(maxUid, mapRes.maxUid)
+		maxNs = x.Max(maxNs, mapRes.maxNs)
 		pdir := filepath.Join(dir, fmt.Sprintf("p%d", gid))
 		db, err := badger.OpenManaged(badger.DefaultOptions(pdir).
 			WithCompression(ctype).
@@ -588,8 +615,8 @@ func RunOfflineRestore(dir, location, backupId, keyFile string, key x.Sensitive,
 			return LoadResult{Err: errors.Wrap(err, "RunRestore failed to write group id file")}
 		}
 	}
-	// TODO: Fix this return value.
-	return LoadResult{Version: manifest.ValidReadTs()}
+	// The caller bumps Zero's uid and namespace leases past these, as the online restore does.
+	return LoadResult{Version: manifest.ValidReadTs(), MaxLeaseUid: maxUid, MaxLeaseNsId: maxNs}
 }
 
 func buildPredsForDefaultNamespace(restorePreds []string, fromNamespace uint64) []string {

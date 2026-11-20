@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: © Hypermode Inc. <hello@hypermode.com>
+ * SPDX-FileCopyrightText: © 2017-2026 Istari Digital, Inc.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -8,7 +8,7 @@ package chunker
 import (
 	"strconv"
 
-	"github.com/hypermodeinc/dgraph/v25/lex"
+	"github.com/dgraph-io/dgraph/v25/lex"
 )
 
 // The constants represent different types of lexed Items possible for an rdf N-Quad.
@@ -147,7 +147,7 @@ func lexText(l *lex.Lexer) lex.StateFn {
 // Assumes that caller has consumed initial '<'
 func lexIRIRef(l *lex.Lexer, styp lex.ItemType, sfn lex.StateFn) lex.StateFn {
 	if err := lex.IRIRef(l, styp); err != nil {
-		return l.Errorf(err.Error())
+		return l.Errorf("%s", err.Error())
 	}
 	return sfn
 }
@@ -384,7 +384,7 @@ forLoop:
 			return nil
 		case r == quote:
 			if err := l.LexQuotedString(); err != nil {
-				return l.Errorf(err.Error())
+				return l.Errorf("%s", err.Error())
 			}
 			l.Emit(itemText)
 		default:
