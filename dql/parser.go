@@ -367,6 +367,17 @@ func parseValue(v varInfo) (types.Val, error) {
 				}, nil
 			}
 		}
+	case "stringvector":
+		{
+			if i, err := types.ParseVString(v.Value); err != nil {
+				return types.Val{}, errors.Wrapf(err, "Expected a stringvector but got %v", v.Value)
+			} else {
+				return types.Val{
+					Tid:   types.VStringID,
+					Value: i,
+				}, nil
+			}
+		}
 	case "string": // Value is a valid string. No checks required.
 		return types.Val{
 			Tid:   types.StringID,
@@ -418,6 +429,12 @@ func checkValueType(vm varMap) error {
 				{
 					if _, err := types.ParseVFloat(v.Value); err != nil {
 						return errors.Wrapf(err, "Expected a vector32float but got %v", v.Value)
+					}
+				}
+			case "stringvector":
+				{
+					if _, err := types.ParseVString(v.Value); err != nil {
+						return errors.Wrapf(err, "Expected a stringvector but got %v", v.Value)
 					}
 				}
 			case "string": // Value is a valid string. No checks required.
@@ -1971,7 +1988,7 @@ L:
 					if ok && next.Typ == itemColon {
 						key := strings.ToLower(collectName(it, itemInFunc.Val))
 						switch key {
-						case "ef", "distance_threshold":
+						case "ef", "distance_threshold", "uids":
 						default:
 							return nil, itemInFunc.Errorf("Unknown option %q in similar_to", key)
 						}
@@ -1987,6 +2004,31 @@ L:
 							return nil, it.Errorf("Expected value for %s", key)
 						}
 						valItem := it.Item()
+						if key == "uids" {
+							if valItem.Typ != itemName || strings.ToLower(collectName(it, valItem.Val)) != uidFunc {
+								return nil, valItem.Errorf("Expected uid(varName) for uids option in similar_to")
+							}
+							if ok := trySkipItemTyp(it, itemLeftRound); !ok {
+								return nil, it.Errorf("Expected '(' after uid in similar_to uids option")
+							}
+							if !it.Next() {
+								return nil, it.Errorf("Expected variable name in uid(...) for similar_to")
+							}
+							varItem := it.Item()
+							if varItem.Typ != itemName {
+								return nil, varItem.Errorf("Expected variable name in uid(...) for similar_to")
+							}
+							varName := collectName(it, varItem.Val)
+							if ok := trySkipItemTyp(it, itemRightRound); !ok {
+								return nil, it.Errorf("Expected ')' after %s in similar_to uids option", varName)
+							}
+							function.NeedsVar = append(function.NeedsVar, VarContext{
+								Name: varName,
+								Typ:  UidVar,
+							})
+							expectArg = false
+							continue
+						}
 						switch valItem.Typ {
 						case itemDollar:
 							varName, err := parseVarName(it)

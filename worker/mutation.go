@@ -439,11 +439,25 @@ func checkSchema(s *pb.SchemaUpdate) error {
 		}
 
 	case t.IsScalar() == typ.IsScalar():
-		// If old type was list and new type is non-list, we don't allow it until user
-		// has data.
-		if schema.State().IsList(s.Predicate) && !s.List && hasEdges(s.Predicate, math.MaxUint64) {
+		// If old type was list and new type is non-list, we don't allow it while user
+		// has data, EXCEPT when migrating [string] -> stringvector in place.
+		isStringListToVector := schema.State().IsList(s.Predicate) && !s.List &&
+			t == types.StringID && typ == types.VStringID
+		if schema.State().IsList(s.Predicate) && !s.List && !isStringListToVector &&
+			hasEdges(s.Predicate, math.MaxUint64) {
 			return errors.Errorf("Schema change not allowed from [%s] => %s without"+
 				" deleting pred: %s", t.Name(), typ.Name(), x.ParseAttr(s.Predicate))
+		}
+		// Similarly, disallow migrating stringvector to a non-stringvector scalar or non-string list
+		// while data exists.
+		if t == types.VStringID && !(typ == types.VStringID && !s.List) &&
+			!(typ == types.StringID && s.List) && hasEdges(s.Predicate, math.MaxUint64) {
+			targetName := typ.Name()
+			if s.List {
+				targetName = "[" + targetName + "]"
+			}
+			return errors.Errorf("Schema change not allowed from %s => %s without"+
+				" deleting pred: %s", t.Name(), targetName, x.ParseAttr(s.Predicate))
 		}
 
 	default:
@@ -542,6 +556,19 @@ func ValidateAndConvert(edge *pb.DirectedEdge, su *pb.SchemaUpdate) error {
 			storageType == types.TypeID(pb.Posting_DEFAULT)) {
 			return errors.Errorf("Input for predicate %q of type vector is not vector."+
 				" Did you forget to add quotes before []?. Edge: %v", x.ParseAttr(edge.Attr), edge)
+		}
+
+	case schemaType == types.VStringID:
+		if storageType == types.VStringID {
+			if len(edge.Value) == 0 {
+				edge.Value = types.StringArrayAsBytes(nil)
+				return nil
+			}
+			return types.ValidateStringArrayBytes(edge.Value)
+		}
+		if !(storageType == types.StringID || storageType == types.DefaultID) {
+			return errors.Errorf("Input for predicate %q of type stringvector is not string or stringvector."+
+				" Edge: %v", x.ParseAttr(edge.Attr), edge)
 		}
 
 	// The suggested storage type matches the schema, OK! (Nothing to do ...)

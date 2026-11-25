@@ -28,6 +28,7 @@ const (
 	dgraphTypeArg      = "type"
 	dgraphPredArg      = "pred"
 	embeddingDirective = "embedding"
+	orderedDirective   = "ordered"
 
 	idDirective                  = "id"
 	idDirectiveInterfaceArg      = "interface"
@@ -321,6 +322,7 @@ input GenerateMutationParams {
 directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
 directive @search(by: [String!], strategy: LookupStrategy = DYNAMIC) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
+directive @ordered(count: Boolean) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(value: String, expr: String, evaluationOrder: Int, refOnly: Boolean, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
@@ -383,6 +385,7 @@ directive @generate(
 directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
 directive @search(by: [String!], strategy: LookupStrategy = DYNAMIC) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
+directive @ordered(count: Boolean) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(value: String, expr: String, evaluationOrder: Int, refOnly: Boolean, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION
@@ -677,6 +680,7 @@ var directiveValidators = map[string]directiveValidator{
 	inverseDirective:           hasInverseValidation,
 	searchDirective:            searchValidation,
 	embeddingDirective:         embeddingValidation,
+	orderedDirective:           orderedValidation,
 	dgraphDirective:            dgraphDirectiveValidation,
 	idDirective:                idValidation,
 	subscriptionDirective:      ValidatorNoOp,
@@ -713,6 +717,7 @@ var directiveValidators = map[string]directiveValidator{
 var directiveLocationMap = map[string]map[ast.DefinitionKind]bool{
 	inverseDirective:      nil,
 	searchDirective:       nil,
+	orderedDirective:      nil,
 	dgraphDirective:       {ast.Object: true, ast.Interface: true},
 	idDirective:           nil,
 	subscriptionDirective: {ast.Object: true, ast.Interface: true},

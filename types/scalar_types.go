@@ -58,6 +58,8 @@ const (
 	//       why it does not belong here.
 	// VFloatID represents a vector of IEEE754 64-bit floats.
 	VFloatID = TypeID(pb.Posting_VFLOAT)
+	// VStringID represents an ordered list (vector) of UTF-8 strings.
+	VStringID = TypeID(pb.Posting_VSTRING)
 	// UndefinedID represents the undefined type.
 	UndefinedID = TypeID(100)
 	// BigFloatID represents the arbitrary precision type.
@@ -77,6 +79,7 @@ var typeNameMap = map[string]TypeID{
 	"password":      PasswordID,
 	"bigfloat":      BigFloatID,
 	"float32vector": VFloatID,
+	"stringvector":  VStringID,
 }
 
 // TypeID represents the type of the data.
@@ -114,6 +117,8 @@ func (t TypeID) Name() string {
 		return "bigfloat"
 	case VFloatID:
 		return "float32vector"
+	case VStringID:
+		return "stringvector"
 	}
 	return ""
 }
@@ -205,6 +210,9 @@ func ValueForType(id TypeID) Val {
 	case VFloatID:
 		var v []float32
 		return Val{VFloatID, &v}
+	case VStringID:
+		var v []string
+		return Val{VStringID, &v}
 	default:
 		return Val{}
 	}

@@ -249,6 +249,17 @@ func (m *mapper) run(inputFormat chunker.InputFormat) {
 		nquads.Flush()
 	}()
 
+	var pendingBase *api.NQuad
+	var pendingElems []string
+	flushPending := func() {
+		if pendingBase == nil {
+			return
+		}
+		m.processVStringNQuad(dql.NQuad{NQuad: pendingBase}, pendingElems)
+		pendingBase = nil
+		pendingElems = nil
+	}
+
 	for nqs := range nquads.Ch() {
 		for _, nq := range nqs {
 			if err := facets.SortAndValidate(nq.Facets); err != nil {
@@ -261,6 +272,31 @@ func (m *mapper) run(inputFormat chunker.InputFormat) {
 				}
 			}
 
+			ns := nq.Namespace
+			if m.opt.Namespace != math.MaxUint64 {
+				ns = m.opt.Namespace
+			}
+			sch := m.schema.getSchema(x.NamespaceAttr(ns, nq.Predicate))
+			if sch.GetValueType() == pb.Posting_VSTRING && len(nq.Lang) == 0 && nq.GetObjectValue() != nil {
+				if sv, isStr := nq.ObjectValue.Val.(*api.Value_StrVal); isStr {
+					if pendingBase != nil &&
+						pendingBase.Subject == nq.Subject &&
+						pendingBase.Predicate == nq.Predicate &&
+						pendingBase.Namespace == ns {
+						pendingElems = append(pendingElems, sv.StrVal)
+					} else {
+						flushPending()
+						baseCopy := *nq
+						baseCopy.Namespace = ns
+						pendingBase = &baseCopy
+						pendingElems = []string{sv.StrVal}
+					}
+					atomic.AddInt64(&m.prog.nquadCount, 1)
+					continue
+				}
+			}
+
+			flushPending()
 			m.processNQuad(dql.NQuad{NQuad: nq})
 			atomic.AddInt64(&m.prog.nquadCount, 1)
 		}
@@ -274,6 +310,18 @@ func (m *mapper) run(inputFormat chunker.InputFormat) {
 				// Proactively allocate 32 slots to bootstrap the entries slice.
 				sh.cbuf = newMapperBuffer(m.opt)
 			}
+		}
+	}
+	flushPending()
+	for _, nq := range nquads.EmptyLists() {
+		ns := nq.Namespace
+		if m.opt.Namespace != math.MaxUint64 {
+			ns = m.opt.Namespace
+		}
+		if m.schema.getSchema(x.NamespaceAttr(ns, nq.Predicate)).GetValueType() == pb.Posting_VSTRING {
+			baseCopy := *nq
+			baseCopy.Namespace = ns
+			m.processVStringNQuad(dql.NQuad{NQuad: &baseCopy}, nil)
 		}
 	}
 
@@ -345,6 +393,29 @@ func (m *mapper) processNQuad(nq dql.NQuad) {
 		key = x.ReverseKey(de.Attr, oid)
 		m.addMapEntry(key, rev, shard)
 	}
+	m.addIndexMapEntries(nq, de)
+}
+
+func (m *mapper) processVStringNQuad(nq dql.NQuad, elems []string) {
+	sid := m.uid(nq.GetSubject(), nq.Namespace)
+	if sid == 0 {
+		panic(fmt.Sprintf("invalid UID with value 0 for %v", nq.GetSubject()))
+	}
+	de := &pb.DirectedEdge{
+		Entity:    sid,
+		Attr:      nq.Predicate,
+		Namespace: nq.Namespace,
+		Value:     types.StringArrayAsBytes(elems),
+		ValueType: pb.Posting_VSTRING,
+		Op:        pb.DirectedEdge_SET,
+		Facets:    nq.Facets,
+	}
+	m.schema.checkAndSetInitialSchema(nq.Namespace)
+	de.Attr = x.NamespaceAttr(de.Namespace, de.Attr)
+	fwd, _ := m.createPostings(nq, de)
+	shard := m.state.shards.shardFor(de.Attr)
+	key := x.DataKey(de.Attr, sid)
+	m.addMapEntry(key, fwd, shard)
 	m.addIndexMapEntries(nq, de)
 }
 

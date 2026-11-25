@@ -480,8 +480,9 @@ func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr 
 			span.AddEvent("Deleting predicate")
 			return posting.DeletePredicate(ctx, edge.Attr, proposal.StartTs)
 		}
-		// Don't derive schema when doing deletion.
-		if edge.Op == pb.DirectedEdge_DEL {
+		// Don't derive schema when doing deletion or empty-list placeholder before schema check.
+		if edge.Op == pb.DirectedEdge_DEL ||
+			(edge.ValueType == pb.Posting_VSTRING && len(edge.Value) == 0 && edge.ValueId == 0) {
 			continue
 		}
 		if _, ok := schemaMap[edge.Attr]; !ok {
@@ -516,17 +517,7 @@ func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr 
 
 	m := proposal.Mutations
 
-	// It is possible that the user gives us multiple versions of the same edge, one with no facets
-	// and another with facets. In that case, use stable sort to maintain the ordering given to us
-	// by the user.
-	sort.SliceStable(m.Edges, func(i, j int) bool {
-		ei := m.Edges[i]
-		ej := m.Edges[j]
-		if ei.GetAttr() != ej.GetAttr() {
-			return ei.GetAttr() < ej.GetAttr()
-		}
-		return ei.GetEntity() < ej.GetEntity()
-	})
+	m.Edges = prepareVStringEdges(schema.GetWriteContext(ctx), m.Edges)
 
 	txn := posting.Oracle().RegisterStartTs(m.StartTs)
 	if txn.ShouldAbort() {
@@ -612,6 +603,91 @@ func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr 
 		}
 	}
 	return errs
+}
+
+// prepareVStringEdges stably groups edges by (Attr, Entity) while preserving user input order,
+// then coalesces contiguous string edges for stringvector predicates and resolves empty-array
+// placeholder edges (materializing them for stringvector and dropping no-ops for other types).
+func prepareVStringEdges(wrtCtx context.Context, edges []*pb.DirectedEdge) []*pb.DirectedEdge {
+	if len(edges) == 0 {
+		return edges
+	}
+	sort.SliceStable(edges, func(i, j int) bool {
+		ei := edges[i]
+		ej := edges[j]
+		if ei.GetAttr() != ej.GetAttr() {
+			return ei.GetAttr() < ej.GetAttr()
+		}
+		return ei.GetEntity() < ej.GetEntity()
+	})
+	return coalesceVStringEdges(wrtCtx, edges)
+}
+
+// coalesceVStringEdges merges contiguous string edges for (Attr, Entity, Op) into a single
+// Posting_VSTRING edge in exact array order when the predicate schema type is stringvector,
+// and materializes or discards empty-array placeholder edges accordingly.
+func coalesceVStringEdges(wrtCtx context.Context, edges []*pb.DirectedEdge) []*pb.DirectedEdge {
+	if len(edges) == 0 {
+		return edges
+	}
+	out := make([]*pb.DirectedEdge, 0, len(edges))
+	for i := 0; i < len(edges); {
+		e := edges[i]
+		su, ok := schema.State().Get(wrtCtx, e.Attr)
+		isVString := ok && types.TypeID(su.ValueType) == types.VStringID
+		isEmptyListPlaceholder := e.Op == pb.DirectedEdge_SET &&
+			e.ValueType == pb.Posting_VSTRING && len(e.Value) == 0 && e.ValueId == 0
+
+		if !isVString {
+			if isEmptyListPlaceholder {
+				// Empty JSON array ([]) on unordered list or untyped predicate remains a no-op.
+				i++
+				continue
+			}
+			out = append(out, e)
+			i++
+			continue
+		}
+
+		if isEmptyListPlaceholder {
+			merged := *e
+			merged.Value = types.StringArrayAsBytes(nil)
+			out = append(out, &merged)
+			i++
+			continue
+		}
+
+		isStarDelete := func(edge *pb.DirectedEdge) bool {
+			return edge.Op == pb.DirectedEdge_DEL && bytes.Equal(edge.Value, []byte(x.Star))
+		}
+		if e.ValueId == 0 && e.ValueType == pb.Posting_STRING && len(e.Lang) == 0 && !isStarDelete(e) {
+			j := i + 1
+			for j < len(edges) &&
+				edges[j].Attr == e.Attr &&
+				edges[j].Entity == e.Entity &&
+				edges[j].Op == e.Op &&
+				edges[j].ValueId == 0 &&
+				edges[j].ValueType == pb.Posting_STRING &&
+				len(edges[j].Lang) == 0 &&
+				!isStarDelete(edges[j]) {
+				j++
+			}
+			elems := make([]string, 0, j-i)
+			for k := i; k < j; k++ {
+				elems = append(elems, string(edges[k].Value))
+			}
+			merged := *e
+			merged.ValueType = pb.Posting_VSTRING
+			merged.Value = types.StringArrayAsBytes(elems)
+			out = append(out, &merged)
+			i = j
+			continue
+		}
+
+		out = append(out, e)
+		i++
+	}
+	return out
 }
 
 func (n *node) applyCommitted(proposal *pb.Proposal, key uint64) error {

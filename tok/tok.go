@@ -108,6 +108,29 @@ func init() {
 // BuildTokens tokenizes a value, creating strings that can be used to create
 // index keys.
 func BuildTokens(val interface{}, t Tokenizer) ([]string, error) {
+	if strs, ok := val.([]string); ok {
+		if len(strs) == 0 {
+			return nil, nil
+		}
+		id := t.Identifier()
+		seen := make(map[string]struct{}, len(strs))
+		var out []string
+		for _, s := range strs {
+			tokens, err := t.Tokens(s)
+			if err != nil {
+				return nil, err
+			}
+			for _, tk := range tokens {
+				enc := encodeToken(tk, id)
+				if _, exists := seen[enc]; !exists {
+					seen[enc] = struct{}{}
+					out = append(out, enc)
+				}
+			}
+		}
+		return out, nil
+	}
+
 	tokens, err := t.Tokens(val)
 	if err != nil {
 		return nil, err

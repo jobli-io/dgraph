@@ -312,10 +312,11 @@ func tryParseAsGeo(b []byte, nq *api.NQuad) (bool, error) {
 // NQuadBuffer batches up batchSize NQuads per push to channel, accessible via Ch(). If batchSize is
 // negative, it only does one push to Ch() during Flush.
 type NQuadBuffer struct {
-	batchSize int
-	nquads    []*api.NQuad
-	nqCh      chan []*api.NQuad
-	predHints map[string]pb.Metadata_HintType
+	batchSize  int
+	nquads     []*api.NQuad
+	emptyLists []*api.NQuad
+	nqCh       chan []*api.NQuad
+	predHints  map[string]pb.Metadata_HintType
 }
 
 // NewNQuadBuffer returns a new NQuadBuffer instance with the specified batch size.
@@ -352,6 +353,14 @@ func (buf *NQuadBuffer) Metadata() *pb.Metadata {
 	return &pb.Metadata{
 		PredHints: buf.predHints,
 	}
+}
+
+// EmptyLists returns NQuad placeholders recorded when an empty JSON array ([])
+// was encountered during SetNquads parsing. These are only materialized by the
+// worker when the target predicate has type stringvector; for unordered list
+// predicates they remain no-ops.
+func (buf *NQuadBuffer) EmptyLists() []*api.NQuad {
+	return buf.emptyLists
 }
 
 // PushPredHint pushes and aggregates hints about the type of the predicate derived
@@ -567,6 +576,15 @@ func (buf *NQuadBuffer) mapToNquads(m map[string]interface{}, op int, parentPred
 			buf.PushPredHint(pred, pb.Metadata_SINGLE)
 		case []interface{}:
 			buf.PushPredHint(pred, pb.Metadata_LIST)
+			if len(v) == 0 && op == SetNquads {
+				buf.emptyLists = append(buf.emptyLists, &api.NQuad{
+					Subject:   mr.uid,
+					Predicate: nq.Predicate,
+					Namespace: namespace,
+					Lang:      nq.Lang,
+				})
+				continue
+			}
 
 			// NOTE: facetsMapSlice should be empty unless this is a scalar list
 			var facetsMapSlice []map[int]*api.Facet
@@ -793,13 +811,20 @@ func (buf *NQuadBuffer) ParseJSON(b []byte, op int) error {
 // ParseJSON is a convenience wrapper function to get all NQuads in one call. This can however, lead
 // to high memory usage. So be careful using this.
 func ParseJSON(b []byte, op int) ([]*api.NQuad, *pb.Metadata, error) {
+	nqs, _, md, err := ParseJSONWithEmptyLists(b, op)
+	return nqs, md, err
+}
+
+// ParseJSONWithEmptyLists parses JSON into NQuads and also returns empty-array
+// NQuad placeholders recorded during SetNquads parsing.
+func ParseJSONWithEmptyLists(b []byte, op int) ([]*api.NQuad, []*api.NQuad, *pb.Metadata, error) {
 	buf := NewNQuadBuffer(-1)
 	err := buf.FastParseJSON(b, op)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	buf.Flush()
 	nqs := <-buf.Ch()
 	metadata := buf.Metadata()
-	return nqs, metadata, nil
+	return nqs, buf.EmptyLists(), metadata, nil
 }

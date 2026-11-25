@@ -178,9 +178,40 @@ func convertValue(attr, data string) (types.Val, error) {
 		return types.Val{}, errors.Errorf("Attribute %s is not valid scalar type",
 			x.ParseAttr(attr))
 	}
+	if t == types.VStringID {
+		t = types.StringID
+	}
 	src := types.Val{Tid: types.StringID, Value: []byte(data)}
 	dst, err := types.Convert(src, t)
 	return dst, err
+}
+
+func unpackStringVals(val types.Val) ([]types.Val, error) {
+	if val.Tid == types.VStringID {
+		var elems []string
+		switch v := val.Value.(type) {
+		case []byte:
+			elems = types.BytesAsStringArray(v)
+		case []string:
+			elems = v
+		default:
+			sv, err := types.Convert(val, types.VStringID)
+			if err != nil {
+				return nil, err
+			}
+			elems = sv.Value.([]string)
+		}
+		out := make([]types.Val, len(elems))
+		for i, s := range elems {
+			out[i] = types.Val{Tid: types.StringID, Value: s}
+		}
+		return out, nil
+	}
+	strVal, err := types.Convert(val, types.StringID)
+	if err != nil {
+		return nil, err
+	}
+	return []types.Val{strVal}, nil
 }
 
 // Returns nil byte on error
@@ -376,16 +407,37 @@ func (qs *queryState) handleValuePostings(ctx context.Context, args funcArgs) er
 			return err
 		}
 		var nnUids []uint64
+		hasUidFilter := q.UidList != nil
+		if hasUidFilter && len(q.UidList.Uids) == 0 {
+			args.out.UidMatrix = append(args.out.UidMatrix, &pb.List{})
+			return nil
+		}
+
 		// Build optional search options if provided
-		filter := index.AcceptAll[float32]
-		opts := index.VectorIndexOptions[float32]{Filter: filter}
+		var filter index.SearchFilter[float32] = index.AcceptAll[float32]
+		var allowedUIDs []uint64
+		if hasUidFilter {
+			allowedUIDs = q.UidList.Uids
+			allowed := make(map[uint64]struct{}, len(allowedUIDs))
+			for _, uid := range allowedUIDs {
+				allowed[uid] = struct{}{}
+			}
+			filter = func(_, _ []float32, resultUID uint64) bool {
+				_, ok := allowed[resultUID]
+				return ok
+			}
+		}
+		opts := index.VectorIndexOptions[float32]{
+			Filter:      filter,
+			AllowedUIDs: allowedUIDs,
+		}
 		if srcFn.vsEfOverride > 0 {
 			opts.EfOverride = srcFn.vsEfOverride
 		}
 		if srcFn.vsDistanceThreshold != nil {
 			opts.DistanceThreshold = srcFn.vsDistanceThreshold
 		}
-		hasOptions := opts.EfOverride > 0 || opts.DistanceThreshold != nil
+		hasOptions := opts.EfOverride > 0 || opts.DistanceThreshold != nil || hasUidFilter
 		if o, ok := indexer.(index.OptionalSearchOptions[float32]); ok && hasOptions {
 			if srcFn.vectorInfo != nil {
 				nnUids, err = o.SearchWithOptions(ctx, qc, srcFn.vectorInfo, int(numNeighbors), opts)
@@ -551,21 +603,35 @@ func (qs *queryState) handleValuePostings(ctx context.Context, args funcArgs) er
 					if val, err = types.Convert(val, srcFn.atype); err != nil {
 						return err
 					}
-					switch srcFn.fname {
-					case "eq":
-						for _, eqToken := range srcFn.eqTokens {
-							if types.CompareVals(srcFn.fname, val, eqToken) {
-								uidList.Uids = append(uidList.Uids, q.UidList.Uids[i])
-								break
+					compareVals := []types.Val{val}
+					if srcFn.atype == types.VStringID {
+						compareVals, err = unpackStringVals(val)
+						if err != nil {
+							return err
+						}
+					}
+					matched := false
+					for _, cv := range compareVals {
+						switch srcFn.fname {
+						case "eq":
+							for _, eqToken := range srcFn.eqTokens {
+								if types.CompareVals(srcFn.fname, cv, eqToken) {
+									matched = true
+									break
+								}
+							}
+						case "between":
+							if types.CompareBetween(cv, srcFn.eqTokens[0], srcFn.eqTokens[1]) {
+								matched = true
+							}
+						default:
+							if types.CompareVals(srcFn.fname, cv, srcFn.eqTokens[0]) {
+								matched = true
 							}
 						}
-					case "between":
-						if types.CompareBetween(val, srcFn.eqTokens[0], srcFn.eqTokens[1]) {
+						if matched {
 							uidList.Uids = append(uidList.Uids, q.UidList.Uids[i])
-						}
-					default:
-						if types.CompareVals(srcFn.fname, val, srcFn.eqTokens[0]) {
-							uidList.Uids = append(uidList.Uids, q.UidList.Uids[i])
+							break
 						}
 					}
 
@@ -694,7 +760,11 @@ func countForValuePostings(args funcArgs, pl *posting.List, facetsTree *facetsTr
 	listType bool) (int, error) {
 	var filteredCount int
 	err := facetsFilterValuePostingList(args, pl, facetsTree, listType, func(p *pb.Posting) {
-		filteredCount++
+		if p.ValType == pb.Posting_VSTRING {
+			filteredCount += types.CountVString(p.Value)
+		} else {
+			filteredCount++
+		}
 	})
 	if err != nil {
 		return 0, err
@@ -917,12 +987,31 @@ func (qs *queryState) handleUidPostings(
 				if i == 0 {
 					span.AddEvent("CompareScalarFn")
 				}
-				len := pl.Length(args.q.ReadTs, 0)
-				if len == -1 {
-					return errors.Wrapf(posting.ErrTsTooOld, "While reading posting list length")
+				var count int64
+				if !q.Reverse && srcFn.atype == types.VStringID {
+					val, err := pl.Value(args.q.ReadTs)
+					if err != nil && !errors.Is(err, posting.ErrNoValue) {
+						return err
+					}
+					if err == nil {
+						if vBytes, ok := val.Value.([]byte); ok {
+							count = int64(types.CountVString(vBytes))
+						}
+					}
+				} else {
+					plen := pl.Length(args.q.ReadTs, 0)
+					if plen == -1 {
+						return errors.Wrapf(posting.ErrTsTooOld, "While reading posting list length")
+					}
+					count = int64(plen)
 				}
-				count := int64(len)
-				if evalCompare(srcFn.fname, count, srcFn.threshold[0]) {
+				var matched bool
+				if srcFn.fname == between {
+					matched = count >= srcFn.threshold[0] && count <= srcFn.threshold[1]
+				} else {
+					matched = evalCompare(srcFn.fname, count, srcFn.threshold[0])
+				}
+				if matched {
 					tlist := &pb.List{Uids: []uint64{q.UidList.Uids[i]}}
 					out.UidMatrix = append(out.UidMatrix, tlist)
 				}
@@ -1291,7 +1380,7 @@ func (qs *queryState) handleRegexFunction(ctx context.Context, arg funcArgs) err
 	if err != nil || !typ.IsScalar() {
 		return errors.Errorf("Attribute not scalar: %s %v", x.ParseAttr(attr), typ)
 	}
-	if typ != types.StringID {
+	if typ != types.StringID && typ != types.VStringID {
 		return errors.Errorf("Got non-string type. Regex match is allowed only on string type.")
 	}
 	useIndex := schema.State().HasTokenizer(ctx, tok.IdentTrigram, attr)
@@ -1373,12 +1462,21 @@ func (qs *queryState) handleRegexFunction(ctx context.Context, arg funcArgs) err
 			return err
 		}
 
+		matched := false
 		for _, val := range vals {
-			// convert data from binary to appropriate format
-			strVal, err := types.Convert(val, types.StringID)
-			if err == nil && matchRegex(strVal, arg.srcFn.regex) {
-				filtered.Uids = append(filtered.Uids, uid)
-				// NOTE: We only add the uid once.
+			strVals, err := unpackStringVals(val)
+			if err != nil {
+				continue
+			}
+			for _, strVal := range strVals {
+				if matchRegex(strVal, arg.srcFn.regex) {
+					filtered.Uids = append(filtered.Uids, uid)
+					// NOTE: We only add the uid once.
+					matched = true
+					break
+				}
+			}
+			if matched {
 				break
 			}
 		}
@@ -1471,6 +1569,18 @@ func (qs *queryState) handleCompareFunction(ctx context.Context, arg funcArgs) e
 				if err != nil {
 					if err != posting.ErrNoValue {
 						filterErr = err
+					}
+					return false
+				}
+				if typ == types.VStringID {
+					strVals, err := unpackStringVals(sv)
+					if err != nil {
+						return false
+					}
+					for _, elem := range strVals {
+						if compareFunc(elem) {
+							return true
+						}
 					}
 					return false
 				}
@@ -1578,7 +1688,7 @@ func (qs *queryState) handleMatchFunction(ctx context.Context, arg funcArgs) err
 	case !typ.IsScalar():
 		return errors.Errorf("Attribute not scalar: %s %v", attr, typ)
 
-	case typ != types.StringID:
+	case typ != types.StringID && typ != types.VStringID:
 		return errors.Errorf("Got non-string type. Fuzzy match is allowed only on string type.")
 
 	case arg.q.UidList != nil && len(arg.q.UidList.Uids) != 0:
@@ -1638,12 +1748,21 @@ func (qs *queryState) handleMatchFunction(ctx context.Context, arg funcArgs) err
 		}
 
 		max := int(arg.srcFn.threshold[0])
+		matched := false
 		for _, val := range vals {
-			// convert data from binary to appropriate format
-			strVal, err := types.Convert(val, types.StringID)
-			if err == nil && matchFuzzy(matchQuery, strVal.Value.(string), max) {
-				filtered.Uids = append(filtered.Uids, uid)
-				// NOTE: We only add the uid once.
+			strVals, err := unpackStringVals(val)
+			if err != nil {
+				continue
+			}
+			for _, strVal := range strVals {
+				if matchFuzzy(matchQuery, strVal.Value.(string), max) {
+					filtered.Uids = append(filtered.Uids, uid)
+					// NOTE: We only add the uid once.
+					matched = true
+					break
+				}
+			}
+			if matched {
 				break
 			}
 		}
@@ -1759,12 +1878,11 @@ func (qs *queryState) filterStringFunction(arg funcArgs) error {
 
 		var strVals []types.Val
 		for _, v := range vals {
-			// convert data from binary to appropriate format
-			strVal, err := types.Convert(v, types.StringID)
+			unpacked, err := unpackStringVals(v)
 			if err != nil {
 				continue
 			}
-			strVals = append(strVals, strVal)
+			strVals = append(strVals, unpacked...)
 		}
 		if len(strVals) > 0 {
 			values = append(values, strVals)
@@ -1963,7 +2081,7 @@ func parseSrcFn(ctx context.Context, q *pb.Query) (*functionContext, error) {
 	var err error
 
 	t, err := schema.State().TypeOf(attr)
-	if err == nil && fnType != notAFunction && t.Name() == types.StringID.Name() {
+	if err == nil && fnType != notAFunction && (t == types.StringID || t == types.VStringID) {
 		fc.isStringFn = true
 	}
 

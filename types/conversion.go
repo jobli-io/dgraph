@@ -92,6 +92,39 @@ func cannotConvertToVFloat(s string) error {
 	return errors.Errorf("cannot convert %s to vfloat", s)
 }
 
+// ParseVString parses a JSON-formatted array of strings (e.g. `["b", "a", "b"]` or `[]`)
+// into a []string. Non-string array elements (numbers, booleans, nulls, objects) are rejected.
+func ParseVString(s string) ([]string, error) {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return []string{}, nil
+	}
+	if s[0] != '[' || s[len(s)-1] != ']' {
+		return nil, cannotConvertToVString(s)
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal([]byte(s), &raw); err != nil {
+		return nil, cannotConvertToVString(s)
+	}
+	result := make([]string, len(raw))
+	for i, elem := range raw {
+		trimmed := bytes.TrimSpace(elem)
+		if len(trimmed) < 2 || trimmed[0] != '"' {
+			return nil, cannotConvertToVString(s)
+		}
+		var str string
+		if err := json.Unmarshal(trimmed, &str); err != nil {
+			return nil, cannotConvertToVString(s)
+		}
+		result[i] = str
+	}
+	return result, nil
+}
+
+func cannotConvertToVString(s string) error {
+	return errors.Errorf("cannot convert %s to vstring", s)
+}
+
 // Convert converts the value to given scalar type.
 func Convert(from Val, toID TypeID) (Val, error) {
 	to := Val{Tid: toID}
@@ -162,6 +195,11 @@ func Convert(from Val, toID TypeID) (Val, error) {
 					return to, errors.Errorf("invalid data for vector of floats: %v", data)
 				}
 				*res = BytesAsFloatArray(data)
+			case VStringID:
+				if err := ValidateStringArrayBytes(data); err != nil {
+					return to, err
+				}
+				*res = BytesAsStringArray(data)
 			default:
 				return to, cantConvert(fromID, toID)
 			}
@@ -228,6 +266,16 @@ func Convert(from Val, toID TypeID) (Val, error) {
 					return to, err
 				}
 				*res = vf
+			case VStringID:
+				if fromID == DefaultID {
+					vs, err := ParseVString(vc)
+					if err != nil {
+						return to, err
+					}
+					*res = vs
+				} else {
+					*res = []string{vc}
+				}
 			default:
 				return to, cantConvert(fromID, toID)
 			}
@@ -476,6 +524,25 @@ func Convert(from Val, toID TypeID) (Val, error) {
 				return to, cantConvert(fromID, toID)
 			}
 		}
+	case VStringID:
+		{
+			switch toID {
+			case BinaryID:
+				*res = data
+			case VStringID:
+				if err := ValidateStringArrayBytes(data); err != nil {
+					return to, err
+				}
+				*res = BytesAsStringArray(data)
+			case StringID, DefaultID:
+				if err := ValidateStringArrayBytes(data); err != nil {
+					return to, err
+				}
+				*res = StringArrayAsString(BytesAsStringArray(data))
+			default:
+				return to, cantConvert(fromID, toID)
+			}
+		}
 	default:
 		return to, cantConvert(fromID, toID)
 	}
@@ -631,6 +698,16 @@ func Marshal(from Val, to *Val) error {
 		default:
 			return cantConvert(fromID, toID)
 		}
+	case VStringID:
+		vc := val.([]string)
+		switch toID {
+		case BinaryID:
+			*res = StringArrayAsBytes(vc)
+		case StringID, DefaultID:
+			*res = StringArrayAsString(vc)
+		default:
+			return cantConvert(fromID, toID)
+		}
 	default:
 		return cantConvert(fromID, toID)
 	}
@@ -711,6 +788,12 @@ func ObjectValue(id TypeID, value interface{}) (*api.Value, error) {
 			return def, err
 		}
 		return &api.Value{Val: &api.Value_Vfloat32Val{Vfloat32Val: vf}}, nil
+	case VStringID:
+		vs, ok := value.([]string)
+		if !ok {
+			return def, errors.Errorf("Expected value of type []string. Got type: %T", value)
+		}
+		return &api.Value{Val: &api.Value_DefaultVal{DefaultVal: StringArrayAsString(vs)}}, nil
 	default:
 		return def, errors.Errorf("ObjectValue not available for: %v", id)
 	}
@@ -748,6 +831,10 @@ func (v Val) MarshalJSON() ([]byte, error) {
 		return json.Marshal(v.Safe().(string))
 	case PasswordID:
 		return json.Marshal(v.Value.(string))
+	case VFloatID:
+		return json.Marshal(v.Value.([]float32))
+	case VStringID:
+		return json.Marshal(v.Value.([]string))
 	}
 	return nil, errors.Errorf("invalid type for MarshalJSON: %v", v.Tid)
 }

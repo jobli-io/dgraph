@@ -156,6 +156,20 @@ func ExtractBlankUIDs(ctx context.Context, gmuList []*dql.Mutation) (map[string]
 	newUids := make(map[string]uint64)
 	var err error
 	for _, gmu := range gmuList {
+		for _, nq := range gmu.EmptyLists {
+			if len(nq.Subject) == 0 {
+				return nil, errors.Errorf("subject must not be empty for nquad: %+v", nq)
+			}
+			var uid uint64
+			if strings.HasPrefix(nq.Subject, "_:") {
+				newUids[nq.Subject] = 0
+			} else if uid, err = dql.ParseUid(nq.Subject); err != nil {
+				return newUids, err
+			}
+			if err = verifyUid(ctx, uid); err != nil {
+				return newUids, err
+			}
+		}
 		for _, nq := range gmu.Set {
 			// We dont want to assign uids to these.
 			if nq.Subject == x.Star && nq.ObjectValue.GetDefaultVal() == x.Star {
@@ -265,6 +279,17 @@ func ToDirectedEdges(gmuList []*dql.Mutation, newUids map[string]uint64) (
 			if err := parse(nq, pb.DirectedEdge_SET); err != nil {
 				return edges, err
 			}
+		}
+		for _, nq := range gmu.EmptyLists {
+			if len(nq.Subject) == 0 {
+				continue
+			}
+			wnq = &dql.NQuad{NQuad: nq}
+			edge, err := wnq.ToEmptyListEdgeUsing(newUids)
+			if err != nil {
+				return edges, errors.Wrap(err, "")
+			}
+			edges = append(edges, edge)
 		}
 	}
 

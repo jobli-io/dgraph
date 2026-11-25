@@ -359,6 +359,7 @@ message Posting {
     OBJECT = 10;
     BIGFLOAT = 11;
     VFLOAT = 12; // Float64 Vector
+    VSTRING = 13; // Ordered String Vector
   }
   ValType val_type = 3;
   enum PostingType {

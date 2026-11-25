@@ -70,3 +70,37 @@ func TestFloatArrayTranslation(t *testing.T) {
 		}
 	}
 }
+
+func TestStringArrayTranslation(t *testing.T) {
+	require.Equal(t, "VSTRING", VStringID.Enum().String())
+	require.Equal(t, "stringvector", VStringID.Name())
+	tid, ok := TypeForName("stringvector")
+	require.True(t, ok)
+	require.Equal(t, VStringID, tid)
+
+	testCases := [][]string{
+		{},
+		{""},
+		{"", "", ""},
+		{"hello"},
+		{"b", "a", "b"},
+		{"quotes \"and\" \\slashes\\", "line1\nline2\ttab", "null\x00byte", "unicode 🚀 <tag> & more"},
+	}
+	for _, tc := range testCases {
+		asBytes := StringArrayAsBytes(tc)
+		require.NoError(t, ValidateStringArrayBytes(asBytes))
+		require.Equal(t, len(tc), CountVString(asBytes))
+		decoded := BytesAsStringArray(asBytes)
+		require.Equal(t, tc, decoded)
+
+		asStr := StringArrayAsString(tc)
+		parsed, err := ParseVString(asStr)
+		require.NoError(t, err)
+		require.Equal(t, tc, parsed)
+	}
+
+	// Corrupt byte slices should be rejected by ValidateStringArrayBytes.
+	require.Error(t, ValidateStringArrayBytes([]byte{1, 2}))
+	require.Error(t, ValidateStringArrayBytes([]byte{2, 0, 0, 0, 0, 0, 0, 0})) // missing second offset
+	require.Error(t, ValidateStringArrayBytes([]byte{1, 0, 0, 0, 5, 0, 0, 0, 'a'}))
+}

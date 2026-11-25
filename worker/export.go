@@ -82,6 +82,7 @@ var rdfTypeMap = map[types.TypeID]string{
 	types.PasswordID: "xs:password",
 	types.BigFloatID: "xs:decimal",
 	types.VFloatID:   "xs:[]float32",
+	types.VStringID:  "xs:[]string",
 }
 
 // UIDs like 0x1 look weird but 64-bit ones like 0x0000000000000001 are too long.
@@ -192,7 +193,7 @@ func (e *exporter) toJSON() (*bpb.KVList, error) {
 				return nil
 			}
 
-			if !val.Tid.IsNumber() {
+			if !val.Tid.IsNumber() && val.Tid != types.VStringID {
 				str = escapedString(str)
 			}
 

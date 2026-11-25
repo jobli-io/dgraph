@@ -168,6 +168,10 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 			if err := checkTablet(edge.Attr); err != nil {
 				return err
 			}
+		}
+		proposal.Mutations.Edges = prepareVStringEdges(ctx, proposal.Mutations.Edges)
+
+		for _, edge := range proposal.Mutations.Edges {
 			su, ok := schema.State().Get(ctx, edge.Attr)
 			if !ok {
 				// We don't allow mutations for reserved predicates if the schema for them doesn't
@@ -194,6 +198,13 @@ func (n *node) proposeAndWait(ctx context.Context, proposal *pb.Proposal) (perr 
 				return err
 			}
 			noTimeout = true
+		}
+
+		if len(proposal.Mutations.Edges) == 0 &&
+			len(proposal.Mutations.Schema) == 0 &&
+			len(proposal.Mutations.Types) == 0 &&
+			proposal.Mutations.DropOp == 0 {
+			return nil
 		}
 	}
 

@@ -62,8 +62,14 @@ func parseDirective(it *lex.ItemIterator, schema *pb.SchemaUpdate, t types.TypeI
 	case "count":
 		schema.Count = true
 	case "upsert":
+		if t == types.VStringID || t == types.VFloatID {
+			return next.Errorf("@upsert directive is not supported for %s type", t.Name())
+		}
 		schema.Upsert = true
 	case "unique":
+		if t == types.VStringID || t == types.VFloatID {
+			return next.Errorf("@unique directive is not supported for %s type", t.Name())
+		}
 		schema.Unique = true
 	case "noconflict":
 		schema.NoConflict = true
@@ -121,7 +127,8 @@ func parseScalarPair(it *lex.ItemIterator, predicate string, ns uint64) (*pb.Sch
 		return nil, next.Errorf("Undefined Type")
 	}
 	if schema.List {
-		if uint32(t) == uint32(types.PasswordID) || uint32(t) == uint32(types.BoolID) {
+		if uint32(t) == uint32(types.PasswordID) || uint32(t) == uint32(types.BoolID) ||
+			t == types.VStringID || t == types.VFloatID {
 			return nil, next.Errorf("Unsupported type for list: [%s].", t.Name())
 		}
 	}
@@ -310,7 +317,7 @@ func parseTokenOrVectorIndexSpec(
 	}
 	tokenizerType, ok := types.TypeForName(tokenizer.Type())
 	x.AssertTrue(ok) // Type is validated during tokenizer loading.
-	if tokenizerType != typ {
+	if tokenizerType != typ && !(typ == types.VStringID && tokenizerType == types.StringID) {
 		return tokenOrFactoryName, nil, false,
 			next.Errorf("Tokenizer: %s isn't valid for predicate: %s of type: %s",
 				tokenizer.Name(), x.ParseAttr(predicate), typ.Name())
@@ -445,7 +452,7 @@ func resolveTokenizers(updates []*pb.SchemaUpdate) error {
 			}
 			tokenizerType, ok := types.TypeForName(tokenizer.Type())
 			x.AssertTrue(ok) // Type is validated during tokenizer loading.
-			if tokenizerType != typ {
+			if tokenizerType != typ && !(typ == types.VStringID && tokenizerType == types.StringID) {
 				return errors.Errorf("Tokenizer: %s isn't valid for predicate: %s of type: %s",
 					tokenizer.Name(), x.ParseAttr(schema.Predicate), typ.Name())
 			}

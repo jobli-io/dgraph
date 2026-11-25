@@ -792,21 +792,6 @@ func (r *reducer) toList(req *encodeRequest, vi *vectorIndexer) {
 		x.Check(err)
 		x.AssertTrue(len(pk.Attr) > 0)
 
-		// We might not need to track count index every time.
-		if pk.IsData() || pk.IsReverse() {
-			doCount, ok := trackCountIndex[pk.Attr]
-			if !ok {
-				doCount = r.schema.getSchema(pk.Attr).GetCount()
-				trackCountIndex[pk.Attr] = doCount
-			}
-			if doCount {
-				// Calculate count entries.
-				ck := x.CountKey(pk.Attr, uint32(num), pk.IsReverse())
-				dst := req.countBuf.SliceAllocate(countEntrySize(ck))
-				marshalCountEntry(dst, ck, pk.Uid)
-			}
-		}
-
 		alloc.Reset()
 		enc := codec.Encoder{BlockSize: 256, Alloc: alloc}
 		var lastUid uint64
@@ -852,6 +837,32 @@ func (r *reducer) toList(req *encodeRequest, vi *vectorIndexer) {
 							}
 						}
 					}
+				}
+			}
+		}
+
+		// We might not need to track count index every time.
+		if pk.IsData() || pk.IsReverse() {
+			doCount, ok := trackCountIndex[pk.Attr]
+			if !ok {
+				doCount = r.schema.getSchema(pk.Attr).GetCount()
+				trackCountIndex[pk.Attr] = doCount
+			}
+			if doCount {
+				countVal := num
+				if pk.IsData() && r.schema.getSchema(pk.Attr).GetValueType() == pb.Posting_VSTRING {
+					countVal = 0
+					for _, p := range pl.Postings {
+						if p.ValType == pb.Posting_VSTRING {
+							countVal += types.CountVString(p.Value)
+						}
+					}
+				}
+				if countVal > 0 {
+					// Calculate count entries.
+					ck := x.CountKey(pk.Attr, uint32(countVal), pk.IsReverse())
+					dst := req.countBuf.SliceAllocate(countEntrySize(ck))
+					marshalCountEntry(dst, ck, pk.Uid)
 				}
 			}
 		}

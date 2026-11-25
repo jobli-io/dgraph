@@ -72,6 +72,23 @@ func TestFullTextTokenizer(t *testing.T) {
 	require.Equal(t, []string{encodeToken("stem", id), encodeToken("work", id)}, tokens)
 }
 
+func TestBuildTokensStringSlice(t *testing.T) {
+	termTok, has := GetTokenizer("term")
+	require.True(t, has)
+	tokens, err := BuildTokens([]string{"foo bar", "foo baz", "foo bar"}, termTok)
+	require.NoError(t, err)
+	id := termTok.Identifier()
+	require.Equal(t, []string{
+		encodeToken("bar", id),
+		encodeToken("foo", id),
+		encodeToken("baz", id),
+	}, tokens)
+
+	emptyTokens, err := BuildTokens([]string{}, termTok)
+	require.NoError(t, err)
+	require.Empty(t, emptyTokens)
+}
+
 func TestHourTokenizer(t *testing.T) {
 	var err error
 	tokenizer, has := GetTokenizer("hour")

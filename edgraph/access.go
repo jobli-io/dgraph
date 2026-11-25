@@ -802,6 +802,14 @@ func authorizeMutation(ctx context.Context, gmu *dql.Mutation) error {
 	// Del predicates weren't included before.
 	// A bug probably since f115de2eb6a40d882a86c64da68bf5c2a33ef69a
 	preds = append(preds, parsePredsFromMutation(gmu.Del)...)
+	if len(gmu.EmptyLists) > 0 {
+		ns, _ := x.ExtractNamespace(ctx)
+		for _, p := range parsePredsFromMutation(gmu.EmptyLists) {
+			if typ, err := schema.State().TypeOf(x.NamespaceAttr(ns, p)); err == nil && typ.Enum() == pb.Posting_VSTRING {
+				preds = append(preds, p)
+			}
+		}
+	}
 
 	var userId string
 	var groupIds []string

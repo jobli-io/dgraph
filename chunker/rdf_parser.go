@@ -160,6 +160,8 @@ L:
 			// if this is a password value dont re-encrypt. issue#2765
 			if t == types.PasswordID {
 				src.Tid = t
+			} else if t == types.VStringID {
+				src.Tid = types.DefaultID
 			}
 			p, err := types.Convert(src, t)
 			if err != nil {
@@ -363,6 +365,7 @@ var typeMap = map[string]types.TypeID{
 	"xs:decimal":         types.BigFloatID,
 	"geo:geojson":        types.GeoID,
 	"xs:[]float32":       types.VFloatID,
+	"xs:[]string":        types.VStringID,
 	"http://www.w3.org/2001/XMLSchema#string":          types.StringID,
 	"http://www.w3.org/2001/XMLSchema#dateTime":        types.DateTimeID,
 	"http://www.w3.org/2001/XMLSchema#date":            types.DateTimeID,

@@ -31,6 +31,8 @@ func bs(v interface{}) []byte {
 		return bs[:]
 	case []float32:
 		return FloatArrayAsBytes(x)
+	case []string:
+		return StringArrayAsBytes(x)
 	case time.Time:
 		bs, err := x.MarshalBinary()
 		if err == nil {
@@ -261,6 +263,8 @@ func TestConvertFromBinary(t *testing.T) {
 			out: Val{DateTimeID, time.Date(2016, 1, 1, 0, 0, 0, 0, time.UTC)}},
 		{in: bs(time.Time{}), out: Val{DateTimeID, time.Time{}}},
 		{in: bs([]float32{1.0, 2.0}), out: Val{VFloatID, []float32{1.0, 2.0}}},
+		{in: bs([]string{"b", "a", "b"}), out: Val{VStringID, []string{"b", "a", "b"}}},
+		{in: bs([]string{}), out: Val{VStringID, []string{}}},
 	}
 
 	for _, tc := range tests {
@@ -268,6 +272,33 @@ func TestConvertFromBinary(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, tc.out, out)
 	}
+}
+
+func TestConvertVString(t *testing.T) {
+	// DefaultID -> VStringID parses JSON string array.
+	out, err := Convert(Val{Tid: DefaultID, Value: []byte(`["z", "a", "z"]`)}, VStringID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"z", "a", "z"}, out.Value)
+
+	// Non-string elements in ParseVString are rejected.
+	_, err = ParseVString(`[1, 2]`)
+	require.Error(t, err)
+	_, err = ParseVString(`["a", null]`)
+	require.Error(t, err)
+	_, err = ParseVString(`not-an-array`)
+	require.Error(t, err)
+
+	// StringID -> VStringID wraps literal string as 1-element slice (even if JSON-shaped).
+	out, err = Convert(Val{Tid: StringID, Value: []byte(`["x"]`)}, VStringID)
+	require.NoError(t, err)
+	require.Equal(t, []string{`["x"]`}, out.Value)
+
+	// VStringID -> BinaryID and VStringID -> StringID round-trip.
+	binVal := ValueForType(BinaryID)
+	require.NoError(t, Marshal(Val{Tid: VStringID, Value: []string{"first", "second", "first"}}, &binVal))
+	strOut, err := Convert(Val{Tid: VStringID, Value: binVal.Value.([]byte)}, StringID)
+	require.NoError(t, err)
+	require.Equal(t, `["first","second","first"]`, strOut.Value)
 }
 
 func TestConvertStringToDateTime(t *testing.T) {

@@ -3036,6 +3036,43 @@ func rewriteObject(
 			valBytes, _ = json.Marshal(val)
 			val = string(valBytes)
 		}
+
+		if fieldDef.HasOrderedDirective() {
+			slice, isSlice := val.([]interface{})
+			// Note: gqlparser coerces an inline GraphQL `null` literal on a list input field
+			// into []interface{}{nil}, whereas JSON variables pass untyped nil. Meanwhile, an
+			// inline empty list `[]` arrives as ([]interface{})(nil) (len 0).
+			isNull := val == nil || (isSlice && len(slice) == 1 && slice[0] == nil)
+			if mutationType == UpdateWithRemove {
+				if !isNull {
+					retErrors = append(retErrors, x.GqlErrorf(
+						"cannot remove specific elements from @ordered field %s.%s; "+
+							"use remove: {%s: null} to clear or set: {%s: [...]} to replace",
+						typ.Name(), field, field, field))
+					continue
+				}
+				newObj[fieldName] = nil
+				continue
+			}
+			if isNull {
+				continue
+			}
+			if isSlice {
+				hasNullElem := false
+				for _, elem := range slice {
+					if elem == nil {
+						retErrors = append(retErrors, x.GqlErrorf(
+							"cannot store null element in @ordered field %s.%s",
+							typ.Name(), field))
+						hasNullElem = true
+						break
+					}
+				}
+				if hasNullElem {
+					continue
+				}
+			}
+		}
 		// TODO: Write a function for aggregating data of fragment from child nodes.
 		switch val := val.(type) {
 		case map[string]interface{}:

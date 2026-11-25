@@ -518,6 +518,13 @@ func processSort(ctx context.Context, ts *pb.SortMessage) (*pb.SortResult, error
 		return nil, errors.Errorf("Sorting not supported on attr: %s of type: [scalar]",
 			x.ParseAttr(ts.Order[0].Attr))
 	}
+	for _, order := range ts.Order {
+		if typ, err := schema.State().TypeOf(order.Attr); err == nil &&
+			(typ == types.VStringID || typ == types.VFloatID) {
+			return nil, errors.Errorf("Sorting not supported on attr: %s of type: %s",
+				x.ParseAttr(order.Attr), typ.Name())
+		}
+	}
 
 	// We're not using any txn local cache here. So, no need to deal with that yet.
 	cctx, cancel := context.WithCancel(ctx)

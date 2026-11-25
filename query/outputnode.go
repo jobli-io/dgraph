@@ -483,6 +483,25 @@ func (enc *encoder) AddListValue(fj fastJsonNode, attr uint16, v types.Val, list
 		}
 		return nil
 	}
+	if v.Tid == types.VStringID {
+		elems := v.Value.([]string)
+		if len(elems) == 0 {
+			sn, err := enc.makeScalarNode(attr, []byte("[]"), false)
+			if err != nil {
+				return err
+			}
+			enc.addChildren(fj, sn)
+			return nil
+		}
+		for _, s := range elems {
+			sn, err := enc.makeScalarNode(attr, stringJsonMarshal(s), true)
+			if err != nil {
+				return err
+			}
+			enc.addChildren(fj, sn)
+		}
+		return nil
+	}
 	bs, err := valToBytes(v)
 	if err != nil {
 		return nil // Ignore this.
@@ -690,6 +709,8 @@ func valToBytes(v types.Val) ([]byte, error) {
 		return []byte(fmt.Sprintf("%q", v.Value.(string))), nil
 	case types.VFloatID:
 		return json.Marshal(v.Value.([]float32))
+	case types.VStringID:
+		return json.Marshal(v.Value.([]string))
 	default:
 		return nil, errors.New("Unsupported types.Val.Tid")
 	}

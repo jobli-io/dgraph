@@ -8,22 +8,23 @@ are in addition to Dgraph's built-in directives (`@auth`, `@search`, `@id`, `@dg
 
 ## Quick Reference
 
-| Directive                                          | Placement                                 | Purpose                                                                                                        | Doc                                                                  |
-| -------------------------------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| [`@cascadeAuth`](#cascadeauth)                     | `FIELD_DEFINITION`                        | Propagate auth from authority type to child                                                                    | [cascade_auth.md](cascade_auth.md)                                   |
-| [`@cascadeAuthPolicy`](#cascadeauthpolicy)         | `OBJECT \| INTERFACE`                     | Control cascade auth aggregation and opt-outs                                                                  | [cascade_auth.md](cascade_auth.md)                                   |
-| [`@authVariables`](#authvariables)                 | `OBJECT \| INTERFACE`                     | Declare `<<KEY>>` template substitution values for `@auth` rules                                               | [cascade_auth.md](cascade_auth.md)                                   |
-| [`@cascadeDelete`](#cascadedelete)                 | `FIELD_DEFINITION`                        | Auto-delete linked nodes when parent is deleted                                                                | [cascade_delete.md](cascade_delete.md)                               |
-| [`@postValidate`](#postvalidate)                   | `OBJECT \| INTERFACE`                     | Run expr-lang expression after mutation commits                                                                | [post_validate.md](post_validate.md)                                 |
-| [`@validate`](#validate)                           | `FIELD_DEFINITION \| OBJECT \| INTERFACE` | Field-level and type-level validation before mutation commits                                                  | [validate.md](validate.md)                                           |
-| [`@default`](#default)                             | `FIELD_DEFINITION`                        | Set default field value on add/update                                                                          | [default_transform.md](default_transform.md)                         |
-| [`@transform`](#transform)                         | `FIELD_DEFINITION`                        | Transform a field value via expr-lang on add/update; include `uid: #.uid` when forwarding `before.*` edge refs | [default_transform.md](default_transform.md)                         |
-| [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`                        | Fetch pre-mutation field values for expr-lang expressions                                                      | [old_value.md](old_value.md)                                         |
-| [`@dryRun`](#dryrun)                               | `MUTATION`                                | Test prospective mutations and post-validation rules without committing to Badger/Raft                         | [#dryrun](#dryrun)                                                   |
-| [`@bypassAuth`](#bypassauth)                       | `FIELD_DEFINITION`                        | Conditionally or selectively bypass auth checks on a child edge                                                | [bypass_auth.md](bypass_auth.md)                                     |
-| [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`                        | Make a bidirectional edge write-once                                                                           | [immutable_inverse.md](immutable_inverse.md)                         |
-| `memberTypes` filter                               | Interface `XxxFilter`                     | Scope an interface query to a subset of implementing types                                                     | [interface_member_types_filter.md](interface_member_types_filter.md) |
-| `groupByXxx` query                                 | Root query (auto)                         | Bucket-aggregate over filtered nodes; DateTime interval bucketing via `by`/`tz`                                | [groupby_queries.md](groupby_queries.md)                             |
+| Directive                                          | Placement                                 | Purpose                                                                                                          | Doc                                                                  |
+| -------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| [`@cascadeAuth`](#cascadeauth)                     | `FIELD_DEFINITION`                        | Propagate auth from authority type to child                                                                      | [cascade_auth.md](cascade_auth.md)                                   |
+| [`@cascadeAuthPolicy`](#cascadeauthpolicy)         | `OBJECT \| INTERFACE`                     | Control cascade auth aggregation and opt-outs                                                                    | [cascade_auth.md](cascade_auth.md)                                   |
+| [`@authVariables`](#authvariables)                 | `OBJECT \| INTERFACE`                     | Declare `<<KEY>>` template substitution values for `@auth` rules                                                 | [cascade_auth.md](cascade_auth.md)                                   |
+| [`@cascadeDelete`](#cascadedelete)                 | `FIELD_DEFINITION`                        | Auto-delete linked nodes when parent is deleted                                                                  | [cascade_delete.md](cascade_delete.md)                               |
+| [`@postValidate`](#postvalidate)                   | `OBJECT \| INTERFACE`                     | Run expr-lang expression after mutation commits                                                                  | [post_validate.md](post_validate.md)                                 |
+| [`@validate`](#validate)                           | `FIELD_DEFINITION \| OBJECT \| INTERFACE` | Field-level and type-level validation before mutation commits                                                    | [validate.md](validate.md)                                           |
+| [`@default`](#default)                             | `FIELD_DEFINITION`                        | Set default field value on add/update                                                                            | [default_transform.md](default_transform.md)                         |
+| [`@transform`](#transform)                         | `FIELD_DEFINITION`                        | Transform a field value via expr-lang on add/update; include `uid: #.uid` when forwarding `before.*` edge refs   | [default_transform.md](default_transform.md)                         |
+| [`@oldValue`](#oldvalue)                           | `FIELD_DEFINITION`                        | Fetch pre-mutation field values for expr-lang expressions                                                        | [old_value.md](old_value.md)                                         |
+| [`@dryRun`](#dryrun)                               | `MUTATION`                                | Test prospective mutations and post-validation rules without committing to Badger/Raft                           | [#dryrun](#dryrun)                                                   |
+| [`@bypassAuth`](#bypassauth)                       | `FIELD_DEFINITION`                        | Conditionally or selectively bypass auth checks on a child edge                                                  | [bypass_auth.md](bypass_auth.md)                                     |
+| [`@ordered`](#ordered)                             | `FIELD_DEFINITION`                        | Store `[String]` / `[Enum]` as an ordered list (`stringvector`) preserving order & duplicates; optional `@count` | [ordered_lists.md](ordered_lists.md)                                 |
+| [`@hasInverse(immutable:)`](#hasinverse-immutable) | `FIELD_DEFINITION`                        | Make a bidirectional edge write-once                                                                             | [immutable_inverse.md](immutable_inverse.md)                         |
+| `memberTypes` filter                               | Interface `XxxFilter`                     | Scope an interface query to a subset of implementing types                                                       | [interface_member_types_filter.md](interface_member_types_filter.md) |
+| `groupByXxx` query                                 | Root query (auto)                         | Bucket-aggregate over filtered nodes; DateTime interval bucketing via `by`/`tz`                                  | [groupby_queries.md](groupby_queries.md)                             |
 
 ---
 
@@ -220,6 +221,26 @@ child edge in queries.
   enforced even when bypass is active.
 
 See [bypass_auth.md](bypass_auth.md) for complete documentation and examples.
+
+---
+
+### `@ordered`
+
+```graphql
+directive @ordered(count: Boolean) on FIELD_DEFINITION
+```
+
+Maps a `[String]` or `[Enum]` list field (any nullability variant) to Dgraph's `stringvector` type,
+storing the list in a single binary posting that preserves exact element order, duplicates, and
+explicit empty arrays (`[]`).
+
+- `count`: Optional boolean (`default: false`). When `true`, emits `@count` on the generated DQL
+  predicate so element counts (including duplicates) are indexed.
+- Mutation semantics: `set: { field: [...] }` replaces the whole list; `set: { field: [] }` sets an
+  empty list; `remove: { field: null }` clears the predicate; element-specific
+  `remove: { field: ["a"] }` is rejected.
+
+See [ordered_lists.md](ordered_lists.md) for complete DQL and GraphQL documentation.
 
 ---
 

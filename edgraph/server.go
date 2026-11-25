@@ -762,8 +762,8 @@ func validateMutation(ctx context.Context, edges []*pb.DirectedEdge) error {
 		if !ok {
 			continue
 		}
-		// only string type can have large values that could cause us issues later
-		if update.GetValueType() != pb.Posting_STRING {
+		// only string and stringvector types can have large values that could cause us issues later
+		if update.GetValueType() != pb.Posting_STRING && update.GetValueType() != pb.Posting_VSTRING {
 			continue
 		}
 
@@ -957,6 +957,7 @@ func updateMutations(qc *queryContext) error {
 			if !(ok && len(uids) == 1) {
 				gmu.Set = nil
 				gmu.Del = nil
+				gmu.EmptyLists = nil
 				continue
 			}
 		}
@@ -993,6 +994,9 @@ func findMutationVars(qc *queryContext) []string {
 		for _, nq := range gmu.Del {
 			updateVars(nq.Subject)
 			updateVars(nq.ObjectId)
+		}
+		for _, nq := range gmu.EmptyLists {
+			updateVars(nq.Subject)
 		}
 	}
 
@@ -1191,6 +1195,22 @@ func updateUIDInMutations(gmu *dql.Mutation, qc *queryContext) error {
 		}
 	}
 	gmu.Set = gmuSet
+
+	if len(gmu.EmptyLists) > 0 {
+		gmuEmpty := make([]*api.NQuad, 0, len(gmu.EmptyLists))
+		for _, nq := range gmu.EmptyLists {
+			newSubs := getNewVals(nq.Subject)
+			qc.nquadsCount += len(newSubs)
+			if qc.nquadsCount > int(x.Config.LimitQueryEdge) {
+				return errors.Errorf("NQuad count in the request: %d, is more that threshold: %d",
+					qc.nquadsCount, int(x.Config.LimitQueryEdge))
+			}
+			for _, s := range newSubs {
+				gmuEmpty = append(gmuEmpty, getNewNQuad(nq, s, ""))
+			}
+		}
+		gmu.EmptyLists = gmuEmpty
+	}
 	return nil
 }
 
@@ -2280,11 +2300,12 @@ func ParseMutationObject(ctx context.Context, mu *api.Mutation) (*dql.Mutation, 
 	res := &dql.Mutation{Cond: mu.Cond}
 
 	if len(mu.SetJson) > 0 {
-		nqs, md, err := chunker.ParseJSON(mu.SetJson, chunker.SetNquads)
+		nqs, emptyLists, md, err := chunker.ParseJSONWithEmptyLists(mu.SetJson, chunker.SetNquads)
 		if err != nil {
 			return nil, err
 		}
 		res.Set = append(res.Set, nqs...)
+		res.EmptyLists = append(res.EmptyLists, emptyLists...)
 		res.Metadata = md
 	}
 	if len(mu.DeleteJson) > 0 {
@@ -2322,6 +2343,11 @@ func ParseMutationObject(ctx context.Context, mu *api.Mutation) (*dql.Mutation, 
 
 	if err := validateNQuads(res.Set, res.Del, newReservedPredicateGuard(ctx)); err != nil {
 		return nil, err
+	}
+	if len(res.EmptyLists) > 0 {
+		if err := validateNQuads(res.EmptyLists, nil, newReservedPredicateGuard(ctx)); err != nil {
+			return nil, err
+		}
 	}
 	return res, nil
 }
@@ -2549,6 +2575,8 @@ func uniqueValueKeyFrom(predicate, lang string, tv types.Val) uniqueValueKey {
 		value = byteContent{tid: tv.Tid, bytes: string(v)}
 	case []float32:
 		value = byteContent{tid: tv.Tid, bytes: string(types.FloatArrayAsBytes(v))}
+	case []string:
+		value = byteContent{tid: tv.Tid, bytes: string(types.StringArrayAsBytes(v))}
 	}
 	return uniqueValueKey{predicate: predicate, lang: lang, value: value}
 }

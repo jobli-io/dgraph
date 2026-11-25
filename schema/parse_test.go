@@ -674,6 +674,37 @@ func TestParseWithNamespace(t *testing.T) {
 	}, result.Types[0])
 }
 
+func TestParseStringVectorSchema(t *testing.T) {
+	sch := `
+steps: stringvector @index(exact, hash, term, fulltext, trigram, ngram) @count .
+`
+	res, err := Parse(sch)
+	require.NoError(t, err)
+	require.Len(t, res.Preds, 1)
+	require.EqualValues(t, &pb.SchemaUpdate{
+		Predicate: x.AttrInRootNamespace("steps"),
+		ValueType: pb.Posting_VSTRING,
+		Directive: pb.SchemaUpdate_INDEX,
+		Tokenizer: []string{"exact", "hash", "term", "fulltext", "trigram", "ngram"},
+		Count:     true,
+		List:      false,
+	}, res.Preds[0])
+
+	// Disallowed combinations on stringvector.
+	_, err = Parse(`bad: [stringvector] .`)
+	require.Error(t, err)
+	_, err = Parse(`bad: stringvector @lang .`)
+	require.Error(t, err)
+	_, err = Parse(`bad: stringvector @index(exact) @unique .`)
+	require.Error(t, err)
+	_, err = Parse(`bad: stringvector @index(exact) @upsert .`)
+	require.Error(t, err)
+	_, err = Parse(`bad: stringvector @index(int) .`)
+	require.Error(t, err)
+	_, err = Parse(`bad: stringvector @index(hnsw) .`)
+	require.Error(t, err)
+}
+
 var ps *badger.DB
 
 func TestMain(m *testing.M) {

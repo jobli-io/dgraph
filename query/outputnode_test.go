@@ -304,3 +304,30 @@ func TestMarshalFloat(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, out, string(result))
 }
+
+func TestEncodeStringVector(t *testing.T) {
+	enc := newEncoder()
+	root := enc.newNode(0)
+
+	require.NoError(t, enc.AddValue(root, enc.idForAttr("ordered"),
+		types.Val{Tid: types.VStringID, Value: []string{"b", "a", "b", "", "héllo\n\"world\""}}))
+	require.NoError(t, enc.AddValue(root, enc.idForAttr("single"),
+		types.Val{Tid: types.VStringID, Value: []string{"only"}}))
+	require.NoError(t, enc.AddValue(root, enc.idForAttr("empty"),
+		types.Val{Tid: types.VStringID, Value: []string{}}))
+
+	enc.fixOrder(root)
+	enc.buf.Reset()
+	require.NoError(t, enc.encode(root))
+
+	var decoded struct {
+		Ordered []string `json:"ordered"`
+		Single  []string `json:"single"`
+		Empty   []string `json:"empty"`
+	}
+	require.NoError(t, json.Unmarshal(enc.buf.Bytes(), &decoded))
+	require.Equal(t, []string{"b", "a", "b", "", "héllo\n\"world\""}, decoded.Ordered)
+	require.Equal(t, []string{"only"}, decoded.Single)
+	require.NotNil(t, decoded.Empty)
+	require.Empty(t, decoded.Empty)
+}

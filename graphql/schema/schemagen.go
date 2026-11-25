@@ -537,6 +537,7 @@ func genDgSchema(gqlSch *ast.Schema, definitions []string,
 		typ     string
 		indexes map[string]bool
 		upsert  string
+		count   string
 		reverse string
 		lang    bool
 	}
@@ -556,14 +557,18 @@ func genDgSchema(gqlSch *ast.Schema, definitions []string,
 	dgTypes := make([]dgType, 0, len(definitions))
 	dgPreds := make(map[string]dgPred)
 
-	getUpdatedPred := func(fname, typStr, upsertStr string, indexes []string, lang bool) dgPred {
+	getUpdatedPred := func(fname, typStr, upsertStr, countStr string, indexes []string, lang bool) dgPred {
 		pred, ok := dgPreds[fname]
 		if !ok {
 			pred = dgPred{
 				typ:     typStr,
 				indexes: make(map[string]bool),
 				upsert:  upsertStr,
+				count:   countStr,
 			}
+		}
+		if countStr != "" {
+			pred.count = countStr
 		}
 		for _, index := range indexes {
 			pred.indexes[index] = true
@@ -626,7 +631,7 @@ func genDgSchema(gqlSch *ast.Schema, definitions []string,
 							indexes = append(indexes, supportedSearches[defaultSearches[f.Type.
 								Name()]].dgIndex)
 						}
-						dgPreds[fname] = getUpdatedPred(fname, typStr, "", indexes, false)
+						dgPreds[fname] = getUpdatedPred(fname, typStr, "", "", indexes, false)
 					} else {
 						typStr = fmt.Sprintf("%suid%s", prefix, suffix)
 					}
@@ -690,6 +695,14 @@ func genDgSchema(gqlSch *ast.Schema, definitions []string,
 						typStr = "float32vector"
 					}
 
+					countStr := ""
+					if ordered := f.Directives.ForName(orderedDirective); ordered != nil {
+						typStr = "stringvector"
+						if countArg := ordered.Arguments.ForName("count"); countArg != nil && countArg.Value.Raw == "true" {
+							countStr = "@count "
+						}
+					}
+
 					if parentInt == nil {
 						// if field name contains @ then it is a language tagged field.
 						isLang := false
@@ -697,11 +710,18 @@ func genDgSchema(gqlSch *ast.Schema, definitions []string,
 							fname = strings.Split(fname, "@")[0]
 							isLang = true
 						}
-						dgPreds[fname] = getUpdatedPred(fname, typStr, upsertStr, indexes, isLang)
+						dgPreds[fname] = getUpdatedPred(fname, typStr, upsertStr, countStr, indexes, isLang)
 					}
 					typ.fields = append(typ.fields, field{fname, parentInt != nil})
 				case ast.Enum:
 					typStr = fmt.Sprintf("%s%s%s", prefix, "string", suffix)
+					countStr := ""
+					if ordered := f.Directives.ForName(orderedDirective); ordered != nil {
+						typStr = "stringvector"
+						if countArg := ordered.Arguments.ForName("count"); countArg != nil && countArg.Value.Raw == "true" {
+							countStr = "@count "
+						}
+					}
 
 					indexes := []string{"hash"}
 					search := f.Directives.ForName(searchDirective)
@@ -712,7 +732,7 @@ func genDgSchema(gqlSch *ast.Schema, definitions []string,
 						}
 					}
 					if parentInt == nil {
-						dgPreds[fname] = getUpdatedPred(fname, typStr, "", indexes, false)
+						dgPreds[fname] = getUpdatedPred(fname, typStr, "", countStr, indexes, false)
 					}
 					typ.fields = append(typ.fields, field{fname, parentInt != nil})
 				}
@@ -761,7 +781,7 @@ func genDgSchema(gqlSch *ast.Schema, definitions []string,
 				if f.lang {
 					langStr = " @lang"
 				}
-				fmt.Fprintf(&preds, "%s: %s%s%s %s%s.\n", fld.name, f.typ, indexStr, langStr, f.upsert, f.reverse)
+				fmt.Fprintf(&preds, "%s: %s%s%s %s%s%s.\n", fld.name, f.typ, indexStr, langStr, f.upsert, f.count, f.reverse)
 				predWritten[fld.name] = true
 			}
 		}

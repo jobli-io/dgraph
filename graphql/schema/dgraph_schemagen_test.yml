@@ -884,3 +884,26 @@ schemas:
         T.value
       }
       T.value: string .
+
+  - name: "@ordered directive generates stringvector and optional @count"
+    input: |
+      enum Stage {
+        DRAFT
+        REVIEW
+        DONE
+      }
+      type Workflow {
+        id: ID!
+        steps: [String!] @ordered
+        indexedSteps: [String] @ordered(count: true) @search(by: [exact, term])
+        stages: [Stage!]! @ordered(count: true)
+      }
+    output: |
+      type Workflow {
+        Workflow.steps
+        Workflow.indexedSteps
+        Workflow.stages
+      }
+      Workflow.steps: stringvector .
+      Workflow.indexedSteps: stringvector @index(exact, term) @count .
+      Workflow.stages: stringvector @index(hash) @count .

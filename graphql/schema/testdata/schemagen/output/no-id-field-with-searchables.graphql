@@ -218,6 +218,7 @@ input GenerateMutationParams {
 directive @hasInverse(field: String!, immutable: Boolean) on FIELD_DEFINITION
 directive @search(by: [String!], strategy: LookupStrategy = DYNAMIC) on FIELD_DEFINITION
 directive @embedding(provider: String, model: String, parameters: String) on FIELD_DEFINITION
+directive @ordered(count: Boolean) on FIELD_DEFINITION
 directive @dgraph(type: String, pred: String) on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @id(interface: Boolean) on FIELD_DEFINITION
 directive @default(value: String, expr: String, evaluationOrder: Int, refOnly: Boolean, add: DgraphDefault, update: DgraphDefault) on FIELD_DEFINITION

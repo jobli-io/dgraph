@@ -25,6 +25,7 @@ type Mutation struct {
 	Cond         string
 	Set          []*api.NQuad
 	Del          []*api.NQuad
+	EmptyLists   []*api.NQuad
 	AllowedPreds []string
 
 	Metadata *pb.Metadata
@@ -197,6 +198,24 @@ func (nq NQuad) ToEdgeUsing(newToUid map[string]uint64) (*pb.DirectedEdge, error
 		return nil, err
 	}
 	return edge, nil
+}
+
+// ToEmptyListEdgeUsing builds a placeholder VSTRING DirectedEdge with empty Value
+// for an empty JSON array ([]). Workers materialize it into a 0-element VSTRING only
+// if the predicate schema type is stringvector, and ignore it otherwise.
+func (nq NQuad) ToEmptyListEdgeUsing(newToUid map[string]uint64) (*pb.DirectedEdge, error) {
+	sUid, err := toUid(nq.Subject, newToUid)
+	if err != nil {
+		return nil, err
+	}
+	if sUid == 0 {
+		return nil, errors.Errorf("Subject should be > 0 for nquad: %+v", nq)
+	}
+	out := nq.createEdgePrototype(sUid)
+	out.ValueType = pb.Posting_VSTRING
+	out.Value = nil
+	out.Op = pb.DirectedEdge_SET
+	return out, nil
 }
 
 func copyValue(out *pb.DirectedEdge, nq NQuad) error {

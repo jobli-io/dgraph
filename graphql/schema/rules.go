@@ -191,10 +191,14 @@ func dgraphDirectivePredicateValidation(gqlSch *ast.Schema, definitions []string
 						suffix = "]"
 					}
 
+					predTypStr := fmt.Sprintf("%s%s%s", prefix, f.Type.Name(), suffix)
+					if f.Directives.ForName(orderedDirective) != nil {
+						predTypStr = "stringvector"
+					}
 					thisPred := pred{
 						name:       f.Name,
 						parentName: def.Name,
-						typ:        fmt.Sprintf("%s%s%s", prefix, f.Type.Name(), suffix),
+						typ:        predTypStr,
 						position:   f.Position,
 						isId:       f.Directives.ForName(idDirective) != nil,
 						isSecret:   false,
@@ -847,6 +851,57 @@ func embeddingValidation(sch *ast.Schema, typ *ast.Definition,
 				"Type %s; Field %s: The field with @embedding directive is of type [%s], "+
 					"but @embedding directive only applies"+
 					" to fields of type [Float!].", typ.Name, field.Name, field.Type.Name()))
+	}
+
+	return errs
+}
+
+func orderedValidation(sch *ast.Schema, typ *ast.Definition,
+	field *ast.FieldDefinition, dir *ast.Directive,
+	secrets map[string]x.Sensitive) gqlerror.List {
+	var errs []*gqlerror.Error
+	if field.Type.Elem == nil || field.Type.Elem.Elem != nil {
+		errs = append(errs,
+			gqlerror.ErrorPosf(
+				field.Position,
+				"Type %s; Field %s: The field with @ordered directive is of type %s,"+
+					" but @ordered directive only applies"+
+					" to list fields of String or Enum.", typ.Name, field.Name, field.Type.String()))
+		return errs
+	}
+
+	elemName := field.Type.Elem.NamedType
+	elemDef := sch.Types[elemName]
+	isStringOrEnum := elemName == "String" || (elemDef != nil && elemDef.Kind == ast.Enum)
+	if !isStringOrEnum {
+		errs = append(errs,
+			gqlerror.ErrorPosf(
+				field.Position,
+				"Type %s; Field %s: The field with @ordered directive is of type %s,"+
+					" but @ordered directive only applies"+
+					" to list fields of String or Enum.", typ.Name, field.Name, field.Type.String()))
+	}
+
+	if field.Directives.ForName(embeddingDirective) != nil {
+		errs = append(errs,
+			gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @ordered directive cannot be combined with @embedding.",
+				typ.Name, field.Name))
+	}
+	if field.Directives.ForName(idDirective) != nil {
+		errs = append(errs,
+			gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @ordered directive cannot be combined with @id.",
+				typ.Name, field.Name))
+	}
+	if isMultiLangField(field, false) {
+		errs = append(errs,
+			gqlerror.ErrorPosf(
+				dir.Position,
+				"Type %s; Field %s: @ordered directive cannot be used on language-tagged fields.",
+				typ.Name, field.Name))
 	}
 
 	return errs
@@ -3280,7 +3335,7 @@ func apolloExternalValidation(sch *ast.Schema,
 	}
 
 	if !isKeyField(field, typ) {
-		directiveList := []string{inverseDirective, searchDirective, dgraphDirective, idDirective}
+		directiveList := []string{inverseDirective, searchDirective, dgraphDirective, idDirective, orderedDirective}
 		for _, directive := range directiveList {
 			dirDefn := field.Directives.ForName(directive)
 			if dirDefn != nil {

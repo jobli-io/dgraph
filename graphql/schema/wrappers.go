@@ -335,6 +335,7 @@ type FieldDefinition interface {
 	HasEmbeddingDirective() bool
 	HasEmbeddingProvider() bool
 	EmbeddingSearchMetric() string
+	HasOrderedDirective() bool
 	HasInterfaceArg() bool
 	// GetDefaultValue evaluates the @default directive for this field and returns
 	// the computed value and an optional refOnly override.
@@ -4751,6 +4752,13 @@ func (fd *fieldDefinition) EmbeddingSearchMetric() string {
 func hasEmbeddingDirective(fd *ast.FieldDefinition) bool {
 	id := fd.Directives.ForName(embeddingDirective)
 	return id != nil
+}
+
+func (fd *fieldDefinition) HasOrderedDirective() bool {
+	if fd.fieldDef == nil {
+		return false
+	}
+	return fd.fieldDef.Directives.ForName(orderedDirective) != nil
 }
 
 func (fd *fieldDefinition) HasSearchDirective() bool {

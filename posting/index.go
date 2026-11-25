@@ -381,7 +381,11 @@ func (l *List) handleDeleteAll(ctx context.Context, edge *pb.DirectedEdge, txn *
 	// To calculate length of posting list. Used for deletion of count index.
 	var plen int
 	err := l.Iterate(txn.StartTs, 0, func(p *pb.Posting) error {
-		plen++
+		if p.ValType == pb.Posting_VSTRING {
+			plen += types.CountVString(p.Value)
+		} else {
+			plen++
+		}
 		switch {
 		case isReversed:
 			// Delete reverse edge for each posting.
@@ -523,10 +527,20 @@ func (txn *Txn) addMutationHelper(ctx context.Context, l *List, doUpdateIndex bo
 	var err error
 
 	isScalarPredicate := !schema.State().IsList(t.Attr)
+	schemaType, _ := schema.State().TypeOf(t.Attr)
+	isVString := schemaType == types.VStringID || t.ValueType == pb.Posting_VSTRING
 	delNonListPredicate := isScalarPredicate &&
 		t.Op == pb.DirectedEdge_DEL && string(t.Value) != x.Star
 
 	switch {
+	case hasCountIndex && isVString:
+		found, currPost, err = l.findPosting(txn.StartTs, fingerprintEdge(t))
+		if err != nil {
+			return val, found, emptyCountParams, err
+		}
+		if found && currPost.Op != Del && currPost.ValType == pb.Posting_VSTRING {
+			countBefore = types.CountVString(currPost.Value)
+		}
 	case hasCountIndex:
 		countBefore, found, currPost = l.getPostingAndLengthNoSort(txn.StartTs, 0, getUID(t))
 		if countBefore == -1 {
@@ -568,8 +582,16 @@ func (txn *Txn) addMutationHelper(ctx context.Context, l *List, doUpdateIndex bo
 
 	if hasCountIndex {
 		pk, _ := x.Parse(l.key)
-		shouldCountOneUid := isScalarPredicate && !pk.IsReverse()
-		countAfter = countAfterMutation(countBefore, found, t.Op, shouldCountOneUid)
+		if isVString && !pk.IsReverse() {
+			if t.Op == pb.DirectedEdge_DEL {
+				countAfter = 0
+			} else {
+				countAfter = types.CountVString(t.Value)
+			}
+		} else {
+			shouldCountOneUid := isScalarPredicate && !pk.IsReverse()
+			countAfter = countAfterMutation(countBefore, found, t.Op, shouldCountOneUid)
+		}
 		return val, found, countParams{
 			attr:        t.Attr,
 			countBefore: countBefore,
@@ -614,10 +636,64 @@ func (l *List) AddMutationWithIndex(ctx context.Context, edge *pb.DirectedEdge, 
 		}
 	}
 	if doUpdateIndex {
+		tokenizers := schema.State().Tokenizer(ctx, edge.Attr)
+		newVal := types.Val{
+			Tid:   types.TypeID(edge.ValueType),
+			Value: edge.Value,
+		}
+		if found && val.Value != nil && edge.Op != pb.DirectedEdge_DEL &&
+			val.Tid == types.VStringID && newVal.Tid == types.VStringID {
+			oldToks, err := indexTokens(ctx, &indexMutationInfo{
+				tokenizers: tokenizers,
+				edge:       edge,
+				val:        val,
+			})
+			if err != nil {
+				return err
+			}
+			newToks, err := indexTokens(ctx, &indexMutationInfo{
+				tokenizers: tokenizers,
+				edge:       edge,
+				val:        newVal,
+			})
+			if err != nil {
+				return err
+			}
+			newSet := make(map[string]struct{}, len(newToks))
+			for _, tk := range newToks {
+				newSet[tk] = struct{}{}
+			}
+			oldSet := make(map[string]struct{}, len(oldToks))
+			for _, tk := range oldToks {
+				oldSet[tk] = struct{}{}
+				if _, keep := newSet[tk]; !keep {
+					if err := txn.addIndexMutation(ctx, &pb.DirectedEdge{
+						ValueId: edge.Entity,
+						Attr:    edge.Attr,
+						Op:      pb.DirectedEdge_DEL,
+					}, tk); err != nil {
+						return err
+					}
+				}
+			}
+			for _, tk := range newToks {
+				if _, existed := oldSet[tk]; !existed {
+					if err := txn.addIndexMutation(ctx, &pb.DirectedEdge{
+						ValueId: edge.Entity,
+						Attr:    edge.Attr,
+						Op:      pb.DirectedEdge_SET,
+					}, tk); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+
 		// Exact matches.
 		if found && val.Value != nil {
 			if _, err := txn.addIndexMutations(ctx, &indexMutationInfo{
-				tokenizers: schema.State().Tokenizer(ctx, edge.Attr),
+				tokenizers: tokenizers,
 				edge:       edge,
 				val:        val,
 				op:         pb.DirectedEdge_DEL,
@@ -626,14 +702,10 @@ func (l *List) AddMutationWithIndex(ctx context.Context, edge *pb.DirectedEdge, 
 			}
 		}
 		if edge.Op != pb.DirectedEdge_DEL {
-			val = types.Val{
-				Tid:   types.TypeID(edge.ValueType),
-				Value: edge.Value,
-			}
 			if _, err := txn.addIndexMutations(ctx, &indexMutationInfo{
-				tokenizers: schema.State().Tokenizer(ctx, edge.Attr),
+				tokenizers: tokenizers,
 				edge:       edge,
-				val:        val,
+				val:        newVal,
 				op:         pb.DirectedEdge_SET,
 			}); err != nil {
 				return err
@@ -1519,6 +1591,20 @@ func rebuildTokIndex(ctx context.Context, rb *IndexRebuild) error {
 				Value: p.Value,
 				Tid:   types.TypeID(p.ValType),
 			}
+			if rb.CurrentSchema.ValueType == pb.Posting_VSTRING && val.Tid != types.VStringID {
+				sv, err := types.Convert(val, types.VStringID)
+				if err != nil {
+					return err
+				}
+				b := types.ValueForType(types.BinaryID)
+				if err = types.Marshal(sv, &b); err != nil {
+					return err
+				}
+				val = types.Val{
+					Value: b.Value,
+					Tid:   types.VStringID,
+				}
+			}
 			edge.Lang = string(p.LangTag)
 
 			newEdges, err := processAddIndexMutation(&edge, val)
@@ -1550,10 +1636,15 @@ func (rb *IndexRebuild) needsCountIndexRebuild() indexOp {
 		old = &pb.SchemaUpdate{}
 	}
 
-	// Do nothing if the schema directive did not change.
+	// Do nothing if the schema directive did not change, unless migrating to/from stringvector
+	// where element counts differ from posting list lengths (and sets deduplicate).
 	if rb.CurrentSchema.Count == old.Count {
+		if rb.CurrentSchema.Count &&
+			(rb.CurrentSchema.ValueType == pb.Posting_VSTRING || old.ValueType == pb.Posting_VSTRING) &&
+			(rb.CurrentSchema.ValueType != old.ValueType || rb.CurrentSchema.List != old.List) {
+			return indexRebuild
+		}
 		return indexNoop
-
 	}
 
 	// If the new schema does not require an index, delete the current index.
@@ -1606,9 +1697,28 @@ func rebuildCountIndex(ctx context.Context, rb *IndexRebuild) error {
 			Attr:    rb.Attr,
 			Op:      pb.DirectedEdge_SET,
 		}
-		sz := pl.Length(rb.StartTs, 0)
-		if sz == -1 {
-			return []*pb.DirectedEdge{}, nil
+		var sz int
+		if !reverse && rb.CurrentSchema.ValueType == pb.Posting_VSTRING {
+			val, err := pl.Value(rb.StartTs)
+			if errors.Is(err, ErrNoValue) {
+				return []*pb.DirectedEdge{}, nil
+			}
+			if err != nil {
+				return []*pb.DirectedEdge{}, err
+			}
+			vBytes, ok := val.Value.([]byte)
+			if !ok {
+				return []*pb.DirectedEdge{}, nil
+			}
+			sz = types.CountVString(vBytes)
+			if sz <= 0 {
+				return []*pb.DirectedEdge{}, nil
+			}
+		} else {
+			sz = pl.Length(rb.StartTs, 0)
+			if sz == -1 {
+				return []*pb.DirectedEdge{}, nil
+			}
 		}
 		for {
 			err := txn.addCountMutation(ctx, t, uint32(sz), reverse)
@@ -1790,35 +1900,106 @@ func rebuildReverseEdges(ctx context.Context, rb *IndexRebuild) error {
 	return builder.Run(ctx)
 }
 
-// needsListTypeRebuild returns true if the schema changed from a scalar to a
-// list. It returns true if the index can be left as is.
+// needsListTypeRebuild returns true if the schema changed between scalar, unordered list,
+// and ordered stringvector representations in a way that requires rewriting data postings.
 func (rb *IndexRebuild) needsListTypeRebuild() (bool, error) {
 	x.AssertTruef(rb.CurrentSchema != nil, "Current schema cannot be nil.")
 
 	if rb.OldSchema == nil {
 		return false, nil
 	}
-	if rb.CurrentSchema.List && !rb.OldSchema.List {
-		return true, nil
-	}
 	if rb.OldSchema.List && !rb.CurrentSchema.List {
+		if rb.OldSchema.ValueType == pb.Posting_STRING && rb.CurrentSchema.ValueType == pb.Posting_VSTRING {
+			return true, nil
+		}
 		return false, errors.Errorf("Type can't be changed from list to scalar for attr: [%s]"+
 			" without dropping it first.", x.ParseAttr(rb.CurrentSchema.Predicate))
+	}
+	if !rb.OldSchema.List && rb.CurrentSchema.List {
+		if rb.OldSchema.ValueType == pb.Posting_VSTRING && rb.CurrentSchema.ValueType != pb.Posting_STRING {
+			return false, errors.Errorf("Type can't be changed from stringvector to [%s] for attr: [%s]"+
+				" without dropping it first.",
+				types.TypeID(rb.CurrentSchema.ValueType).Name(), x.ParseAttr(rb.CurrentSchema.Predicate))
+		}
+		return true, nil
+	}
+	if !rb.OldSchema.List && !rb.CurrentSchema.List {
+		if rb.OldSchema.ValueType == pb.Posting_VSTRING && rb.CurrentSchema.ValueType != pb.Posting_VSTRING {
+			return false, errors.Errorf("Type can't be changed from stringvector to scalar for attr: [%s]"+
+				" without dropping it first.", x.ParseAttr(rb.CurrentSchema.Predicate))
+		}
+		if (rb.OldSchema.ValueType == pb.Posting_STRING || rb.OldSchema.ValueType == pb.Posting_DEFAULT) &&
+			rb.CurrentSchema.ValueType == pb.Posting_VSTRING {
+			return true, nil
+		}
 	}
 
 	return false, nil
 }
 
-// rebuildListType rebuilds the index when the schema is changed from scalar to list type.
-// We need to fingerprint the values to get the new ValueId.
+// rebuildListType rewrites data postings when migrating between scalar, unordered list,
+// and ordered stringvector representations.
 func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 	if needsRebuild, err := rb.needsListTypeRebuild(); !needsRebuild || err != nil {
 		return err
 	}
 
+	isListToStringVector := rb.OldSchema.List && !rb.CurrentSchema.List &&
+		rb.OldSchema.ValueType == pb.Posting_STRING && rb.CurrentSchema.ValueType == pb.Posting_VSTRING
+	isStringVectorToList := !rb.OldSchema.List && rb.CurrentSchema.List &&
+		rb.OldSchema.ValueType == pb.Posting_VSTRING && rb.CurrentSchema.ValueType == pb.Posting_STRING
+	isScalarToStringVector := !rb.OldSchema.List && !rb.CurrentSchema.List &&
+		rb.CurrentSchema.ValueType == pb.Posting_VSTRING
+
 	pk := x.ParsedKey{Attr: rb.Attr}
 	builder := rebuilder{attr: rb.Attr, prefix: pk.DataPrefix(), startTs: rb.StartTs}
 	builder.fn = func(uid uint64, pl *List, txn *Txn) ([]*pb.DirectedEdge, error) {
+		if isListToStringVector {
+			var oldPosts []*pb.Posting
+			var elems []string
+			err := pl.Iterate(txn.StartTs, 0, func(p *pb.Posting) error {
+				if len(p.LangTag) > 0 {
+					return nil
+				}
+				oldPosts = append(oldPosts, p)
+				if p.ValType == pb.Posting_STRING {
+					elems = append(elems, string(p.Value))
+					return nil
+				}
+				sv, err := types.Convert(types.Val{Tid: types.TypeID(p.ValType), Value: p.Value}, types.StringID)
+				if err != nil {
+					return err
+				}
+				elems = append(elems, sv.Value.(string))
+				return nil
+			})
+			if err != nil {
+				return []*pb.DirectedEdge{}, err
+			}
+			if len(oldPosts) == 0 {
+				return []*pb.DirectedEdge{}, nil
+			}
+
+			pl = txn.cache.SetIfAbsent(string(pl.key), pl)
+			for _, oldPost := range oldPosts {
+				delEdge := &pb.DirectedEdge{
+					ValueId: oldPost.Uid,
+					Attr:    rb.Attr,
+					Op:      pb.DirectedEdge_DEL,
+				}
+				if err := pl.addMutation(ctx, txn, delEdge); err != nil {
+					return []*pb.DirectedEdge{}, err
+				}
+			}
+			newEdge := &pb.DirectedEdge{
+				Attr:      rb.Attr,
+				Value:     types.StringArrayAsBytes(elems),
+				ValueType: pb.Posting_VSTRING,
+				Op:        pb.DirectedEdge_SET,
+			}
+			return []*pb.DirectedEdge{}, pl.addMutation(ctx, txn, newEdge)
+		}
+
 		var mpost *pb.Posting
 		err := pl.Iterate(txn.StartTs, 0, func(p *pb.Posting) error {
 			// We only want to modify the untagged value. There could be other values with a
@@ -1834,6 +2015,74 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 		if mpost == nil {
 			return []*pb.DirectedEdge{}, nil
 		}
+
+		if isStringVectorToList {
+			var elems []string
+			if mpost.ValType == pb.Posting_VSTRING {
+				elems = types.BytesAsStringArray(mpost.Value)
+			} else {
+				sv, err := types.Convert(types.Val{Tid: types.TypeID(mpost.ValType), Value: mpost.Value}, types.VStringID)
+				if err != nil {
+					return []*pb.DirectedEdge{}, err
+				}
+				elems = sv.Value.([]string)
+			}
+
+			pl = txn.cache.SetIfAbsent(string(pl.key), pl)
+			delEdge := &pb.DirectedEdge{
+				ValueId: mpost.Uid,
+				Attr:    rb.Attr,
+				Op:      pb.DirectedEdge_DEL,
+			}
+			if err := pl.addMutation(ctx, txn, delEdge); err != nil {
+				return []*pb.DirectedEdge{}, err
+			}
+			for _, elem := range elems {
+				newEdge := &pb.DirectedEdge{
+					Attr:      rb.Attr,
+					Value:     []byte(elem),
+					ValueType: pb.Posting_STRING,
+					Op:        pb.DirectedEdge_SET,
+					Facets:    mpost.Facets,
+				}
+				if err := pl.addMutation(ctx, txn, newEdge); err != nil {
+					return []*pb.DirectedEdge{}, err
+				}
+			}
+			return []*pb.DirectedEdge{}, nil
+		}
+
+		if isScalarToStringVector {
+			if mpost.ValType == pb.Posting_VSTRING {
+				return []*pb.DirectedEdge{}, nil
+			}
+			sv, err := types.Convert(types.Val{Tid: types.TypeID(mpost.ValType), Value: mpost.Value}, types.VStringID)
+			if err != nil {
+				return []*pb.DirectedEdge{}, err
+			}
+			b := types.ValueForType(types.BinaryID)
+			if err := types.Marshal(sv, &b); err != nil {
+				return []*pb.DirectedEdge{}, err
+			}
+			pl = txn.cache.SetIfAbsent(string(pl.key), pl)
+			delEdge := &pb.DirectedEdge{
+				ValueId: mpost.Uid,
+				Attr:    rb.Attr,
+				Op:      pb.DirectedEdge_DEL,
+			}
+			if err := pl.addMutation(ctx, txn, delEdge); err != nil {
+				return []*pb.DirectedEdge{}, err
+			}
+			newEdge := &pb.DirectedEdge{
+				Attr:      rb.Attr,
+				Value:     b.Value.([]byte),
+				ValueType: pb.Posting_VSTRING,
+				Op:        pb.DirectedEdge_SET,
+				Facets:    mpost.Facets,
+			}
+			return []*pb.DirectedEdge{}, pl.addMutation(ctx, txn, newEdge)
+		}
+
 		// Delete the old edge corresponding to ValueId math.MaxUint64
 		t := &pb.DirectedEdge{
 			ValueId: mpost.Uid,
