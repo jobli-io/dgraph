@@ -76,9 +76,10 @@ class Cluster:
         if p:
             p.send_signal(sig)
             try:
-                p.wait(60)
+                p.wait(600)
             except subprocess.TimeoutExpired:
                 p.kill()
+                p.wait(30)
 
     def start(self, wait=True):
         self.start_zero()
@@ -91,14 +92,18 @@ class Cluster:
         return self
 
     def stop(self):
-        for key in list(self.procs):
+        """Stops the alphas, then Zero, and waits for each: a data directory stays locked
+        until its alpha has really gone, and after a large load that takes a while."""
+        keys = sorted(self.procs, key=lambda k: k == "zero")
+        for key in keys:
             p = self.procs.pop(key)
             p.send_signal(signal.SIGTERM)
+            try:
+                p.wait(600)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait(30)
         time.sleep(1)
-        for p in list(self.procs.values()):
-            p.kill()
-        # Give the processes a moment to release their ports and directories.
-        time.sleep(2)
 
     def __enter__(self):
         return self.start()
@@ -203,6 +208,22 @@ class Cluster:
             return 0
         out = subprocess.run(["ps", "-o", "rss=", "-p", str(p.pid)], capture_output=True, text=True).stdout
         return int(out.strip() or 0) // 1024
+
+    def heap_mb(self, i=0):
+        """Go heap in use on alpha i, which unlike RSS does not count freed memory not yet returned."""
+        try:
+            with urllib.request.urlopen(self.alpha_http(i) + "/debug/vars", timeout=30) as resp:
+                return json.loads(resp.read())["memstats"]["HeapInuse"] >> 20
+        except (urllib.error.URLError, ConnectionError, OSError, KeyError, ValueError):
+            return 0
+
+    def zero_heap_mb(self):
+        """Go heap in use on Zero. Its transaction oracle is the part that grows with writes."""
+        try:
+            with urllib.request.urlopen(self.zero_http() + "/debug/vars", timeout=30) as resp:
+                return json.loads(resp.read())["memstats"]["HeapInuse"] >> 20
+        except (urllib.error.URLError, ConnectionError, OSError, KeyError, ValueError):
+            return 0
 
     def log_count(self, key, needle):
         n = 0

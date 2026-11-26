@@ -15,6 +15,7 @@ import (
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -23,6 +24,7 @@ import (
 	"github.com/pkg/errors"
 	ostats "go.opencensus.io/stats"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/dgraph-io/badger/v4"
@@ -1022,12 +1024,14 @@ func (r *rebuilder) Run(ctx context.Context) error {
 		txns[i] = NewTxn(r.startTs)
 	}
 
-	// One stream per prefix, all writing into the same temp badger. The streams
-	// run one after another, so they can share the per-thread transactions.
-	runStream := func(prefix []byte) error {
+	start := time.Now()
+	// The stream reads the predicate's own key range. The partitions' ranges are
+	// read afterwards by scanPrefixes, through the same callbacks and into the
+	// same temp badger.
+	{
 		stream := pstore.NewStreamAt(r.startTs)
 		stream.LogPrefix = fmt.Sprintf("Rebuilding index for predicate %s (1/2):", r.attr)
-		stream.Prefix = prefix
+		stream.Prefix = r.prefixes[0]
 		stream.MaxSize = (uint64(dbOpts.MemTableSize) * 9) / 10
 		stream.UseKeyToListWithThreadId = true
 
@@ -1124,12 +1128,11 @@ func (r *rebuilder) Run(ctx context.Context) error {
 			return nil
 		}
 
-		return stream.Orchestrate(ctx)
-	}
-
-	start := time.Now()
-	for _, prefix := range r.prefixes {
-		if err := runStream(prefix); err != nil {
+		if err := stream.Orchestrate(ctx); err != nil {
+			return err
+		}
+		if err := scanPrefixes(ctx, r.startTs, r.prefixes[1:], stream.KeyToListWithThreadId,
+			stream.FinishThread, stream.Send); err != nil {
 			return err
 		}
 	}
@@ -1201,6 +1204,111 @@ func (r *rebuilder) Run(ctx context.Context) error {
 	}
 	glog.V(1).Infof("Rebuilding index for predicate %s: Flushing all writes.\n", r.attr)
 	return writer.Flush()
+}
+
+// scanPrefixes feeds every posting list under prefixes to keyToList, the way a
+// badger Stream would, and hands what it returns to send.
+//
+// A Stream reads one prefix and takes around 10ms to set up, which is nothing
+// for a predicate and far too much for one stream per partition: a partition's
+// range is small, and there can be tens of thousands of them. This is one seek
+// per prefix on a handful of long-lived iterators instead.
+func scanPrefixes(ctx context.Context, readTs uint64, prefixes [][]byte,
+	keyToList func(key []byte, itr *badger.Iterator, threadId int) (*bpb.KVList, error),
+	finishThread func(threadId int) (*bpb.KVList, error),
+	send func(buf *z.Buffer) error) error {
+
+	if len(prefixes) == 0 {
+		return nil
+	}
+	const batchSize = 4 << 20
+	workers := 8
+	if len(prefixes) < workers {
+		workers = len(prefixes)
+	}
+
+	var sendMu sync.Mutex
+	prefixCh := make(chan []byte, 2*workers)
+	g, ctx := errgroup.WithContext(ctx)
+	for threadId := range workers {
+		g.Go(func() error {
+			txn := pstore.NewTransactionAt(readTs, false)
+			defer txn.Discard()
+			iopt := badger.DefaultIteratorOptions
+			iopt.AllVersions = true
+			itr := txn.NewIterator(iopt)
+			defer itr.Close()
+			itr.ThreadId = threadId
+			itr.Alloc = z.NewAllocator(1<<20, "Rebuilder.scanPrefixes")
+			defer itr.Alloc.Release()
+
+			out := z.NewBuffer(2*batchSize, "Rebuilder.scanPrefixes")
+			defer func() { _ = out.Release() }()
+			flush := func() error {
+				if out.IsEmpty() {
+					return nil
+				}
+				sendMu.Lock()
+				defer sendMu.Unlock()
+				if err := send(out); err != nil {
+					return err
+				}
+				out.Reset()
+				return nil
+			}
+			add := func(list *bpb.KVList) error {
+				for _, kv := range list.GetKv() {
+					badger.KVToBuffer(kv, out)
+					if out.LenNoPadding() >= batchSize {
+						if err := flush(); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}
+
+			var prevKey []byte
+			for prefix := range prefixCh {
+				for itr.Seek(prefix); itr.ValidForPrefix(prefix); {
+					item := itr.Item()
+					if bytes.Equal(item.Key(), prevKey) {
+						itr.Next()
+						continue
+					}
+					prevKey = append(prevKey[:0], item.Key()...)
+
+					itr.Alloc.Reset()
+					list, err := keyToList(item.KeyCopy(nil), itr, threadId)
+					if err != nil {
+						return err
+					}
+					if err := add(list); err != nil {
+						return err
+					}
+				}
+			}
+			list, err := finishThread(threadId)
+			if err != nil {
+				return err
+			}
+			if err := add(list); err != nil {
+				return err
+			}
+			return flush()
+		})
+	}
+
+feed:
+	for _, prefix := range prefixes {
+		select {
+		case prefixCh <- prefix:
+		case <-ctx.Done():
+			break feed
+		}
+	}
+	close(prefixCh)
+	return g.Wait()
 }
 
 // IndexRebuild holds the info needed to initiate a rebuilt of the indices.
@@ -1357,36 +1465,65 @@ func (rb *IndexRebuild) dropPrefixes(ctx context.Context) ([][]byte, error) {
 	return prefixes, nil
 }
 
+// deletePartitionIndexes deletes, in every partition, the indexes of rb.Attr
+// that need to be deleted or rebuilt.
+//
+// The predicate's own indexes go through DropPrefix. That does not work for the
+// partitions: each has its own prefixes, spread over the whole key space, and
+// Badger blocks writes while it compares every key of every table it rewrites
+// against every prefix it was given. So the partitions' keys are deleted one by
+// one instead, at the timestamp of the schema change. A rebuild that follows
+// writes its lists at that same timestamp, on top of the deletions.
+func (rb *IndexRebuild) deletePartitionIndexes(ctx context.Context) error {
+	if len(rb.PartitionAttrs) == 0 {
+		return nil
+	}
+	txn := pstore.NewTransactionAt(rb.StartTs, false)
+	defer txn.Discard()
+	iopt := badger.DefaultIteratorOptions
+	iopt.PrefetchValues = false
+	itr := txn.NewIterator(iopt)
+	defer itr.Close()
+
+	writer := pstore.NewManagedWriteBatch()
+	defer writer.Cancel()
+	deleted := 0
+	for _, attr := range rb.PartitionAttrs {
+		prefixes, err := rb.forAttr(attr).dropPrefixes(ctx)
+		if err != nil {
+			return err
+		}
+		for _, prefix := range prefixes {
+			for itr.Seek(prefix); itr.ValidForPrefix(prefix); itr.Next() {
+				if err := writer.DeleteAt(itr.Item().KeyCopy(nil), rb.StartTs); err != nil {
+					return err
+				}
+				deleted++
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	if deleted == 0 {
+		return nil
+	}
+	glog.Infof("Deleting indexes for %s in %d partitions: %d keys", rb.Attr, len(rb.PartitionAttrs), deleted)
+	if err := writer.Flush(); err != nil {
+		return err
+	}
+	ResetCache()
+	return nil
+}
+
 // DropIndexes drops the indexes that need to be rebuilt.
 func (rb *IndexRebuild) DropIndexes(ctx context.Context) error {
 	prefixes, err := rb.dropPrefixes(ctx)
 	if err != nil {
 		return err
 	}
-	if len(rb.PartitionAttrs) > 0 {
-		// Badger checks every key of every table it rewrites against every prefix,
-		// and a partition's prefixes are spread over the whole key space. Only ask
-		// it to drop the ones that hold something; adding a new index holds none.
-		txn := pstore.NewTransactionAt(rb.StartTs, false)
-		iopt := badger.DefaultIteratorOptions
-		iopt.PrefetchValues = false
-		iopt.AllVersions = true
-		itr := txn.NewIterator(iopt)
-		for _, attr := range rb.PartitionAttrs {
-			sub, err := rb.forAttr(attr).dropPrefixes(ctx)
-			if err != nil {
-				itr.Close()
-				txn.Discard()
-				return err
-			}
-			for _, prefix := range sub {
-				if itr.Seek(prefix); itr.ValidForPrefix(prefix) {
-					prefixes = append(prefixes, prefix)
-				}
-			}
-		}
-		itr.Close()
-		txn.Discard()
+	if err := rb.deletePartitionIndexes(ctx); err != nil {
+		return err
 	}
 	if len(prefixes) > 0 {
 		// This trace message now gets logged only if there are any prefixes to
