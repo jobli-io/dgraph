@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/glog"
 	"github.com/dgraph-io/dgraph/v25/conn"
+	"github.com/golang/glog"
 )
 
 // InvalidationMessage is the payload distributed across the cluster when a mutation succeeds.
@@ -237,7 +237,8 @@ func (n *NativeClusterBroker) broadcastToPeers(msg *InvalidationMessage) {
 		} else if grpcPort >= 7000 {
 			httpPort = grpcPort + 1000 // Internal Raft (7080) -> HTTP Admin (8080)
 		} else {
-			httpPort = 8080
+			// Skip Zero peers (e.g. port 5080); only Alpha peers serve /admin/subscription/invalidate.
+			continue
 		}
 
 		peerAddrs = append(peerAddrs, net.JoinHostPort(host, strconv.Itoa(httpPort)))
