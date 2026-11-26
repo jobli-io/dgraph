@@ -743,9 +743,12 @@ func prefixesToDeleteTokensFor(attr, tokenizerName string, hasLang bool) ([][]by
 
 // rebuilder handles the process of rebuilding an index.
 type rebuilder struct {
-	attr    string
-	prefix  []byte
-	startTs uint64
+	attr string
+	// prefixes are the key ranges to read: the predicate's own, then the same
+	// predicate in each partition namespace that holds data for it. fn is handed
+	// lists from all of them and must take the namespace from the list's key.
+	prefixes [][]byte
+	startTs  uint64
 
 	// The posting list passed here is the on disk version. It is not coming
 	// from the LRU cache.
@@ -753,10 +756,19 @@ type rebuilder struct {
 }
 
 func (r *rebuilder) RunWithoutTemp(ctx context.Context) error {
+	for _, prefix := range r.prefixes {
+		if err := r.runWithoutTemp(ctx, prefix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *rebuilder) runWithoutTemp(ctx context.Context, prefix []byte) error {
 	ResetCache()
 	stream := pstore.NewStreamAt(r.startTs)
 	stream.LogPrefix = fmt.Sprintf("Rebuilding index for predicate %s (1/2):", r.attr)
-	stream.Prefix = r.prefix
+	stream.Prefix = prefix
 	stream.NumGo = 16
 	txn := NewTxn(r.startTs)
 	stream.KeyToList = func(key []byte, it *badger.Iterator) (*bpb.KVList, error) {
@@ -990,24 +1002,18 @@ func (r *rebuilder) Run(ctx context.Context) error {
 	defer tmpDB.Close()
 
 	glog.V(1).Infof(
-		"Rebuilding index for predicate %s: Starting process. StartTs=%d. Prefix=\n%s\n",
-		r.attr, r.startTs, hex.Dump(r.prefix))
+		"Rebuilding index for predicate %s: Starting process. StartTs=%d. Prefixes=%d. First=\n%s\n",
+		r.attr, r.startTs, len(r.prefixes), hex.Dump(r.prefixes[0]))
 
 	// Counter is used here to ensure that all keys are committed at different timestamp.
 	// We set it to 1 in case there are no keys found and NewStreamAt is called with ts=0.
 	var counter uint64 = 1
 
 	tmpWriter := tmpDB.NewManagedWriteBatch()
-	stream := pstore.NewStreamAt(r.startTs)
-	stream.LogPrefix = fmt.Sprintf("Rebuilding index for predicate %s (1/2):", r.attr)
-	stream.Prefix = r.prefix
-	stream.MaxSize = (uint64(dbOpts.MemTableSize) * 9) / 10
 	//TODO We need to create a single transaction irrespective of the type of the predicate
 	if pred.ValueType == pb.Posting_VFLOAT {
 		x.AssertTrue(false)
 	}
-
-	stream.UseKeyToListWithThreadId = true
 
 	const maxThreadIds = 10000
 
@@ -1016,102 +1022,116 @@ func (r *rebuilder) Run(ctx context.Context) error {
 		txns[i] = NewTxn(r.startTs)
 	}
 
-	stream.FinishThread = func(threadId int) (*bpb.KVList, error) {
-		// Convert data into deltas.
-		streamTxn := txns[threadId]
-		streamTxn.Update()
-		// txn.cache.Lock() is not required because we are the only one making changes to txn.
-		kvs := make([]*bpb.KV, 0)
+	// One stream per prefix, all writing into the same temp badger. The streams
+	// run one after another, so they can share the per-thread transactions.
+	runStream := func(prefix []byte) error {
+		stream := pstore.NewStreamAt(r.startTs)
+		stream.LogPrefix = fmt.Sprintf("Rebuilding index for predicate %s (1/2):", r.attr)
+		stream.Prefix = prefix
+		stream.MaxSize = (uint64(dbOpts.MemTableSize) * 9) / 10
+		stream.UseKeyToListWithThreadId = true
 
-		for key, data := range streamTxn.cache.deltas {
-			version := atomic.AddUint64(&counter, 1)
-			kv := bpb.KV{
-				Key:      []byte(key),
-				Value:    data,
-				UserMeta: []byte{BitDeltaPosting},
-				Version:  version,
+		stream.FinishThread = func(threadId int) (*bpb.KVList, error) {
+			// Convert data into deltas.
+			streamTxn := txns[threadId]
+			streamTxn.Update()
+			// txn.cache.Lock() is not required because we are the only one making changes to txn.
+			kvs := make([]*bpb.KV, 0)
+
+			for key, data := range streamTxn.cache.deltas {
+				version := atomic.AddUint64(&counter, 1)
+				kv := bpb.KV{
+					Key:      []byte(key),
+					Value:    data,
+					UserMeta: []byte{BitDeltaPosting},
+					Version:  version,
+				}
+				kvs = append(kvs, &kv)
 			}
-			kvs = append(kvs, &kv)
-		}
-		txns[threadId] = NewTxn(r.startTs)
-		return &bpb.KVList{Kv: kvs}, nil
-	}
-
-	stream.KeyToListWithThreadId = func(key []byte, itr *badger.Iterator, threadId int) (*bpb.KVList, error) {
-		// We should return quickly if the context is no longer valid.
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-		}
-
-		pk, err := x.Parse(key)
-		if err != nil {
-			return nil, errors.Wrapf(err, "could not parse key %s", hex.Dump(key))
-		}
-
-		l, err := ReadPostingList(key, itr)
-		if err != nil {
-			return nil, errors.Wrapf(err, "error reading posting list from disk")
-		}
-
-		kvs := make([]*bpb.KV, 0)
-		if pred.Count {
-			kvs, err = l.Rollup(nil, r.startTs)
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		for _, kv := range kvs {
-			version := atomic.AddUint64(&counter, 1)
-			kv.Version = version
-		}
-
-		streamTxn := txns[threadId]
-		_, err = r.fn(pk.Uid, l, streamTxn)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(streamTxn.cache.plists) < 10000 {
+			txns[threadId] = NewTxn(r.startTs)
 			return &bpb.KVList{Kv: kvs}, nil
 		}
 
-		// Convert data into deltas.
-		streamTxn.Update()
-		// txn.cache.Lock() is not required because we are the only one making changes to txn.
-		for key, data := range streamTxn.cache.deltas {
-			version := atomic.AddUint64(&counter, 1)
-			kv := bpb.KV{
-				Key:      []byte(key),
-				Value:    data,
-				UserMeta: []byte{BitDeltaPosting},
-				Version:  version,
+		stream.KeyToListWithThreadId = func(key []byte, itr *badger.Iterator, threadId int) (*bpb.KVList, error) {
+			// We should return quickly if the context is no longer valid.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
 			}
-			kvs = append(kvs, &kv)
+
+			pk, err := x.Parse(key)
+			if err != nil {
+				return nil, errors.Wrapf(err, "could not parse key %s", hex.Dump(key))
+			}
+
+			l, err := ReadPostingList(key, itr)
+			if err != nil {
+				return nil, errors.Wrapf(err, "error reading posting list from disk")
+			}
+
+			kvs := make([]*bpb.KV, 0)
+			if pred.Count {
+				kvs, err = l.Rollup(nil, r.startTs)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			for _, kv := range kvs {
+				version := atomic.AddUint64(&counter, 1)
+				kv.Version = version
+			}
+
+			streamTxn := txns[threadId]
+			_, err = r.fn(pk.Uid, l, streamTxn)
+			if err != nil {
+				return nil, err
+			}
+
+			if len(streamTxn.cache.plists) < 10000 {
+				return &bpb.KVList{Kv: kvs}, nil
+			}
+
+			// Convert data into deltas.
+			streamTxn.Update()
+			// txn.cache.Lock() is not required because we are the only one making changes to txn.
+			for key, data := range streamTxn.cache.deltas {
+				version := atomic.AddUint64(&counter, 1)
+				kv := bpb.KV{
+					Key:      []byte(key),
+					Value:    data,
+					UserMeta: []byte{BitDeltaPosting},
+					Version:  version,
+				}
+				kvs = append(kvs, &kv)
+			}
+
+			txns[threadId] = NewTxn(r.startTs)
+			return &bpb.KVList{Kv: kvs}, nil
 		}
 
-		txns[threadId] = NewTxn(r.startTs)
-		return &bpb.KVList{Kv: kvs}, nil
-	}
+		stream.Send = func(buf *z.Buffer) error {
+			t1 := time.Now()
+			defer func() {
+				glog.V(1).Infof("Rebuilding index for predicate %s: writing index to badger %d bytes took %v",
+					r.attr, len(buf.Bytes()), time.Since(t1))
+			}()
+			if err := tmpWriter.Write(buf); err != nil {
+				return errors.Wrap(err, "error setting entries in temp badger")
+			}
 
-	stream.Send = func(buf *z.Buffer) error {
-		t1 := time.Now()
-		defer func() {
-			glog.V(1).Infof("Rebuilding index for predicate %s: writing index to badger %d bytes took %v",
-				r.attr, len(buf.Bytes()), time.Since(t1))
-		}()
-		if err := tmpWriter.Write(buf); err != nil {
-			return errors.Wrap(err, "error setting entries in temp badger")
+			return nil
 		}
 
-		return nil
+		return stream.Orchestrate(ctx)
 	}
 
 	start := time.Now()
-	if err := stream.Orchestrate(ctx); err != nil {
-		return err
+	for _, prefix := range r.prefixes {
+		if err := runStream(prefix); err != nil {
+			return err
+		}
 	}
 	if err := tmpWriter.Flush(); err != nil {
 		return err
@@ -1189,6 +1209,93 @@ type IndexRebuild struct {
 	StartTs       uint64
 	OldSchema     *pb.SchemaUpdate
 	CurrentSchema *pb.SchemaUpdate
+	// PartitionAttrs is Attr in each partition namespace that holds data for it.
+	// A partition shares the root namespace's schema, so a change to an index
+	// there has to be applied to the partition's keys as well. The key puts the
+	// namespace ahead of the predicate, so each is a separate key range.
+	PartitionAttrs []string
+}
+
+// attrs returns the predicate in every namespace this rebuild covers.
+func (rb *IndexRebuild) attrs() []string {
+	return append([]string{rb.Attr}, rb.PartitionAttrs...)
+}
+
+// forAttr returns a copy of rb scoped to one of its attrs.
+func (rb *IndexRebuild) forAttr(attr string) *IndexRebuild {
+	out := *rb
+	out.Attr = attr
+	out.PartitionAttrs = nil
+	return &out
+}
+
+// prefixes returns the key range picked by fn for every namespace rb covers.
+func (rb *IndexRebuild) prefixes(fn func(pk x.ParsedKey) []byte) [][]byte {
+	attrs := rb.attrs()
+	out := make([][]byte, 0, len(attrs))
+	for _, attr := range attrs {
+		out = append(out, fn(x.ParsedKey{Attr: attr}))
+	}
+	return out
+}
+
+// attrOf returns the namespaced predicate that pl belongs to. A rebuild reads
+// the same predicate from several namespaces, so an edge derived from a list
+// must carry that list's namespace or the index entry would be written into
+// the root namespace.
+func (rb *IndexRebuild) attrOf(pl *List) string {
+	if len(rb.PartitionAttrs) == 0 {
+		return rb.Attr
+	}
+	pk, err := x.Parse(pl.key)
+	if err != nil {
+		return rb.Attr
+	}
+	return pk.Attr
+}
+
+// PartitionAttrsWithData returns attr in each partition namespace that has at
+// least one data key for it at readTs. It seeks from namespace to namespace, so
+// it costs one seek per namespace present in the store, not a scan.
+func PartitionAttrsWithData(attr string, readTs uint64) []string {
+	if !x.PartitionNamespacesEnabled() || x.ParseNamespace(attr) != x.RootNamespace {
+		return nil
+	}
+	bare := x.ParseAttr(attr)
+	txn := pstore.NewTransactionAt(readTs, false)
+	defer txn.Discard()
+	iopt := badger.DefaultIteratorOptions
+	iopt.PrefetchValues = false
+	itr := txn.NewIterator(iopt)
+	defer itr.Close()
+
+	var out []string
+	ns := x.RootNamespace + 1
+	for {
+		nsAttr := x.NamespaceAttr(ns, bare)
+		prefix := x.PredicatePrefix(nsAttr)
+		itr.Seek(prefix)
+		if !itr.Valid() {
+			break
+		}
+		key := itr.Item().Key()
+		if len(key) < 9 || key[0] != x.DefaultPrefix {
+			break
+		}
+		if bytes.HasPrefix(key, prefix) {
+			out = append(out, nsAttr)
+			ns++
+		} else if found := binary.BigEndian.Uint64(key[1:9]); found > ns {
+			// Nothing for this predicate before namespace found; look there next.
+			ns = found
+		} else {
+			ns++
+		}
+		if ns == 0 {
+			break
+		}
+	}
+	return out
 }
 
 type indexOp int
@@ -1231,21 +1338,56 @@ func (rb *IndexRebuild) GetQuerySchema() *pb.SchemaUpdate {
 	return &querySchema
 }
 
-// DropIndexes drops the indexes that need to be rebuilt.
-func (rb *IndexRebuild) DropIndexes(ctx context.Context) error {
+// dropPrefixes returns the key prefixes of the indexes of rb.Attr that need to
+// be deleted or rebuilt.
+func (rb *IndexRebuild) dropPrefixes(ctx context.Context) ([][]byte, error) {
 	rebuildInfo := rb.needsTokIndexRebuild()
 	prefixes, err := rebuildInfo.prefixesForTokIndexes()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	vectorIndexPrefixes, err := rebuildInfo.prefixesForVectorIndexes()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	prefixes = append(prefixes, vectorIndexPrefixes...)
 	prefixes = append(prefixes, prefixesToDropReverseEdges(ctx, rb)...)
 	prefixes = append(prefixes, prefixesToDropCountIndex(ctx, rb)...)
 	prefixes = append(prefixes, prefixesToDropVectorIndexEdges(ctx, rb)...)
+	return prefixes, nil
+}
+
+// DropIndexes drops the indexes that need to be rebuilt.
+func (rb *IndexRebuild) DropIndexes(ctx context.Context) error {
+	prefixes, err := rb.dropPrefixes(ctx)
+	if err != nil {
+		return err
+	}
+	if len(rb.PartitionAttrs) > 0 {
+		// Badger checks every key of every table it rewrites against every prefix,
+		// and a partition's prefixes are spread over the whole key space. Only ask
+		// it to drop the ones that hold something; adding a new index holds none.
+		txn := pstore.NewTransactionAt(rb.StartTs, false)
+		iopt := badger.DefaultIteratorOptions
+		iopt.PrefetchValues = false
+		iopt.AllVersions = true
+		itr := txn.NewIterator(iopt)
+		for _, attr := range rb.PartitionAttrs {
+			sub, err := rb.forAttr(attr).dropPrefixes(ctx)
+			if err != nil {
+				itr.Close()
+				txn.Discard()
+				return err
+			}
+			for _, prefix := range sub {
+				if itr.Seek(prefix); itr.ValidForPrefix(prefix) {
+					prefixes = append(prefixes, prefix)
+				}
+			}
+		}
+		itr.Close()
+		txn.Discard()
+	}
 	if len(prefixes) > 0 {
 		// This trace message now gets logged only if there are any prefixes to
 		// to be deleted
@@ -1516,10 +1658,9 @@ func rebuildTokIndex(ctx context.Context, rb *IndexRebuild) error {
 
 	runForVectors := (len(factorySpecs) != 0)
 
-	pk := x.ParsedKey{Attr: rb.Attr}
-	builder := rebuilder{attr: rb.Attr, prefix: pk.DataPrefix(), startTs: rb.StartTs}
+	builder := rebuilder{attr: rb.Attr, prefixes: rb.prefixes(x.ParsedKey.DataPrefix), startTs: rb.StartTs}
 	builder.fn = func(uid uint64, pl *List, txn *Txn) ([]*pb.DirectedEdge, error) {
-		edge := pb.DirectedEdge{Attr: rb.Attr, Entity: uid}
+		edge := pb.DirectedEdge{Attr: rb.attrOf(pl), Entity: uid}
 		edges := []*pb.DirectedEdge{}
 
 		processAddIndexMutation := func(edge *pb.DirectedEdge, val types.Val) ([]*pb.DirectedEdge, error) {
@@ -1694,7 +1835,7 @@ func rebuildCountIndex(ctx context.Context, rb *IndexRebuild) error {
 	fn := func(uid uint64, pl *List, txn *Txn) ([]*pb.DirectedEdge, error) {
 		t := &pb.DirectedEdge{
 			ValueId: uid,
-			Attr:    rb.Attr,
+			Attr:    rb.attrOf(pl),
 			Op:      pb.DirectedEdge_SET,
 		}
 		var sz int
@@ -1732,8 +1873,7 @@ func rebuildCountIndex(ctx context.Context, rb *IndexRebuild) error {
 	}
 
 	// Create the forward index.
-	pk := x.ParsedKey{Attr: rb.Attr}
-	builder := rebuilder{attr: rb.Attr, prefix: pk.DataPrefix(), startTs: rb.StartTs}
+	builder := rebuilder{attr: rb.Attr, prefixes: rb.prefixes(x.ParsedKey.DataPrefix), startTs: rb.StartTs}
 	builder.fn = fn
 	if err := builder.Run(ctx); err != nil {
 		return err
@@ -1744,7 +1884,7 @@ func rebuildCountIndex(ctx context.Context, rb *IndexRebuild) error {
 	// to call builder.Run even if that's not the case as the reverse prefix
 	// will be empty.
 	reverse = true
-	builder = rebuilder{attr: rb.Attr, prefix: pk.ReversePrefix(), startTs: rb.StartTs}
+	builder = rebuilder{attr: rb.Attr, prefixes: rb.prefixes(x.ParsedKey.ReversePrefix), startTs: rb.StartTs}
 	builder.fn = fn
 	return builder.Run(ctx)
 }
@@ -1873,10 +2013,9 @@ func rebuildReverseEdges(ctx context.Context, rb *IndexRebuild) error {
 	}
 
 	glog.Infof("Rebuilding reverse index for %s", rb.Attr)
-	pk := x.ParsedKey{Attr: rb.Attr}
-	builder := rebuilder{attr: rb.Attr, prefix: pk.DataPrefix(), startTs: rb.StartTs}
+	builder := rebuilder{attr: rb.Attr, prefixes: rb.prefixes(x.ParsedKey.DataPrefix), startTs: rb.StartTs}
 	builder.fn = func(uid uint64, pl *List, txn *Txn) ([]*pb.DirectedEdge, error) {
-		edge := pb.DirectedEdge{Attr: rb.Attr, Entity: uid}
+		edge := pb.DirectedEdge{Attr: rb.attrOf(pl), Entity: uid}
 		return []*pb.DirectedEdge{}, pl.Iterate(txn.StartTs, 0, func(pp *pb.Posting) error {
 			puid := pp.Uid
 			// Add reverse entries based on p.
@@ -1951,9 +2090,9 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 	isScalarToStringVector := !rb.OldSchema.List && !rb.CurrentSchema.List &&
 		rb.CurrentSchema.ValueType == pb.Posting_VSTRING
 
-	pk := x.ParsedKey{Attr: rb.Attr}
-	builder := rebuilder{attr: rb.Attr, prefix: pk.DataPrefix(), startTs: rb.StartTs}
+	builder := rebuilder{attr: rb.Attr, prefixes: rb.prefixes(x.ParsedKey.DataPrefix), startTs: rb.StartTs}
 	builder.fn = func(uid uint64, pl *List, txn *Txn) ([]*pb.DirectedEdge, error) {
+		attr := rb.attrOf(pl)
 		if isListToStringVector {
 			var oldPosts []*pb.Posting
 			var elems []string
@@ -1984,7 +2123,7 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 			for _, oldPost := range oldPosts {
 				delEdge := &pb.DirectedEdge{
 					ValueId: oldPost.Uid,
-					Attr:    rb.Attr,
+					Attr:    attr,
 					Op:      pb.DirectedEdge_DEL,
 				}
 				if err := pl.addMutation(ctx, txn, delEdge); err != nil {
@@ -1992,7 +2131,7 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 				}
 			}
 			newEdge := &pb.DirectedEdge{
-				Attr:      rb.Attr,
+				Attr:      attr,
 				Value:     types.StringArrayAsBytes(elems),
 				ValueType: pb.Posting_VSTRING,
 				Op:        pb.DirectedEdge_SET,
@@ -2031,7 +2170,7 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 			pl = txn.cache.SetIfAbsent(string(pl.key), pl)
 			delEdge := &pb.DirectedEdge{
 				ValueId: mpost.Uid,
-				Attr:    rb.Attr,
+				Attr:    attr,
 				Op:      pb.DirectedEdge_DEL,
 			}
 			if err := pl.addMutation(ctx, txn, delEdge); err != nil {
@@ -2039,7 +2178,7 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 			}
 			for _, elem := range elems {
 				newEdge := &pb.DirectedEdge{
-					Attr:      rb.Attr,
+					Attr:      attr,
 					Value:     []byte(elem),
 					ValueType: pb.Posting_STRING,
 					Op:        pb.DirectedEdge_SET,
@@ -2067,14 +2206,14 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 			pl = txn.cache.SetIfAbsent(string(pl.key), pl)
 			delEdge := &pb.DirectedEdge{
 				ValueId: mpost.Uid,
-				Attr:    rb.Attr,
+				Attr:    attr,
 				Op:      pb.DirectedEdge_DEL,
 			}
 			if err := pl.addMutation(ctx, txn, delEdge); err != nil {
 				return []*pb.DirectedEdge{}, err
 			}
 			newEdge := &pb.DirectedEdge{
-				Attr:      rb.Attr,
+				Attr:      attr,
 				Value:     b.Value.([]byte),
 				ValueType: pb.Posting_VSTRING,
 				Op:        pb.DirectedEdge_SET,
@@ -2086,7 +2225,7 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 		// Delete the old edge corresponding to ValueId math.MaxUint64
 		t := &pb.DirectedEdge{
 			ValueId: mpost.Uid,
-			Attr:    rb.Attr,
+			Attr:    attr,
 			Op:      pb.DirectedEdge_DEL,
 		}
 
@@ -2098,7 +2237,7 @@ func rebuildListType(ctx context.Context, rb *IndexRebuild) error {
 		}
 		// Add the new edge with the fingerprinted value id.
 		newEdge := &pb.DirectedEdge{
-			Attr:      rb.Attr,
+			Attr:      attr,
 			Value:     mpost.Value,
 			ValueType: mpost.ValType,
 			Op:        pb.DirectedEdge_SET,

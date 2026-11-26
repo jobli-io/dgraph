@@ -65,6 +65,10 @@ type ManifestBase struct {
 	Encrypted bool `json:"encrypted"`
 	// Compression records the codec used to compress backup data files.
 	Compression string `json:"compression"`
+	// PartitionNamespaces records that the cluster ran with partition namespaces:
+	// Groups lists only the root namespace's predicates, and the data of every
+	// other namespace is filed under the same predicate of the root namespace.
+	PartitionNamespaces bool `json:"partition_namespaces,omitempty"`
 }
 
 // ValidReadTs returns the effective read timestamp for this backup entry.
@@ -399,6 +403,9 @@ func ProcessBackupRequest(ctx context.Context, req *pb.BackupRequest) error {
 			Version:     x.ManifestVersion,
 			Path:        dir,
 			Compression: "snappy",
+			// A partition's keys are in this backup under the root namespace's
+			// predicates; restore needs to know to keep them.
+			PartitionNamespaces: x.PartitionNamespacesEnabled(),
 		},
 		Groups:         predMap,
 		DropOperations: dropOperations,
@@ -601,7 +608,9 @@ func (pr *BackupProcessor) WriteBackup(ctx context.Context) (*pb.BackupResponse,
 		if parsedKey.IsSchema() || parsedKey.IsType() {
 			return false
 		}
-		_, ok := predMap[parsedKey.Attr]
+		// The request lists Zero's tablets, and a partition has none of its own:
+		// its keys belong with the root namespace's tablet for the predicate.
+		_, ok := predMap[x.TemplateAttr(parsedKey.Attr)]
 		return ok
 	}
 

@@ -52,6 +52,9 @@ func verifyRequest(h UriHandler, uri *url.URL, req *pb.RestoreRequest, currentGr
 	}
 
 	lastManifest := manifests[0]
+	if err := checkPartitionBackup(lastManifest); err != nil {
+		return err
+	}
 	if len(currentGroups) != len(lastManifest.Groups) {
 		return errors.Errorf("groups in cluster and latest backup manifest differ")
 	}
@@ -60,6 +63,18 @@ func verifyRequest(h UriHandler, uri *url.URL, req *pb.RestoreRequest, currentGr
 		if _, ok := lastManifest.Groups[group]; !ok {
 			return errors.Errorf("groups in cluster and latest backup manifest differ")
 		}
+	}
+	return nil
+}
+
+// checkPartitionBackup refuses a backup taken with partition namespaces on a
+// cluster that runs without them. Such an alpha would report the partitions'
+// tables to Zero as predicates Zero does not list, and Zero would have them
+// deleted.
+func checkPartitionBackup(m *Manifest) error {
+	if m.PartitionNamespaces && !x.PartitionNamespacesEnabled() {
+		return errors.Errorf("backup was taken with partition namespaces on; " +
+			"this cluster must run with partition-namespaces=true to restore it")
 	}
 	return nil
 }
@@ -266,6 +281,9 @@ func handleRestoreProposal(ctx context.Context, req *pb.RestoreRequest, pidx uin
 	}
 
 	lastManifest := manifests[0]
+	if err := checkPartitionBackup(lastManifest); err != nil {
+		return err
+	}
 	restorePreds, ok := lastManifest.Groups[req.GroupId]
 	if !ok {
 		return errors.Errorf("backup manifest does not contain information for group ID %d", req.GroupId)

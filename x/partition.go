@@ -81,7 +81,18 @@ func IsPartitionAttr(attr string) bool {
 // It must never be used to build a storage key: data keys keep their own
 // namespace.
 func TemplateAttr(attr string) string {
-	if !partitionNamespaces.Load() || strings.HasPrefix(attr, rootNsPrefix) {
+	if !partitionNamespaces.Load() {
+		return attr
+	}
+	return RootAttr(attr)
+}
+
+// RootAttr maps a namespaced attribute to the same attribute in the root
+// namespace, whether or not partition namespaces are on in this process. It is
+// for code that learns from its input that namespaces are partitions, such as a
+// restore reading a backup taken from a partitioned cluster.
+func RootAttr(attr string) string {
+	if strings.HasPrefix(attr, rootNsPrefix) {
 		return attr
 	}
 	i := strings.Index(attr, NsSeparator)

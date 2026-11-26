@@ -102,11 +102,14 @@ func (br *backupReader) WithCompression(comp string) *backupReader {
 }
 
 type loadBackupInput struct {
-	restoreTs   uint64
-	preds       predicateSet
-	dropNs      map[uint64]struct{}
-	version     int
-	keepSchema  bool
+	restoreTs  uint64
+	preds      predicateSet
+	dropNs     map[uint64]struct{}
+	version    int
+	keepSchema bool
+	// partitions is set when the backup came from a cluster with partition
+	// namespaces: preds then lists only root-namespace predicates.
+	partitions  bool
 	compression string
 
 	fromNamespace           uint64
@@ -346,7 +349,11 @@ func (m *mapper) processReqCh(ctx context.Context) error {
 		if !in.keepSchema && (parsedKey.IsSchema() || parsedKey.IsType()) {
 			return nil
 		}
-		if _, ok := in.preds[parsedKey.Attr]; !parsedKey.IsType() && !ok {
+		predInBackup := parsedKey.Attr
+		if in.partitions {
+			predInBackup = x.RootAttr(predInBackup)
+		}
+		if _, ok := in.preds[predInBackup]; !parsedKey.IsType() && !ok {
 			return nil
 		}
 
@@ -844,6 +851,7 @@ func RunMapper(req *pb.RestoreRequest, mapDir string) (*mapResult, error) {
 				restoreTs: req.RestoreTs,
 				// Only map the schema keys corresponding to the latest backup.
 				keepSchema:              i == 0,
+				partitions:              manifest.PartitionNamespaces,
 				compression:             manifest.Compression,
 				fromNamespace:           req.FromNamespace,
 				isNamespaceAwareRestore: req.IsNamespaceAwareRestore,

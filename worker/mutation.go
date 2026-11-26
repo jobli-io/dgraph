@@ -233,6 +233,11 @@ func runSchemaMutation(ctx context.Context, updates []*pb.SchemaUpdate, startTs 
 			OldSchema:     &old,
 			CurrentSchema: su,
 		}
+		if ok {
+			// Partitions keep their data for this predicate under their own
+			// namespace, and their indexes have to follow the template's schema.
+			rebuild.PartitionAttrs = posting.PartitionAttrsWithData(su.Predicate, startTs)
+		}
 		shouldRebuild := ok && rebuild.NeedIndexRebuild()
 
 		// Start opIndexing task only if schema update needs to build the indexes.
