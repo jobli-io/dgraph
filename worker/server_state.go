@@ -43,7 +43,8 @@ const (
 		`lambda-url=;`
 	CacheDefaults        = `size-mb=4096; percentage=40,40,20; remove-on-update=false`
 	FeatureFlagsDefaults = `normalize-compatibility-mode=; enable-detailed-metrics=false; log-slow-query-threshold=0; partition-namespaces=false; ` +
-		`partition-resolver=header; partition-claim=ws; partition-dir-ttl=30s`
+		`partition-resolver=header; partition-claim=ws; partition-dir-ttl=30s; ` +
+		`partition-fast-path=false; partition-grants-ttl=5s`
 )
 
 // ServerState holds the state of the Dgraph server.

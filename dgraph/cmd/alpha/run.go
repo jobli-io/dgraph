@@ -40,6 +40,7 @@ import (
 	"github.com/dgraph-io/dgraph/v25/dgraph/cmd/mcp"
 	"github.com/dgraph-io/dgraph/v25/edgraph"
 	"github.com/dgraph-io/dgraph/v25/graphql/admin"
+	"github.com/dgraph-io/dgraph/v25/graphql/resolve"
 	"github.com/dgraph-io/dgraph/v25/posting"
 	"github.com/dgraph-io/dgraph/v25/schema"
 	"github.com/dgraph-io/dgraph/v25/tok"
@@ -291,6 +292,10 @@ they form a Raft group and provide synchronous replication.
 			"looked up in the WorkspaceEntry directory of the root namespace.").
 		Flag("partition-claim", "SPIKE: the JWT claim that names the workspace.").
 		Flag("partition-dir-ttl", "SPIKE: how long a workspace directory entry is cached.").
+		Flag("partition-fast-path", "SPIKE: in a partition, ask the Workspace once whether the "+
+			"caller passes its rule, and leave the cascades that end there out of the query.").
+		Flag("partition-grants-ttl", "SPIKE: how long that answer is believed. A revoked grant "+
+			"keeps working for this long. 0 asks on every request.").
 		String())
 
 	RegisterFlags(flag)
@@ -844,6 +849,10 @@ func run() {
 				"unauthenticated %s header", x.PartitionNsHeader)
 		default:
 			glog.Fatalf("unknown partition-resolver %q: use header or jwt", resolver)
+		}
+		if featureFlagsConf.GetBool("partition-fast-path") {
+			resolve.EnablePartitionGrants(featureFlagsConf.GetDuration("partition-grants-ttl"))
+			glog.Infof("SPIKE: workspace-level grants are on for partition namespaces")
 		}
 	}
 

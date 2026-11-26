@@ -17,13 +17,24 @@ source, as a real member of a real workspace, against the dev backup:
   no rules     the partition again with every auth rule removed: not a design,
                only the floor that shows what the remaining rules cost
 
+The fastpath stage then turns on partition-fast-path, which asks the Workspace
+once whether the caller passes its rule and leaves the cascades that end there
+out of the query. Schema and rules are the restored ones. It runs three callers:
+
+  owner        the member above, who owns the workspace
+  reader       a user made for the test, bound to the viewer role on the Workspace
+  group        a user made for the test, bound to the viewer role on one Group
+               only: nothing is settled for them, so the rules run as written
+
+and it names every record the fast path returns that the rules as written do not.
+
 All run on one cluster and one data directory, from the same binary. The
 partition is filled from an RDF export of the root namespace, keeping every
 UID, so the same query must return the same bytes in each arm. Where it does
 not, the script names the records that differ and why.
 
 usage: SPIKE_SUB=<a member's userId> SPIKE_EMAIL=<their email> \
-       proof_real.py [restore] [today] [extract] [load] [relayout] [partition] [report]
+       proof_real.py [restore] [today] [extract] [load] [relayout] [partition] [fastpath] [report]
        With no stage named, all of them run in that order.
        SPIKE_WS names the workspace (default dc98a028).
        SPIKE_ARMS="ws_rules_off,foreign" reruns only those parts of the partition stage.
@@ -63,6 +74,10 @@ SECRET, HEADER, AUDIENCE = "mysecret", "X-Auth-Token", "urn://api.jobli.io/graph
 OFF = "partition-namespaces=false"
 ON = "partition-namespaces=true; partition-resolver=jwt; partition-claim=ws; partition-dir-ttl=30s"
 HEADER_MODE = "partition-namespaces=true; partition-resolver=header"
+# The fast path, believing what the Workspace said for five seconds, and asking it
+# again on every request.
+FAST = ON + "; partition-fast-path=true; partition-grants-ttl=5s"
+FAST_ASKING = ON + "; partition-fast-path=true; partition-grants-ttl=0"
 ALPHA_ARGS = ["--cache", "size-mb=1024"]
 # Jobli's schema has @lambda fields and validation expressions that call a lambda,
 # and the alpha tries those out when it loads the schema. A stub answers them. None
@@ -215,7 +230,7 @@ def pct(values, p):
     return values[min(len(values) - 1, int(len(values) * p))]
 
 
-def measure(c, tok, arm, params):
+def measure(c, tok, arm, params, under_load=True):
     """Runs the suite one request at a time, then one query under concurrent load."""
     out = load(arm, {}) if ONLY else {}
     os.makedirs(os.path.join(OUT, arm), exist_ok=True)
@@ -247,7 +262,7 @@ def measure(c, tok, arm, params):
 
     # Throughput: the list page, the request the app sends most, from several clients at once.
     label, query, variables = suite(params)[0]
-    if not ONLY and "error" not in out.get(label, {"error": 1}):
+    if under_load and not ONLY and "error" not in out.get(label, {"error": 1}):
         end = time.time() + LOAD_S
 
         def client(_):
@@ -794,6 +809,304 @@ def stage_partition(t):
             set_schema(c, original)
 
 
+# ---------------------------------------------------------------- the fast path
+
+CALLERS = {"reader": "spike-workspace-reader", "group": "spike-group-reader"}
+
+
+def edges(v):
+    return [x["uid"] for x in (v if isinstance(v, list) else [v] if v else [])]
+
+
+def remove_callers(c):
+    """Takes the test users and their bindings out again. Needs the header resolver."""
+    rows = c.rows("""{ q(func: eq(User.userId, %s)) @filter(type(User)) { uid b: User.hasIAMBinding { uid
+        r: IAMBinding.forRole { uid } x: IAMBinding.forResource { uid } w: WorkspaceMember.inWorkspace { uid } } } }"""
+                  % json.dumps(sorted(CALLERS.values())), ns=1)
+    rdf = []
+    for u in rows:
+        for b in u.get("b", []):
+            rdf += ["<%s> <IAMRole.hasBinding> <%s> ." % (r, b["uid"]) for r in edges(b.get("r"))]
+            rdf += ["<%s> <IAMResource.hasIAMBinding> <%s> ." % (x, b["uid"]) for x in edges(b.get("x"))]
+            rdf += ["<%s> <Workspace.hasIAMRoleBinding> <%s> ." % (w, b["uid"]) for w in edges(b.get("w"))]
+            rdf.append("<%s> * * ." % b["uid"])
+        rdf.append("<%s> * * ." % u["uid"])
+    if rdf:
+        c.mutate("\n".join(rdf), ns=1, delete=True)
+    return len(rows)
+
+
+def add_callers(c, ws_id):
+    """Two users nobody had before, each with one binding to the workspace's viewer
+    role: one on the Workspace, one on a single Group. Needs the header resolver."""
+    remove_callers(c)
+    roles = [r for r in c.rows("{ q(func: type(IAMRole)) { uid p: IAMRole.permission } }", ns=1) if r.get("p") == ["READ"]]
+    groups = [g for g in c.rows("{ q(func: type(Group)) @filter(NOT eq(Recordable.deleted, true)) { uid n: Group.name "
+                                "jobs: count(Group.hasJob) } }", ns=1) if g.get("jobs")]
+    like = c.rows('{ q(func: uid(%s)) { u: Ownable.ownedBy { t: dgraph.type } '
+                  'b: Workspace.hasIAMRoleBinding (first: 1) { t: dgraph.type } } }' % ws_id, ns=1)
+    if not (roles and groups and like):
+        raise SystemExit("the workspace has no READ role, no group with jobs, or no owner to model the test users on")
+    group = min(groups, key=lambda g: g["jobs"])
+    user_types, binding_types = edges_types(like[0]["u"]), edges_types(like[0]["b"])
+    rdf = []
+    for who, target in (("reader", ws_id), ("group", group["uid"])):
+        u, b = "_:u_" + who, "_:b_" + who
+        rdf += ['%s <dgraph.type> "%s" .' % (u, t) for t in user_types]
+        rdf += ['%s <dgraph.type> "%s" .' % (b, t) for t in binding_types]
+        rdf += ['%s <User.userId> "%s" .' % (u, CALLERS[who]), '%s <User.status> "ACTIVE" .' % u,
+                '%s <User.displayName> "Spike %s" .' % (u, who), '%s <User.email> "%s@spike.invalid" .' % (u, who),
+                '%s <Identifiable.sId> "jobli::user::%s" .' % (u, CALLERS[who]),
+                '%s <Recordable.deleted> "false"^^<xs:boolean> .' % u,
+                "%s <WorkspaceMember.inWorkspace> <%s> ." % (u, ws_id), "%s <User.hasIAMBinding> %s ." % (u, b),
+                "%s <IAMBinding.forUserMember> %s ." % (b, u), "%s <IAMBinding.forRole> <%s> ." % (b, roles[0]["uid"]),
+                "%s <IAMBinding.forResource> <%s> ." % (b, target), "%s <WorkspaceMember.inWorkspace> <%s> ." % (b, ws_id),
+                "<%s> <IAMRole.hasBinding> %s ." % (roles[0]["uid"], b), "<%s> <IAMResource.hasIAMBinding> %s ." % (target, b),
+                "<%s> <Workspace.hasIAMRoleBinding> %s ." % (ws_id, b)]
+    c.mutate("\n".join(rdf), ns=1)
+    return group
+
+
+def edges_types(v):
+    v = v[0] if isinstance(v, list) else v
+    return v["t"]
+
+
+# Types the app lists, and the edge each one's rules walk towards the workspace.
+# The schema declares both edges non-null.
+ANCHOR = {"User": "WorkspaceMember.inWorkspace"}
+LISTED = ["Candidate", "Job", "Application", "Company", "Contact", "JobAd", "Placement", "Note", "Attachment",
+          "Group", "User"]
+
+
+def visible(c, tok):
+    out = {}
+    for typ in LISTED:
+        r = gql(c, tok, "query { q: query%s(filter: {deleted: false}, first: 10000000) { id } }" % typ, {})
+        out[typ] = {x["id"] for x in (r.get("data") or {}).get("q") or []}
+    return out
+
+
+def unanchored(t, c, who, slow, fast):
+    """Every record the fast path returns and the rules as written do not: is it one
+    that lacks the edge its type must have? Needs the header resolver."""
+    found = {}
+    for typ in LISTED:
+        extra, lost = sorted(fast[typ] - slow[typ]), sorted(slow[typ] - fast[typ])
+        edge = ANCHOR.get(typ, "Groupable.inGroup")
+        without = set()
+        if extra:
+            without = {r["uid"] for r in c.rows("{ q(func: uid(%s)) @filter(NOT has(%s)) { uid } }"
+                                               % (", ".join(extra), edge), ns=1)}
+        found[typ] = {"rules": len(slow[typ]), "fast": len(fast[typ]), "extra": len(extra), "lost": len(lost),
+                      "edge": edge, "explained": len(without)}
+        print("  %-12s rules as written %7d   fast path %7d   extra %4d, of which %4d have no %s" % (
+            typ, len(slow[typ]), len(fast[typ]), len(extra), len(without), edge), flush=True)
+    t.check("%s: the fast path hides nothing the rules as written show" % who,
+            all(v["lost"] == 0 for v in found.values()), {k: v["lost"] for k, v in found.items() if v["lost"]})
+    t.check("%s: the fast path shows %d records the rules as written hide, and every one of them lacks the edge "
+            "the schema says it must have" % (who, sum(v["extra"] for v in found.values())),
+            all(v["extra"] == v["explained"] for v in found.values()),
+            {k: (v["extra"], v["edge"]) for k, v in found.items() if v["extra"]})
+    return found
+
+
+def same_answers(res, base):
+    asked = [k for k in res if k[0] != "_"]
+    return asked, [k for k in asked if res[k].get("sha") != (base.get(k) or {}).get("sha")]
+
+
+def stage_fastpath(t):
+    params = load("params")
+    original = open(os.path.join(OUT, "schema_today.graphql")).read()
+    ws_off, _ = schema_without_workspace_rules(original)
+    wanted = [a for a in os.environ.get("SPIKE_ARMS", "").split(",") if a]
+    counted = {"Job list, page 1, with count": "Job", "Application list, page 1, with count": "Application"}
+
+    def run(c, arm, title, tok, schema, flags, under_load):
+        if wanted and arm not in wanted:
+            return load(arm, {})
+        c.flags = flags
+        restart(c)
+        if get_schema(c) != schema:
+            r = set_schema(c, schema)
+            if r.get("errors"):
+                t.check("%s: schema accepted" % arm, False, r["errors"][0].get("message", "")[:300])
+                return {}
+        print(title, flush=True)
+        res = measure(c, tok, arm, params, under_load)
+        if flags == FAST_ASKING:
+            # The alpha logs each question it puts to the Workspace.
+            log = os.path.join(ROOT, "run", "rj", "alpha0.log")
+            res["_asks"] = {}
+            for label, query, variables in suite(params):
+                before = os.path.getsize(log)
+                gql(c, tok, query, variables)
+                time.sleep(0.2)
+                with open(log, "rb") as f:
+                    f.seek(before)
+                    res["_asks"][label] = f.read().count(b"partition grants: asked")
+        restart(c, debug=True)
+        res["_compiled"] = compiled(c, tok, arm, params)
+        save(arm, res)
+        return res
+
+    def differences(arm, res, base, base_name, found):
+        """Answers must match the base arm, except a count the unanchored records explain."""
+        asked, differ = same_answers(res, base)
+        ok = True
+        for k in differ:
+            typ = counted.get(k)
+            a = json.load(open(os.path.join(OUT, arm, re.sub(r"\W+", "_", k) + ".json")))
+            b = json.load(open(os.path.join(OUT, base_name, re.sub(r"\W+", "_", k) + ".json")))
+            try:
+                gap = a["data"]["count"]["count"] - b["data"]["count"]["count"]
+                a["data"]["count"]["count"] = b["data"]["count"]["count"]
+            except (KeyError, TypeError):
+                gap = None
+            ok = ok and typ is not None and found and gap == found[typ]["extra"] and a == b
+        t.check("%s: %d of %d queries return exactly what %s returned; the others differ only in a count, by the "
+                "unanchored records" % (arm, len(asked) - len(differ), len(asked), base_name), bool(asked) and ok, differ)
+
+    with cluster(ON) as c:
+        owner = token()
+        try:
+            c.flags = HEADER_MODE
+            restart(c)
+            group = add_callers(c, params["ws_id"])
+            reader, grouped = token(sub=CALLERS["reader"], email="reader@spike.invalid"), \
+                token(sub=CALLERS["group"], email="group@spike.invalid")
+            print("test users: one bound to the viewer role on the Workspace, one on the group %r (%d jobs)" % (
+                group["n"], group["jobs"]), flush=True)
+
+            # Which records each caller sees, with the rules as written and on the fast path.
+            seen = {}
+            for flags in (ON, FAST):
+                c.flags = flags
+                restart(c)
+                for who, tok in (("owner", owner), ("reader", reader), ("group", grouped)):
+                    seen[who, flags] = visible(c, tok)
+            c.flags = HEADER_MODE
+            restart(c)
+            found = {}
+            for who in ("owner", "reader"):
+                print("%s: records seen" % who, flush=True)
+                found[who] = unanchored(t, c, who, seen[who, ON], seen[who, FAST])
+            g_slow, g_fast = seen["group", ON], seen["group", FAST]
+            t.check("group: sees the same records either way, %d of the owner's %d jobs and %d of the owner's %d "
+                    "candidates" % (len(g_fast["Job"]), len(seen["owner", ON]["Job"]), len(g_fast["Candidate"]),
+                                    len(seen["owner", ON]["Candidate"])),
+                    g_slow == g_fast and 0 < len(g_fast["Job"]) < len(seen["owner", ON]["Job"])
+                    and g_fast["Job"] <= seen["owner", ON]["Job"])
+            save("fast_seen", {"found": found, "group": {k: len(v) for k, v in g_fast.items()},
+                               "group_name": group["n"]})
+
+            base = load("partition")
+            fast = run(c, "fast", "owner, fast path", owner, original, FAST, True)
+            if fast:
+                differences("fast", fast, base, "partition", found["owner"])
+            asking = run(c, "fast_asking", "owner, fast path, asking the Workspace on every request", owner, original,
+                         FAST_ASKING, False)
+            if asking and fast:
+                asked, differ = same_answers(asking, fast)
+                t.check("fast_asking: %d of %d answers are the fast path's" % (len(asked) - len(differ), len(asked)),
+                        not differ, differ)
+            ws = run(c, "fast_ws_off", "owner, fast path, the workspace rule replaced by a claim check", owner, ws_off,
+                     FAST, True)
+            if ws:
+                differences("fast_ws_off", ws, load("ws_rules_off"), "ws_rules_off", found["owner"])
+            r_slow = run(c, "reader_rules", "reader, rules as written", reader, original, ON, False)
+            r_fast = run(c, "reader_fast", "reader, fast path", reader, original, FAST, True)
+            if r_slow and r_fast:
+                differences("reader_fast", r_fast, r_slow, "reader_rules", found["reader"])
+            g_slow = run(c, "group_rules", "group, rules as written", grouped, original, ON, True)
+            g_fast = run(c, "group_fast", "group, fast path on and nothing settled", grouped, original, FAST, True)
+            if g_slow and g_fast:
+                asked, differ = same_answers(g_fast, g_slow)
+                t.check("group_fast: %d of %d answers are the rules-as-written ones" % (len(asked) - len(differ),
+                                                                                    len(asked)), not differ, differ)
+                # Blocks, not bytes: the rewriter orders the arms of some rules differently
+                # from one start of the alpha to the next, fast path or not.
+                blocks = {q: (g_slow["_compiled"][q]["blocks"], g_fast["_compiled"][q]["blocks"]) for q in asked}
+                t.check("group_fast: every query compiles to as many blocks as with the fast path off",
+                        all(a == b for a, b in blocks.values()), {q: v for q, v in blocks.items() if v[0] != v[1]})
+
+            # The app adds a workspace filter to the chat menu's seven queries. In a
+            # partition every record is the workspace's, so the filter selects nothing.
+            if not wanted or "chat" in wanted:
+                c.flags = FAST
+                restart(c)
+                if get_schema(c) != original:
+                    set_schema(c, original)
+                label, query, variables = [q for q in suite(params) if "newest 5" in q[0]][0]
+                bare = {k: ({"deleted": False} if isinstance(v, dict) else v) for k, v in variables.items()}
+                out = {}
+                for name, v in (("with the app's workspace filter", variables), ("without it", bare)):
+                    for _ in range(WARMUP):
+                        r = gql(c, owner, query, v)
+                    wall = []
+                    for _ in range(RUNS):
+                        s = time.perf_counter()
+                        r = gql(c, owner, query, v)
+                        wall.append((time.perf_counter() - s) * 1000)
+                    out[name] = {"p50": statistics.median(wall), "touched": (r.get("extensions") or {}).get(
+                        "touched_uids", 0), "answer": answer(r)}
+                    print("  chat menu %-34s p50 %8.1f ms  touched %9d" % (name, out[name]["p50"], out[name]["touched"]),
+                          flush=True)
+                a, b = out.values()
+                t.check("chat menu: the same answer with and without the app's workspace filter", a["answer"] == b["answer"])
+                save("fast_chat", {k: {"p50": v["p50"], "touched": v["touched"]} for k, v in out.items()})
+        finally:
+            c.flags = HEADER_MODE
+            restart(c)
+            remove_callers(c)
+            c.flags = ON
+            restart(c)
+            if get_schema(c) != original:
+                set_schema(c, original)
+
+
+def report_fast():
+    cols = [("today_again", "Today"), ("partition", "Partition"), ("fast", "Fast path"), ("fast_ws_off", "+ ws claim"),
+            ("no_rules", "No rules")]
+    res = {a: load(a, {}) for a, _ in cols + [("fast_asking", ""), ("reader_rules", ""), ("reader_fast", ""),
+                                              ("group_rules", ""), ("group_fast", "")]}
+    if not res["fast"]:
+        return
+    labels = [k for k in res["fast"] if k[0] != "_"]
+    print("\nthe owner: median round trip in ms / DQL blocks / UIDs touched")
+    print("%-41s" % "query" + "".join("%26s" % title for _, title in cols))
+    for k in labels:
+        line = "%-41s" % k
+        for a, _ in cols:
+            v, d = res[a].get(k) or {}, (res[a].get("_compiled") or {}).get(k) or {}
+            # Today's DQL is the partition arm's: same schema, same query, same claims.
+            if a == "today_again":
+                d = (res["partition"].get("_compiled") or {}).get(k) or {}
+            line += "%9.1f /%4s /%9s" % (v["p50"], d.get("blocks", "-"), v.get("touched", "-")) if "p50" in v else "%26s" % "-"
+        print(line)
+    print("\n%d clients on the candidate list page" % CLIENTS)
+    for a, title in cols + [("reader_fast", "Reader, fast path"), ("group_rules", "Group, rules"),
+                            ("group_fast", "Group, fast path on")]:
+        v = res[a].get("_load")
+        if v:
+            print("  %-20s %8.1f requests/s   p50 %8.0f ms   p95 %8.0f ms" % (title, v["rps"], v["p50"], v["p95"]))
+    if res["fast_asking"]:
+        print("\nasking the Workspace: questions per request, and the median with the answers remembered / asked "
+              "every time")
+        for k in labels:
+            print("  %-41s %3d questions %9.1f ms / %9.1f ms" % (
+                k, res["fast_asking"].get("_asks", {}).get(k, 0), res["fast"][k]["p50"], res["fast_asking"][k]["p50"]))
+    print("\nthe other callers: median round trip in ms / DQL blocks")
+    print("%-41s%18s%18s%18s%18s" % ("query", "Reader, rules", "Reader, fast", "Group, rules", "Group, fast on"))
+    for k in labels:
+        line = "%-41s" % k
+        for a in ("reader_rules", "reader_fast", "group_rules", "group_fast"):
+            v, d = res[a].get(k) or {}, (res[a].get("_compiled") or {}).get(k) or {}
+            line += "%10.1f /%5s" % (v["p50"], d.get("blocks", "-")) if "p50" in v else "%18s" % "-"
+        print(line)
+
+
 ARMS = [("today", "Today"), ("today_again", "Today, again"), ("partition", "Partition"),
         ("ws_rules_off", "+ ws rules off"), ("no_rules", "No rules")]
 
@@ -828,10 +1141,12 @@ def stage_report(t):
         v = res[a].get("_load")
         if v:
             print("  %-16s %8.1f requests/s   p50 %8.0f ms   p95 %8.0f ms" % (title, v["rps"], v["p50"], v["p95"]))
+    report_fast()
 
 
 STAGES = [("restore", stage_restore), ("today", stage_today), ("extract", stage_extract), ("load", stage_load),
-          ("relayout", stage_relayout), ("partition", stage_partition), ("report", stage_report)]
+          ("relayout", stage_relayout), ("partition", stage_partition), ("fastpath", stage_fastpath),
+          ("report", stage_report)]
 
 
 def main():

@@ -58,6 +58,13 @@ type authRewriter struct {
 	// Initialized once at the root Rewrite() call and shared (by reference) across all
 	// derived authRewriter instances within the same request.
 	cascadeVarCache map[cascadeCacheKey]string
+	// `grants` is what this request knows about its caller's workspace-level grants
+	// (SPIKE, see partition_grants.go). Nil outside a partition, for mutations, and
+	// on every rewriter that compiles an authority's rules for a cascade.
+	grants *callerGrants
+	// `arrival` is set only while the rules of a nested field are being looked up:
+	// it says which edge the query reached those records through.
+	arrival *arrival
 	// `mutVarCache` caches predicate → DQL variable name mappings used during mutation
 	// rewriting to avoid emitting duplicate auth var blocks within a single mutation pass.
 	// Distinct from cascadeVarCache: this is mutation-specific and uses a string key.
@@ -111,7 +118,7 @@ func hasAuthRules(field schema.Field, authRw *authRewriter) bool {
 		return false
 	}
 
-	rn := authRw.selector(field.ConstructedFor())
+	rn := authRw.rules(field.ConstructedFor())
 	if rn != nil {
 		return true
 	}
@@ -171,6 +178,9 @@ func (qr *queryRewriter) Rewrite(
 		forceForward:        gqlQuery.QueryType() == schema.GetQuery || gqlQuery.QueryType() == schema.SimilarByIdQuery || isSelective,
 		isSelective:         isSelective,
 		allowedTypesForEdge: make(map[string][]string),
+	}
+	if gqlQuery.QueryType() != schema.PasswordQuery {
+		authRw.grants = newCallerGrants(ctx, customClaims.AuthVariables)
 	}
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
 	authRw.hasCascade = hasCascadeDirective(gqlQuery)
@@ -1988,6 +1998,7 @@ func (authRw *authRewriter) addAuthQueries(
 
 			// Form Auth Queries for the given object
 			objAuthQueries, objfilter := (&authRewriter{
+				grants:              authRw.grants,
 				authVariables:       authRw.authVariables,
 				varGen:              authRw.varGen,
 				varName:             queryVar,
@@ -2377,7 +2388,7 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 		forceForward:         authRw.forceForward,
 		isSelective:          authRw.isSelective,
 		allowedTypesForEdge:  authRw.allowedTypesForEdge,
-	}).rewriteRuleNode(typ, authRw.selector(typ))
+	}).rewriteRuleNode(typ, authRw.rules(typ))
 }
 
 func (authRw *authRewriter) evaluateStaticRules(typ schema.Type) schema.RuleResult {
@@ -2385,7 +2396,11 @@ func (authRw *authRewriter) evaluateStaticRules(typ schema.Type) schema.RuleResu
 		return schema.Uncertain
 	}
 
-	rn := authRw.selector(typ)
+	rn := authRw.rules(typ)
+	if rn == nil && authRw.grants != nil && authRw.selector(typ) != nil {
+		// Every rule of the type is settled by the caller's grants.
+		return schema.Positive
+	}
 	return rn.EvaluateStatic(authRw.authVariables)
 }
 
@@ -3705,7 +3720,10 @@ func addSelectionSetFrom(
 		addPagination(child, f)
 		addCascadeDirective(child, f)
 		oldSelector := auth.selector
+		arrived := arrivingBy(field.Type(), f)
+		auth.arrival = arrived
 		rbac := auth.evaluateStaticRules(f.Type())
+		auth.arrival = nil
 		exceptRules := f.BypassAuthExcept()
 		shouldBypass := f.EvaluateBypassAuth(auth.authVariables)
 		if shouldBypass && len(exceptRules) == 0 {
@@ -3779,7 +3797,9 @@ func addSelectionSetFrom(
 
 		// If RBAC rules are evaluated to `Uncertain` then we add the Auth rules.
 		if rbac == schema.Uncertain {
+			auth.arrival = arrived
 			fieldAuth, authFilter = auth.rewriteAuthQueries(f.Type())
+			auth.arrival = nil
 		}
 
 		if len(f.SelectionSet()) > 0 && !auth.isWritingAuth && auth.hasAuthRules {
@@ -4390,6 +4410,7 @@ func buildFilter(typ schema.Type,
 					nestedQrys := []*dql.GraphQuery{nestedQry}
 					if !auth.isWritingAuth {
 						wr := &authRewriter{
+							grants:              auth.grants,
 							authVariables:       auth.authVariables,
 							varGen:              auth.varGen,
 							selector:            auth.selector,
@@ -4476,6 +4497,7 @@ func buildFilter(typ schema.Type,
 					nestedQrys := []*dql.GraphQuery{nestedQry}
 					if !auth.isWritingAuth {
 						wr := &authRewriter{
+							grants:              auth.grants,
 							authVariables:       auth.authVariables,
 							varGen:              auth.varGen,
 							selector:            auth.selector,
