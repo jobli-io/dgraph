@@ -230,7 +230,17 @@ func (ph *persistentHNSW[T]) searchPersistentLayer(
 			// check! In this way, we can make sure to allow in up to
 			// expectedNeighbors "unfiltered" elements.
 			if !r.hasNeighbors() || r.numNeighbors() < expectedNeighbors || ph.simType.isBetterScore(currDist, r.lastNeighborScore()) {
-				if candidateHeap.Len() > expectedNeighbors {
+				heapCap := expectedNeighbors
+				// When filtered elements are present and we still haven't collected
+				// expectedNeighbors allowed results, widen the candidate queue so dense
+				// clusters of filtered-out nodes cannot starve bridge paths.
+				if r.filtered > 0 && r.numNeighbors() < expectedNeighbors {
+					heapCap = expectedNeighbors * 8
+					if heapCap < 256 {
+						heapCap = 256
+					}
+				}
+				if candidateHeap.Len() > heapCap {
 					candidateHeap.PopLast()
 				}
 				candidateHeap.Push(*currElement)
@@ -254,6 +264,69 @@ func (ph *persistentHNSW[T]) Search(ctx context.Context, c index.CacheType, quer
 	return r.Neighbors, err
 }
 
+const exactPreFilterThreshold = 4096
+
+func (ph *persistentHNSW[T]) passesDistanceThreshold(score T, threshold *float64) bool {
+	if threshold == nil {
+		return true
+	}
+	th := *threshold
+	switch ph.simType.indexType {
+	case Euclidean:
+		return float64(score) <= th
+	case Cosine:
+		return float64(1.0)-float64(score) <= th
+	default:
+		return true
+	}
+}
+
+func (ph *persistentHNSW[T]) searchAllowedUIDsExact(
+	c index.CacheType,
+	query []T,
+	maxResults int,
+	opts index.VectorIndexOptions[T],
+) ([]uint64, error) {
+	if maxResults <= 0 {
+		return []uint64{}, nil
+	}
+	top := make([]persistentHeapElement[T], 0, maxResults+1)
+	var vec []T
+	for _, uid := range opts.AllowedUIDs {
+		vec = nil
+		// Nodes that pass @auth / hard filters may not have an embedding stored yet;
+		// match searchPersistentLayer and skip missing/empty vectors gracefully.
+		_ = ph.getVecFromUid(uid, c, &vec)
+		if len(vec) == 0 {
+			continue
+		}
+		if opts.Filter != nil && !opts.Filter(query, vec, uid) {
+			continue
+		}
+		dist, err := ph.simType.distanceScore(vec, query, ph.floatBits)
+		if err != nil {
+			return nil, err
+		}
+		if !ph.passesDistanceThreshold(dist, opts.DistanceThreshold) {
+			continue
+		}
+		if len(top) < maxResults || ph.simType.isBetterScore(dist, top[len(top)-1].value) {
+			top = ph.simType.insortHeap(top, persistentHeapElement[T]{
+				value: dist,
+				index: uid,
+			})
+			if len(top) > maxResults {
+				top = top[:maxResults]
+			}
+		}
+	}
+	res := make([]uint64, len(top))
+	for i, elem := range top {
+		res[i] = elem.index
+	}
+	return res, nil
+}
+
 // SearchWithOptions applies optional per-call controls (ef override and distance threshold).
 // When EfOverride > 0, it is applied at upper layers and the bottom layer uses
 // candidateK = max(maxResults, EfOverride). Results return the best maxResults.
@@ -272,6 +345,9 @@ func (ph *persistentHNSW[T]) SearchWithOptions(
 	if maxResults < 0 {
 		maxResults = 0
 	}
+	if len(opts.AllowedUIDs) > 0 && len(opts.AllowedUIDs) <= exactPreFilterThreshold {
+		return ph.searchAllowedUIDsExact(c, query, maxResults, opts)
+	}
 	r := index.NewSearchPathResult()
 	start := time.Now().UnixMilli()
 
@@ -282,7 +358,8 @@ func (ph *persistentHNSW[T]) SearchWithOptions(
 		return nil, err
 	}
 
-	// Upper layers use efUpper (override if provided)
+	// Upper layers use efUpper (override if provided) and route greedily without
+	// filtering so sparse upper layers are never starved by selective filters.
 	efUpper := ph.efSearch
 	if opts.EfOverride > 0 {
 		efUpper = opts.EfOverride
@@ -292,9 +369,8 @@ func (ph *persistentHNSW[T]) SearchWithOptions(
 		if isEqual(startVec, query) {
 			break
 		}
-		filterOut := !opts.Filter(query, startVec, entry)
 		layerResult, err := ph.searchPersistentLayer(
-			c, level, entry, startVec, query, filterOut, efUpper, opts.Filter)
+			c, level, entry, startVec, query, false, efUpper, index.AcceptAll[T])
 		if err != nil {
 			return nil, err
 		}
@@ -329,22 +405,8 @@ func (ph *persistentHNSW[T]) SearchWithOptions(
 		if n.filteredOut {
 			continue
 		}
-		if opts.DistanceThreshold != nil {
-			th := *opts.DistanceThreshold
-			switch ph.simType.indexType {
-			case Euclidean:
-				// n.value stores the metric-domain distance (not squared).
-				if float64(n.value) > th {
-					continue
-				}
-			case Cosine:
-				// n.value is cosine similarity in [-1,1]; cosine distance d = 1 - sim must be <= th.
-				if float64(1.0)-float64(n.value) > th {
-					continue
-				}
-			default:
-				// Dot product or others: ignore threshold for now.
-			}
+		if !ph.passesDistanceThreshold(n.value, opts.DistanceThreshold) {
+			continue
 		}
 		res = append(res, n.index)
 		if len(res) >= maxResults {
@@ -364,6 +426,7 @@ func (ph *persistentHNSW[T]) SearchWithUidAndOptions(
 	maxResults int,
 	opts index.VectorIndexOptions[T],
 ) ([]uint64, error) {
+	hasCustomFilter := opts.Filter != nil
 	if opts.Filter == nil {
 		opts.Filter = index.AcceptAll[T]
 	}
@@ -380,8 +443,14 @@ func (ph *persistentHNSW[T]) SearchWithUidAndOptions(
 	if len(queryVec) == 0 {
 		return []uint64{}, nil
 	}
+	if len(opts.AllowedUIDs) > 0 && len(opts.AllowedUIDs) <= exactPreFilterThreshold {
+		return ph.searchAllowedUIDsExact(c, queryVec, maxResults, opts)
+	}
 	filterOut := !opts.Filter(queryVec, queryVec, queryUid)
 	candidateK := maxResults
+	if hasCustomFilter && ph.efSearch > candidateK {
+		candidateK = ph.efSearch
+	}
 	if opts.EfOverride > candidateK {
 		candidateK = opts.EfOverride
 	}
@@ -398,19 +467,8 @@ func (ph *persistentHNSW[T]) SearchWithUidAndOptions(
 		if n.filteredOut {
 			continue
 		}
-		if opts.DistanceThreshold != nil {
-			th := *opts.DistanceThreshold
-			switch ph.simType.indexType {
-			case Euclidean:
-				if float64(n.value) > th {
-					continue
-				}
-			case Cosine:
-				if float64(1.0)-float64(n.value) > th {
-					continue
-				}
-			default:
-			}
+		if !ph.passesDistanceThreshold(n.value, opts.DistanceThreshold) {
+			continue
 		}
 		res = append(res, n.index)
 		if len(res) >= maxResults {

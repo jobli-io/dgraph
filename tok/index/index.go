@@ -151,6 +151,11 @@ type VectorIndexOptions[T c.Float] struct {
 
 	// Filter allows callers to pass a SearchFilter; if nil, AcceptAll should be used.
 	Filter SearchFilter[T]
+
+	// AllowedUIDs, when non-empty, restricts results to this pre-filtered UID set.
+	// When the set is small enough, implementations may score AllowedUIDs directly
+	// for 100% exact recall without walking unrelated parts of the HNSW graph.
+	AllowedUIDs []uint64
 }
 
 // OptionalSearchOptions adds per-call search controls without breaking existing APIs.

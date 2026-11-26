@@ -315,6 +315,7 @@ func aggregateQuery(query schema.Query, authRw *authRewriter) []*dql.GraphQuery 
 	dgQuery = append(dgQuery, varQry...)
 
 	dgQuery, _ = authRw.addAuthQueries(mainType, dgQuery, rbac)
+	dgQuery = applySimilarToPreFilter(dgQuery, nil)
 
 	// dgQuery[0] is the main var block (func: uid(XRoot) once auth is injected).
 	// dgQuery[1:] contains filter path var blocks, rootQry (defines XRoot),
@@ -665,6 +666,7 @@ func groupByQuery(query schema.Query, authRw *authRewriter) ([]*dql.GraphQuery, 
 	// Apply auth — after this, dgQuery[0] may have its Func replaced with uid(XRoot)
 	// where XRoot is a variable defined by the auth var blocks in dgQuery[1:].
 	dgQuery, _ = authRw.addAuthQueries(mainType, dgQuery, rbac)
+	dgQuery = applySimilarToPreFilter(dgQuery, nil)
 
 	mainQuery := dgQuery[0]
 	mainQuery.IsGroupby = true
@@ -1545,6 +1547,8 @@ func rewriteAsQuery(field schema.Field, authRw *authRewriter, queryName string) 
 		applyAuthVarSubstToQueries(selectionAuth, placeholderSubst)
 		applyAuthVarSubstToQueries(dgQuery, placeholderSubst)
 	}
+
+	dgQuery = applySimilarToPreFilter(dgQuery, nil)
 
 	if len(selectionAuth) > 0 {
 		// Dedup field-level auth var blocks (selectionAuth was never included in the
@@ -4418,6 +4422,7 @@ func buildFilter(typ schema.Type,
 							if len(nestedAuthVarSubst) > 0 {
 								applyAuthVarSubst(fil, nestedAuthVarSubst)
 							}
+							authQrys = applySimilarToPreFilter(authQrys, qs)
 							if len(authQrys) >= 3 {
 								nestedQrys = make([]*dql.GraphQuery, 0, len(authQrys))
 								nestedQrys = append(nestedQrys, authQrys[2])     // varQry first
@@ -4433,7 +4438,11 @@ func buildFilter(typ schema.Type,
 							nestedQry.Func = nil
 							nestedQry.Filter = nil
 							nestedQry.Children = nil
+						} else {
+							nestedQrys = applySimilarToPreFilter(nestedQrys, qs)
 						}
+					} else {
+						nestedQrys = applySimilarToPreFilter(nestedQrys, qs)
 					}
 
 					varQry = append(varQry, nestedQrys...)
@@ -4499,6 +4508,7 @@ func buildFilter(typ schema.Type,
 							if len(nestedAuthVarSubst) > 0 {
 								applyAuthVarSubst(fil, nestedAuthVarSubst)
 							}
+							authQrys = applySimilarToPreFilter(authQrys, qs)
 							if len(authQrys) >= 3 {
 								nestedQrys = make([]*dql.GraphQuery, 0, len(authQrys))
 								nestedQrys = append(nestedQrys, authQrys[2])     // varQry first
@@ -4514,7 +4524,11 @@ func buildFilter(typ schema.Type,
 							nestedQry.Func = nil
 							nestedQry.Filter = nil
 							nestedQry.Children = nil
+						} else {
+							nestedQrys = applySimilarToPreFilter(nestedQrys, qs)
 						}
+					} else {
+						nestedQrys = applySimilarToPreFilter(nestedQrys, qs)
 					}
 
 					varQry = append(varQry, nestedQrys...)
@@ -4902,6 +4916,18 @@ func first(aMap map[string]interface{}) (string, interface{}) {
 	return "", nil
 }
 
+// appendSimilarToOptionArgs appends optional named parameters (ef, distance_threshold)
+// expected by Dgraph's similar_to DQL parser, avoiding bare positional arguments.
+func appendSimilarToOptionArgs(args []dql.Arg, filter map[string]interface{}) []dql.Arg {
+	if ef, ok := filter["ef"]; ok && ef != nil {
+		args = append(args, dql.Arg{Value: fmt.Sprintf("ef: %v", ef)})
+	}
+	if maxDistance, ok := filter["distance"]; ok && maxDistance != nil {
+		args = append(args, dql.Arg{Value: fmt.Sprintf("distance_threshold: %v", maxDistance)})
+	}
+	return args
+}
+
 func buildSimilarToVectorFilter(
 	typ schema.Type,
 	field schema.FieldDefinition,
@@ -4913,25 +4939,21 @@ func buildSimilarToVectorFilter(
 	}
 	vector := filter["vector"]
 
-	maxDistance, ok := filter["distance"]
-	if !ok {
-		maxDistance = 0
-	}
-
 	vec, err := json.Marshal(vector)
 	if err != nil {
 		// should not happen with proper validation
 		return nil, nil
 	}
 
+	args := appendSimilarToOptionArgs([]dql.Arg{
+		{Value: field.DgraphPredicate()},
+		{Value: fmt.Sprintf("%v", topK)},
+		{Value: fmt.Sprintf("%q", string(vec))},
+	}, filter)
+
 	return &dql.Function{
 		Name: "similar_to",
-		Args: []dql.Arg{
-			{Value: field.DgraphPredicate()},
-			{Value: fmt.Sprintf("%v", topK)},
-			{Value: fmt.Sprintf("%q", string(vec))},
-			{Value: fmt.Sprintf("%v", maxDistance)},
-		},
+		Args: args,
 	}, nil
 }
 
@@ -4960,19 +4982,15 @@ func buildSimilarToTextFilter(
 		return nil, nil, errors.Wrapf(err, "failed to marshal generated embedding")
 	}
 
-	maxDistance, ok := filter["distance"]
-	if !ok {
-		maxDistance = 0
-	}
+	args := appendSimilarToOptionArgs([]dql.Arg{
+		{Value: field.DgraphPredicate()},
+		{Value: fmt.Sprintf("%v", topK)},
+		{Value: fmt.Sprintf("%q", string(vec))},
+	}, filter)
 
 	return &dql.Function{
 		Name: "similar_to",
-		Args: []dql.Arg{
-			{Value: field.DgraphPredicate()},
-			{Value: fmt.Sprintf("%v", topK)},
-			{Value: fmt.Sprintf("%q", string(vec))},
-			{Value: fmt.Sprintf("%v", maxDistance)},
-		},
+		Args: args,
 	}, nil, nil
 }
 
@@ -4987,10 +5005,6 @@ func buildSimilarToIdFilter(
 	if !ok {
 		// validation should catch this.
 		return nil, nil
-	}
-	maxDistance, ok := filter["distance"]
-	if !ok {
-		maxDistance = 0
 	}
 
 	vecVar := queryName + "_vec"
@@ -5049,12 +5063,11 @@ func buildSimilarToIdFilter(
 
 	similarToFunc := &dql.Function{
 		Name: "similar_to",
-		Args: []dql.Arg{
+		Args: appendSimilarToOptionArgs([]dql.Arg{
 			{Value: field.DgraphPredicate()},
 			{Value: fmt.Sprintf("%v", topK)},
 			{Value: fmt.Sprintf("val(%s)", vecVar)},
-			{Value: fmt.Sprintf("%v", maxDistance)},
-		},
+		}, filter),
 	}
 
 	return similarToFunc, []*dql.GraphQuery{varQry}
@@ -5475,4 +5488,204 @@ func deduplicateFilters(filts []*dql.FilterTree) []*dql.FilterTree {
 		}
 	}
 	return unique
+}
+
+// applySimilarToPreFilter ensures that @auth rules and hard (non-vector) filters are
+// evaluated before vector search (similar_to), passing the resulting allowed UIDs into
+// similar_to via `uids: uid(<allowedVar>)`.
+func applySimilarToPreFilter(queries []*dql.GraphQuery, extraVarQrys []*dql.GraphQuery) []*dql.GraphQuery {
+	if len(queries) == 0 || queries[0] == nil {
+		return queries
+	}
+
+	similarVars := make(map[string]*dql.GraphQuery)
+	var similarVarOrder []string
+	collectSimilarToVars := func(qs []*dql.GraphQuery) {
+		for _, q := range qs {
+			if q == nil || q.Attr != "var" || q.Func == nil || q.Func.Name != "similar_to" {
+				continue
+			}
+			if len(q.Children) != 1 || q.Children[0].Var == "" {
+				continue
+			}
+			hasUidsOpt := false
+			for _, arg := range q.Func.Args {
+				if strings.HasPrefix(arg.Value, "uids:") {
+					hasUidsOpt = true
+					break
+				}
+			}
+			if hasUidsOpt {
+				continue
+			}
+			v := q.Children[0].Var
+			if _, exists := similarVars[v]; !exists {
+				similarVars[v] = q
+				similarVarOrder = append(similarVarOrder, v)
+			}
+		}
+	}
+	collectSimilarToVars(queries[1:])
+	collectSimilarToVars(extraVarQrys)
+	if len(similarVars) == 0 {
+		return queries
+	}
+
+	// Case 1: Dynamic @auth scaffolding is present:
+	//   queries[0] has Func: uid(<rootVar>)
+	//   rootQry    has Var: <rootVar>, Func: uid(<baseVar>), Filter: <authFilter>
+	//   varQry     has Var: <baseVar>, Func: <type/rootFunc>, Filter: <userFilter>
+	if queries[0].Func != nil && queries[0].Func.Name == "uid" && len(queries[0].Func.Args) == 1 {
+		rootVarName := queries[0].Func.Args[0].Value
+		var rootQry *dql.GraphQuery
+		for _, q := range queries[1:] {
+			if q != nil && q.Attr == "var" && q.Var == rootVarName &&
+				q.Func != nil && q.Func.Name == "uid" && len(q.Func.Args) == 1 {
+				rootQry = q
+				break
+			}
+		}
+		if rootQry != nil {
+			baseVarName := rootQry.Func.Args[0].Value
+			var varQry *dql.GraphQuery
+			for _, q := range queries[1:] {
+				if q != nil && q.Attr == "var" && q.Var == baseVarName {
+					varQry = q
+					break
+				}
+			}
+			if varQry != nil {
+				hardFilter, simFilter := splitSimilarToFilter(varQry.Filter, similarVars)
+				if simFilter != nil {
+					varQry.Filter = hardFilter
+					// Split rootQry into:
+					//   <rootVar>_PreVec as var(func: uid(<baseVar>)) @filter(<authFilter>)
+					//   similar_to(..., uids: uid(<rootVar>_PreVec))
+					//   <rootVar> as var(func: uid(<rootVar>_PreVec), first/offset/order...) @filter(<simFilter>)
+					// Keeping <rootVar> post-vector ensures downstream consumers (queries[0],
+					// selectionAuth child field auth, aggregateQuery, groupByQuery, nested edges)
+					// only operate on the narrowed topK results rather than the entire workspace.
+					preVecVar := rootQry.Var + "_PreVec"
+					preVecQry := &dql.GraphQuery{
+						Attr:   "var",
+						Var:    preVecVar,
+						Func:   rootQry.Func,
+						Filter: rootQry.Filter,
+					}
+					rootQry.Func = &dql.Function{
+						Name: "uid",
+						Args: []dql.Arg{{Value: preVecVar}},
+					}
+					rootQry.Filter = simFilter
+					for _, simVar := range similarVarOrder {
+						if filterTreeReferencesVar(simFilter, simVar) {
+							simQry := similarVars[simVar]
+							simQry.Func.Args = append(simQry.Func.Args, dql.Arg{
+								Value: "uids: uid(" + preVecVar + ")",
+							})
+						}
+					}
+					return append(queries, preVecQry)
+				}
+			}
+		}
+	}
+
+	// Case 2: No dynamic @auth scaffolding (e.g. RBAC Positive or no @auth rules).
+	// Only pre-filter if there is at least one hard filter alongside similar_to.
+	hardFilter, simFilter := splitSimilarToFilter(queries[0].Filter, similarVars)
+	if simFilter == nil || hardFilter == nil {
+		return queries
+	}
+
+	var firstSimVar string
+	for _, simVar := range similarVarOrder {
+		if filterTreeReferencesVar(simFilter, simVar) {
+			firstSimVar = simVar
+			break
+		}
+	}
+	if firstSimVar == "" {
+		return queries
+	}
+
+	allowedVar := firstSimVar + "_allowed"
+	allowedQry := &dql.GraphQuery{
+		Attr:     "var",
+		Func:     cloneFunction(queries[0].Func),
+		Filter:   hardFilter,
+		Children: []*dql.GraphQuery{{Attr: "uid", Var: allowedVar}},
+	}
+	queries[0].Func = &dql.Function{
+		Name: "uid",
+		Args: []dql.Arg{{Value: allowedVar}},
+	}
+	queries[0].Filter = simFilter
+	for _, simVar := range similarVarOrder {
+		if filterTreeReferencesVar(simFilter, simVar) {
+			simQry := similarVars[simVar]
+			simQry.Func.Args = append(simQry.Func.Args, dql.Arg{
+				Value: "uids: uid(" + allowedVar + ")",
+			})
+		}
+	}
+	return append(queries, allowedQry)
+}
+
+func splitSimilarToFilter(ft *dql.FilterTree, similarVars map[string]*dql.GraphQuery) (*dql.FilterTree, *dql.FilterTree) {
+	if ft == nil {
+		return nil, nil
+	}
+	if ft.Func != nil && ft.Func.Name == "uid" && len(ft.Func.Args) == 1 {
+		if _, ok := similarVars[ft.Func.Args[0].Value]; ok {
+			return nil, ft
+		}
+		return ft, nil
+	}
+	if ft.Op == "and" {
+		var hardChildren, simChildren []*dql.FilterTree
+		for _, child := range ft.Child {
+			h, s := splitSimilarToFilter(child, similarVars)
+			if h != nil {
+				hardChildren = append(hardChildren, h)
+			}
+			if s != nil {
+				simChildren = append(simChildren, s)
+			}
+		}
+		return joinAndFilterTrees(hardChildren), joinAndFilterTrees(simChildren)
+	}
+	for simVar := range similarVars {
+		if filterTreeReferencesVar(ft, simVar) {
+			return nil, ft
+		}
+	}
+	return ft, nil
+}
+
+func joinAndFilterTrees(children []*dql.FilterTree) *dql.FilterTree {
+	switch len(children) {
+	case 0:
+		return nil
+	case 1:
+		return children[0]
+	default:
+		return &dql.FilterTree{
+			Op:    "and",
+			Child: children,
+		}
+	}
+}
+
+func combineAndFilterTrees(a, b *dql.FilterTree) *dql.FilterTree {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	return &dql.FilterTree{
+		Op:    "and",
+		Child: []*dql.FilterTree{a, b},
+	}
 }

@@ -1821,6 +1821,11 @@ func (sg *SubGraph) fillVars(mp map[string]varValue) error {
 	for _, v := range sg.Params.NeedsVar {
 		l, ok := mp[v.Name]
 		if !ok {
+			if v.Typ == dql.UidVar && sg.SrcFunc != nil && sg.SrcFunc.Name == "similar_to" {
+				// Pre-filter variable resolved to nothing: mark SrcUIDs as empty list
+				// so similar_to short-circuits rather than running unfiltered.
+				sg.SrcUIDs = &pb.List{}
+			}
 			continue
 		}
 		switch {
@@ -1830,6 +1835,13 @@ func (sg *SubGraph) fillVars(mp map[string]varValue) error {
 			// later.
 			// TODO: If we support value vars for list type then this needn't be true
 			sg.ExpandPreds = l.strList
+
+		case (v.Typ == dql.UidVar && sg.SrcFunc != nil && sg.SrcFunc.Name == "similar_to"):
+			if l.Uids != nil {
+				sg.SrcUIDs = l.Uids
+			} else {
+				sg.SrcUIDs = &pb.List{}
+			}
 
 		case (v.Typ == dql.UidVar && sg.SrcFunc != nil && sg.SrcFunc.Name == "uid_in"):
 			srcFuncArgs := sg.SrcFunc.Args[:0]
@@ -2256,12 +2268,21 @@ func ProcessGraph(ctx context.Context, sg, parent *SubGraph, rch chan error) {
 				sg.DestUIDs.Uids = nil
 			}
 		default:
-			taskQuery, err := createTaskQuery(ctx, sg)
-			if err != nil {
-				rch <- err
-				return
+			var result *pb.Result
+			if sg.SrcFunc != nil && sg.SrcFunc.Name == "similar_to" &&
+				sg.SrcUIDs != nil && len(sg.SrcUIDs.Uids) == 0 {
+				// Pre-filter resolved to 0 UIDs: skip worker RPC while preserving
+				// downstream child/variable population (e.g. `similarVar as uid`).
+				result = &pb.Result{}
+			} else {
+				var taskQuery *pb.Query
+				taskQuery, err = createTaskQuery(ctx, sg)
+				if err != nil {
+					rch <- err
+					return
+				}
+				result, err = worker.ProcessTaskOverNetwork(ctx, taskQuery)
 			}
-			result, err := worker.ProcessTaskOverNetwork(ctx, taskQuery)
 			switch {
 			case err != nil && strings.Contains(err.Error(), worker.ErrNonExistentTabletMessage):
 				sg.UnknownAttr = true

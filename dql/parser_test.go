@@ -2606,6 +2606,32 @@ func TestParseSimilarToThreeArgs(t *testing.T) {
 	require.Len(t, res.Query[0].Func.Args, 2)
 }
 
+func TestParseSimilarToUidsOption(t *testing.T) {
+	query := `{
+		var(func: type(JobCategory)) {
+			allowed as uid
+		}
+		q(func: similar_to(JobCategory.search, 3, "[0,0]", ef: 12, uids: uid(allowed))) {
+			uid
+		}
+	}`
+	res, err := Parse(Request{Str: query})
+	require.NoError(t, err)
+	require.Len(t, res.Query, 2)
+	fn := res.Query[1].Func
+	require.Equal(t, "similar_to", fn.Name)
+	require.Len(t, fn.Args, 4)
+	require.Equal(t, []VarContext{{Name: "allowed", Typ: UidVar}}, fn.NeedsVar)
+
+	badQuery := `{
+		q(func: similar_to(JobCategory.search, 3, "[0,0]", uids: "not_a_uid_var")) {
+			uid
+		}
+	}`
+	_, err = Parse(Request{Str: badQuery})
+	require.Error(t, err)
+}
+
 func TestParseSimilarToRejectsObjectLiteralSyntax(t *testing.T) {
 	query := `{
 		q(func: similar_to(voptions, 4, "[0,0]", {ef: 12})) {

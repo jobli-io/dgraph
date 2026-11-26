@@ -43,6 +43,11 @@ func newLayerResult[T c.Float](level int) *searchLayerResult[T] {
 
 func (slr *searchLayerResult[T]) setFirstPathNode(n persistentHeapElement[T]) {
 	slr.neighbors = []persistentHeapElement[T]{n}
+	if n.filteredOut {
+		slr.filtered = 1
+	} else {
+		slr.filtered = 0
+	}
 	slr.visited = make(map[uint64]persistentHeapElement[T])
 	slr.visited[n.index] = n
 	slr.path = []uint64{n.index}
@@ -56,9 +61,19 @@ func (slr *searchLayerResult[T]) addPathNode(
 	if n.filteredOut {
 		slr.filtered++
 	}
-	effectiveMaxLen := maxResults + slr.filtered
-	if len(slr.neighbors) > effectiveMaxLen {
-		slr.neighbors = slr.neighbors[:effectiveMaxLen]
+	for len(slr.neighbors) > maxResults+slr.filtered {
+		evicted := slr.neighbors[len(slr.neighbors)-1]
+		slr.neighbors = slr.neighbors[:len(slr.neighbors)-1]
+		if evicted.filteredOut {
+			slr.filtered--
+		}
+	}
+	// Once we have maxResults allowed neighbors, trim any trailing filteredOut
+	// elements so lastNeighborScore() reflects the k-th allowed neighbor.
+	for maxResults > 0 && len(slr.neighbors)-slr.filtered >= maxResults &&
+		len(slr.neighbors) > maxResults && slr.neighbors[len(slr.neighbors)-1].filteredOut {
+		slr.neighbors = slr.neighbors[:len(slr.neighbors)-1]
+		slr.filtered--
 	}
 
 	if len(slr.neighbors) > 0 && slr.neighbors[0].index == n.index {
