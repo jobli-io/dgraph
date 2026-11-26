@@ -284,8 +284,13 @@ they form a Raft group and provide synchronous replication.
 			"Disabled by default (0). Note: enabling this logs query text which may contain "+
 			"sensitive data; do not enable in deployments with strict data privacy requirements.").
 		Flag("partition-namespaces", "SPIKE: treat every non-root namespace as a partition that "+
-			"inherits schema, types, tablets and the GraphQL schema from the root namespace. The "+
-			"namespace is taken from the "+x.PartitionNsHeader+" header, which is not authenticated.").
+			"inherits schema, types, tablets and the GraphQL schema from the root namespace.").
+		Flag("partition-resolver", "SPIKE: how a request selects a partition. header: the "+
+			x.PartitionNsHeader+" header, which is not authenticated (local proofs only). jwt: "+
+			"the workspace claim of the JWT declared by the root schema's Dgraph.Authorization, "+
+			"looked up in the WorkspaceEntry directory of the root namespace.").
+		Flag("partition-claim", "SPIKE: the JWT claim that names the workspace.").
+		Flag("partition-dir-ttl", "SPIKE: how long a workspace directory entry is cached.").
 		String())
 
 	RegisterFlags(flag)
@@ -582,6 +587,13 @@ func setupServer(closer *z.Closer, enableMcp bool) {
 			admin.WriteErrorResponse(w, r, err)
 			return
 		}
+		if x.IsPartitionNamespace(namespace) {
+			// The admin API acts on the cluster and on the template's schema. A
+			// request attributed to a partition has no business with either.
+			admin.WriteErrorResponse(w, r, fmt.Errorf(
+				"the admin API is not available to partition namespace %d", namespace))
+			return
+		}
 		if err := admin.LazyLoadSchema(namespace); err != nil {
 			admin.WriteErrorResponse(w, r, err)
 			return
@@ -819,9 +831,20 @@ func run() {
 	x.WorkerConfig.SlowQueryLogThreshold = featureFlagsConf.GetDuration("log-slow-query-threshold")
 	if featureFlagsConf.GetBool("partition-namespaces") {
 		x.SetPartitionNamespaces(true)
-		x.SetTenantResolver(x.PartitionHeaderResolver)
-		glog.Warningf("SPIKE: partition namespaces are on; the namespace comes from the "+
-			"unauthenticated %s header", x.PartitionNsHeader)
+		switch resolver := featureFlagsConf.GetString("partition-resolver"); resolver {
+		case "jwt":
+			claim := featureFlagsConf.GetString("partition-claim")
+			admin.InstallJWTTenantResolver(claim, featureFlagsConf.GetDuration("partition-dir-ttl"))
+			glog.Infof("SPIKE: partition namespaces are on; the namespace comes from the %q "+
+				"claim of the root schema's auth JWT", claim)
+		case "header":
+			x.SetTenantCredentialAttacher(x.AttachPartitionNs)
+			x.SetTenantResolver(x.PartitionHeaderResolver)
+			glog.Warningf("SPIKE: partition namespaces are on; the namespace comes from the "+
+				"unauthenticated %s header", x.PartitionNsHeader)
+		default:
+			glog.Fatalf("unknown partition-resolver %q: use header or jwt", resolver)
+		}
 	}
 
 	x.PrintVersion()

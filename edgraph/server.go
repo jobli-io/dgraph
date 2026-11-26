@@ -421,11 +421,16 @@ func (s *Server) alter(ctx context.Context, op *api.Operation, doAuth AuthMode) 
 		return nil, errors.Wrapf(err, "While altering")
 	}
 
-	if x.IsPartitionNamespace(namespace) && (op.Schema != "" || op.DropOp == api.Operation_ATTR ||
-		op.DropOp == api.Operation_TYPE || op.DropAttr != "") {
-		// The schema belongs to the template namespace; a partition only holds data.
-		return nil, errors.Errorf("namespace %d is a partition and cannot alter the schema; "+
-			"alter the template namespace instead", namespace)
+	if x.IsPartitionNamespace(namespace) {
+		// The schema belongs to the template namespace, and drop-all empties the
+		// whole cluster. A partition holds only its own data, so dropping that
+		// data is the one alter it may run.
+		dropOwnData := op.DropOp == api.Operation_DATA && op.DropValue == "" &&
+			op.Schema == "" && op.DropAttr == "" && !op.DropAll
+		if !dropOwnData {
+			return nil, errors.Errorf("namespace %d is a partition and cannot alter the schema "+
+				"or drop anything but its own data; alter the template namespace instead", namespace)
+		}
 	}
 
 	// StartTs is not needed if the predicate to be dropped lies on this server but is required

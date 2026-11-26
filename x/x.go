@@ -487,8 +487,8 @@ func AttachAuthToken(ctx context.Context, r *http.Request) context.Context {
 // AttachAccessJwt adds any incoming JWT header data into the grpc context metadata
 func AttachAccessJwt(ctx context.Context, r *http.Request) context.Context {
 	// SPIKE: every HTTP surface attaches identity through here, so this is where
-	// the partition header joins the context for PartitionHeaderResolver.
-	ctx = AttachPartitionNs(ctx, r)
+	// the credential the tenant resolver reads joins the context.
+	ctx = attachTenantCredential(ctx, r)
 	if accessJwt := r.Header.Get("X-Dgraph-AccessToken"); accessJwt != "" {
 		md, ok := metadata.FromIncomingContext(ctx)
 		if !ok {

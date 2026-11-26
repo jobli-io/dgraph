@@ -115,6 +115,30 @@ func AttrInNamespaceOf(like, attr string) string {
 	return like[:i] + attr[j:]
 }
 
+// TenantCredentialAttacher copies whatever the installed tenant resolver needs
+// from an HTTP request into the context metadata. Each resolver brings its own,
+// so a header one resolver trusts is never even read under another.
+type TenantCredentialAttacher func(ctx context.Context, r *http.Request) context.Context
+
+var tenantCredentialAttacher atomic.Pointer[TenantCredentialAttacher]
+
+// SetTenantCredentialAttacher installs the attacher that goes with the tenant
+// resolver. Call it during command setup, before any listener starts serving.
+func SetTenantCredentialAttacher(a TenantCredentialAttacher) {
+	if a == nil {
+		tenantCredentialAttacher.Store(nil)
+		return
+	}
+	tenantCredentialAttacher.Store(&a)
+}
+
+func attachTenantCredential(ctx context.Context, r *http.Request) context.Context {
+	if a := tenantCredentialAttacher.Load(); a != nil {
+		return (*a)(ctx, r)
+	}
+	return ctx
+}
+
 // AttachPartitionNs copies the partition header of an HTTP request into the
 // context metadata, where PartitionHeaderResolver reads it.
 func AttachPartitionNs(ctx context.Context, r *http.Request) context.Context {
