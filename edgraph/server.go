@@ -421,6 +421,13 @@ func (s *Server) alter(ctx context.Context, op *api.Operation, doAuth AuthMode) 
 		return nil, errors.Wrapf(err, "While altering")
 	}
 
+	if x.IsPartitionNamespace(namespace) && (op.Schema != "" || op.DropOp == api.Operation_ATTR ||
+		op.DropOp == api.Operation_TYPE || op.DropAttr != "") {
+		// The schema belongs to the template namespace; a partition only holds data.
+		return nil, errors.Errorf("namespace %d is a partition and cannot alter the schema; "+
+			"alter the template namespace instead", namespace)
+	}
+
 	// StartTs is not needed if the predicate to be dropped lies on this server but is required
 	// if it lies on some other machine. Let's get it for safety.
 	m := &pb.Mutations{StartTs: worker.State.GetTimestamp(false)}

@@ -283,6 +283,9 @@ they form a Raft group and provide synchronous replication.
 			"with structured fields including trace ID for correlation with distributed traces. "+
 			"Disabled by default (0). Note: enabling this logs query text which may contain "+
 			"sensitive data; do not enable in deployments with strict data privacy requirements.").
+		Flag("partition-namespaces", "SPIKE: treat every non-root namespace as a partition that "+
+			"inherits schema, types, tablets and the GraphQL schema from the root namespace. The "+
+			"namespace is taken from the "+x.PartitionNsHeader+" header, which is not authenticated.").
 		String())
 
 	RegisterFlags(flag)
@@ -556,8 +559,12 @@ func setupServer(closer *z.Closer, enableMcp bool) {
 			admin.WriteErrorResponse(w, r, err)
 			return
 		}
-		r.Header.Set("resolver", strconv.FormatUint(namespace, 10))
-		if err := admin.LazyLoadSchema(namespace); err != nil {
+		// A partition is served by the template's compiled GraphQL schema and
+		// resolvers; only the namespace its DQL runs in differs, and that comes
+		// from the request context, not from this header.
+		schemaNs := x.TemplateNamespace(namespace)
+		r.Header.Set("resolver", strconv.FormatUint(schemaNs, 10))
+		if err := admin.LazyLoadSchema(schemaNs); err != nil {
 			admin.WriteErrorResponse(w, r, err)
 			return
 		}
@@ -810,6 +817,12 @@ func run() {
 	x.Config.NormalizeCompatibilityMode = featureFlagsConf.GetString("normalize-compatibility-mode")
 	enableDetailedMetrics := featureFlagsConf.GetBool("enable-detailed-metrics")
 	x.WorkerConfig.SlowQueryLogThreshold = featureFlagsConf.GetDuration("log-slow-query-threshold")
+	if featureFlagsConf.GetBool("partition-namespaces") {
+		x.SetPartitionNamespaces(true)
+		x.SetTenantResolver(x.PartitionHeaderResolver)
+		glog.Warningf("SPIKE: partition namespaces are on; the namespace comes from the "+
+			"unauthenticated %s header", x.PartitionNsHeader)
+	}
 
 	x.PrintVersion()
 	glog.Infof("x.Config: %+v", x.Config)

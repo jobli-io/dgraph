@@ -217,7 +217,9 @@ func LoggingMWMutation(resolver MutationResolver) MutationResolver {
 func AclOnlyMW4Mutation(resolver MutationResolver) MutationResolver {
 	return MutationResolverFunc(func(ctx context.Context, mutation schema.Mutation) (*Resolved,
 		bool) {
-		if !x.WorkerConfig.AclEnabled {
+		// SPIKE: partition namespaces are multi-tenant without ACL, so namespace
+		// management has to be reachable. It stays behind the IP whitelist.
+		if !x.WorkerConfig.AclEnabled && !x.PartitionNamespacesEnabled() {
 			return EmptyResult(mutation, errors.New("Enable ACL to use this mutation")), false
 		}
 		return resolver.Resolve(ctx, mutation)

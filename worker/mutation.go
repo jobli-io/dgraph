@@ -673,6 +673,19 @@ func proposeOrSend(ctx context.Context, m *pb.Mutations, chr chan res) {
 func populateMutationMap(src *pb.Mutations) (map[uint32]*pb.Mutations, error) {
 	mm := make(map[uint32]*pb.Mutations)
 	for _, edge := range src.Edges {
+		if x.IsPartitionAttr(edge.Attr) {
+			// A partition cannot introduce a predicate. Check before BelongsTo, which
+			// would otherwise have Zero allocate a tablet for the unknown name.
+			gid, err := groups().BelongsToReadOnly(edge.Attr, 0)
+			if err != nil {
+				return nil, err
+			}
+			if gid == 0 {
+				return nil, errors.Errorf("predicate %q is not in the schema of the template "+
+					"namespace; a partition namespace cannot define predicates",
+					x.ParseAttr(edge.Attr))
+			}
+		}
 		gid, err := groups().BelongsTo(edge.Attr)
 		if err != nil {
 			return nil, err

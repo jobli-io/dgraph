@@ -239,6 +239,9 @@ func (s *state) SetType(typeName string, typ *pb.TypeUpdate) {
 
 // Get gets the schema for the given predicate.
 func (s *state) Get(ctx context.Context, pred string) (pb.SchemaUpdate, bool) {
+	// A partition namespace has no schema of its own; it reads the template's.
+	asked := pred
+	pred = x.TemplateAttr(pred)
 	isWrite, _ := ctx.Value(IsWrite).(bool)
 	s.RLock()
 	defer s.RUnlock()
@@ -246,7 +249,7 @@ func (s *state) Get(ctx context.Context, pred string) (pb.SchemaUpdate, bool) {
 	// If mutSchema doesn't have the predicate key, we use the schema from s.predicate.
 	if isWrite {
 		if schema, ok := s.mutSchema[pred]; ok {
-			return *schema, true
+			return inNamespaceOf(asked, pred, schema), true
 		}
 	}
 
@@ -254,22 +257,50 @@ func (s *state) Get(ctx context.Context, pred string) (pb.SchemaUpdate, bool) {
 	if !ok {
 		return pb.SchemaUpdate{}, false
 	}
-	return *schema, true
+	return inNamespaceOf(asked, pred, schema), true
+}
+
+// inNamespaceOf returns a copy of su named as the caller asked for it. The
+// template's schema is stored under the root namespace, and a caller working in
+// a partition must not be handed a root-namespace predicate name back.
+func inNamespaceOf(asked, stored string, su *pb.SchemaUpdate) pb.SchemaUpdate {
+	out := *su
+	if asked != stored {
+		out.Predicate = asked
+	}
+	return out
 }
 
 // GetType gets the type definition for the given type name.
 func (s *state) GetType(typeName string) (pb.TypeUpdate, bool) {
+	asked := typeName
+	typeName = x.TemplateAttr(typeName)
 	s.RLock()
 	defer s.RUnlock()
 	typ, has := s.types[typeName]
 	if !has {
 		return pb.TypeUpdate{}, false
 	}
-	return *typ, true
+	if asked == typeName {
+		return *typ, true
+	}
+	// Re-home the type and its fields into the partition. Callers such as
+	// expand(_all_) use the field predicates as-is, so leaving the template's
+	// names here would make a partition read the root namespace's data.
+	out := *typ
+	out.TypeName = asked
+	out.Fields = make([]*pb.SchemaUpdate, len(typ.Fields))
+	for i, f := range typ.Fields {
+		c := *f
+		c.Predicate = x.AttrInNamespaceOf(asked, f.Predicate)
+		out.Fields[i] = &c
+	}
+	return out, true
 }
 
 // TypeOf returns the schema type of predicate
 func (s *state) TypeOf(pred string) (types.TypeID, error) {
+	pred = x.TemplateAttr(pred)
 	s.RLock()
 	defer s.RUnlock()
 	if schema, ok := s.predicate[pred]; ok {
@@ -280,6 +311,7 @@ func (s *state) TypeOf(pred string) (types.TypeID, error) {
 
 // IsIndexed returns whether the predicate is indexed or not
 func (s *state) IsIndexed(ctx context.Context, pred string) bool {
+	pred = x.TemplateAttr(pred)
 	isWrite, _ := ctx.Value(IsWrite).(bool)
 	s.RLock()
 	defer s.RUnlock()
@@ -330,6 +362,7 @@ func (s *state) Types() []string {
 
 // Tokenizer returns the tokenizer for given predicate
 func (s *state) Tokenizer(ctx context.Context, pred string) []tok.Tokenizer {
+	pred = x.TemplateAttr(pred)
 	isWrite, _ := ctx.Value(IsWrite).(bool)
 	s.RLock()
 	defer s.RUnlock()
@@ -364,6 +397,7 @@ func (s *state) Tokenizer(ctx context.Context, pred string) []tok.Tokenizer {
 // The FactoryCreateSpec type defines the IndexFactory instance(s)
 // for given predicate along with their options, if specified.
 func (s *state) FactoryCreateSpec(ctx context.Context, pred string) ([]*tok.FactoryCreateSpec, error) {
+	pred = x.TemplateAttr(pred)
 	isWrite, _ := ctx.Value(IsWrite).(bool)
 	s.RLock()
 	defer s.RUnlock()
@@ -431,6 +465,7 @@ func (s *state) HasTokenizer(ctx context.Context, id byte, pred string) bool {
 
 // IsReversed returns whether the predicate has reverse edge or not
 func (s *state) IsReversed(ctx context.Context, pred string) bool {
+	pred = x.TemplateAttr(pred)
 	isWrite, _ := ctx.Value(IsWrite).(bool)
 	s.RLock()
 	defer s.RUnlock()
@@ -447,6 +482,7 @@ func (s *state) IsReversed(ctx context.Context, pred string) bool {
 
 // HasCount returns whether we want to mantain a count index for the given predicate or not.
 func (s *state) HasCount(ctx context.Context, pred string) bool {
+	pred = x.TemplateAttr(pred)
 	isWrite, _ := ctx.Value(IsWrite).(bool)
 	s.RLock()
 	defer s.RUnlock()
@@ -464,7 +500,7 @@ func (s *state) HasCount(ctx context.Context, pred string) bool {
 func (s *state) PredicatesToDelete(pred string) []string {
 	s.RLock()
 	defer s.RUnlock()
-	schema, ok := s.predicate[pred]
+	schema, ok := s.predicate[x.TemplateAttr(pred)]
 	if !ok {
 		return nil
 	}
@@ -480,6 +516,7 @@ func (s *state) PredicatesToDelete(pred string) []string {
 
 // IsList returns whether the predicate is of list type.
 func (s *state) IsList(pred string) bool {
+	pred = x.TemplateAttr(pred)
 	s.RLock()
 	defer s.RUnlock()
 	if schema, ok := s.predicate[pred]; ok {
@@ -489,6 +526,7 @@ func (s *state) IsList(pred string) bool {
 }
 
 func (s *state) HasUpsert(pred string) bool {
+	pred = x.TemplateAttr(pred)
 	s.RLock()
 	defer s.RUnlock()
 	if schema, ok := s.predicate[pred]; ok {
@@ -498,6 +536,7 @@ func (s *state) HasUpsert(pred string) bool {
 }
 
 func (s *state) HasLang(pred string) bool {
+	pred = x.TemplateAttr(pred)
 	s.RLock()
 	defer s.RUnlock()
 	if schema, ok := s.predicate[pred]; ok {
@@ -507,6 +546,7 @@ func (s *state) HasLang(pred string) bool {
 }
 
 func (s *state) HasNoConflict(pred string) bool {
+	pred = x.TemplateAttr(pred)
 	s.RLock()
 	defer s.RUnlock()
 	return s.predicate[pred].GetNoConflict()

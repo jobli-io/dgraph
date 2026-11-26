@@ -94,6 +94,14 @@ func (s *Server) CreateNamespaceInternal(ctx context.Context, passwd string) (ui
 	ns := ids.StartId
 	glog.V(2).Infof("Got a lease for NsID: %d", ns)
 
+	if x.IsPartitionNamespace(ns) {
+		// A partition inherits its schema, types and tablets from the template, so
+		// creating one is only the ID lease above: nothing is written, and Zero
+		// gains no tablets. (ACL principals per partition are out of the spike.)
+		glog.V(2).Infof("Created partition namespace: %d", ns)
+		return ns, nil
+	}
+
 	// Attach the newly leased NsID in the context in order to create guardians/groot for it.
 	ctx = x.AttachNamespace(ctx, ns)
 	m := &pb.Mutations{StartTs: worker.State.GetTimestamp(false)}
@@ -135,7 +143,8 @@ func createGuardianAndGroot(ctx context.Context, passwd string) error {
 // Authorization is handled by middlewares.
 func (s *Server) DeleteNamespace(ctx context.Context, namespace uint64) error {
 	glog.Info("Deleting namespace: ", namespace)
-	if _, ok := schema.State().Namespaces()[namespace]; !ok {
+	// A partition has no schema entries, so it never appears in Namespaces().
+	if _, ok := schema.State().Namespaces()[namespace]; !ok && !x.IsPartitionNamespace(namespace) {
 		return errors.Errorf("error deleting non-existing namespace %#x", namespace)
 	}
 	return worker.ProcessDeleteNsRequest(ctx, namespace)

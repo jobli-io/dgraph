@@ -409,6 +409,8 @@ func (g *groupi) BelongsTo(key string) (uint32, error) {
 // tablet move timestamp. If the tablet was moved to this group after the start ts of the query, we
 // should reject that query.
 func (g *groupi) BelongsToReadOnly(key string, ts uint64) (uint32, error) {
+	// A partition namespace is served by the template's tablet.
+	key = x.TemplateAttr(key)
 	g.RLock()
 	tablet := g.tablets[key]
 	g.RUnlock()
@@ -489,6 +491,8 @@ func (g *groupi) Inform(preds []string) ([]*pb.Tablet, error) {
 		if len(p) == 0 {
 			continue
 		}
+		// Zero is never told about a partition's predicates.
+		p = x.TemplateAttr(p)
 
 		if tab, ok := g.tablets[p]; !ok {
 			unknownPreds = append(unknownPreds, &pb.Tablet{GroupId: g.groupId(), Predicate: p})
@@ -532,6 +536,9 @@ func (g *groupi) Inform(preds []string) ([]*pb.Tablet, error) {
 
 // Do not modify the returned Tablet
 func (g *groupi) Tablet(key string) (*pb.Tablet, error) {
+	// A partition namespace is served by the template's tablet, so Zero holds
+	// one tablet per predicate however many partitions exist.
+	key = x.TemplateAttr(key)
 	// TODO: Remove all this later, create a membership state and apply it
 	g.RLock()
 	tablet, ok := g.tablets[key]
@@ -547,6 +554,7 @@ func (g *groupi) Tablet(key string) (*pb.Tablet, error) {
 }
 
 func (g *groupi) ForceTablet(key string) (*pb.Tablet, error) {
+	key = x.TemplateAttr(key)
 	return g.sendTablet(&pb.Tablet{GroupId: g.groupId(), Predicate: key, Force: true})
 }
 

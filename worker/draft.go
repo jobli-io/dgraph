@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strconv"
 	"sync"
@@ -345,6 +346,12 @@ func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr 
 			return err
 		}
 
+		if x.IsPartitionNamespace(ns) {
+			// A partition has no schema or types of its own to put back.
+			posting.ResetCache()
+			return nil
+		}
+
 		// TODO: What about multi shard cluster?
 		// It should be okay to set the schema at timestamp 1 after drop all operation.
 		if groups().groupId() == 1 {
@@ -505,6 +512,12 @@ func (n *node) applyMutations(ctx context.Context, proposal *pb.Proposal) (rerr 
 	// schema deduction is done by RDF/JSON chunker.
 	for attr, storageType := range schemaMap {
 		if _, err := schema.State().TypeOf(attr); err != nil {
+			if x.IsPartitionAttr(attr) {
+				// A partition cannot own schema: it would be invisible to lookups,
+				// which resolve to the template, and re-created on every mutation.
+				return errors.Errorf("predicate %q is not in the schema of the template "+
+					"namespace; a partition namespace cannot define predicates", x.ParseAttr(attr))
+			}
 			hint := pb.Metadata_DEFAULT
 			if mutHint, ok := proposal.GetMutations().GetMetadata().GetPredHints()[attr]; ok {
 				hint = mutHint
@@ -904,9 +917,21 @@ func (n *node) applyCommitted(proposal *pb.Proposal, key uint64) error {
 	return nil
 }
 
+// tabletSizeInterval is how often the group leader reports tablet sizes to Zero.
+// SPIKE: DGRAPH_TABLET_SIZE_INTERVAL shortens it so a proof point does not have
+// to wait five minutes for the report that used to delete partition data.
+func tabletSizeInterval() time.Duration {
+	if v := os.Getenv("DGRAPH_TABLET_SIZE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 5 * time.Minute
+}
+
 func (n *node) processTabletSizes() {
-	defer n.closer.Done()              // CLOSER:1
-	tick := time.Tick(5 * time.Minute) // Once every 5 minutes seems alright.
+	defer n.closer.Done()                   // CLOSER:1
+	tick := time.Tick(tabletSizeInterval()) // Once every 5 minutes seems alright.
 
 	for {
 		select {
@@ -1688,6 +1713,11 @@ func (n *node) calculateTabletSizes() {
 		if pred == "" {
 			return
 		}
+		// Report a partition's table against the template's tablet. Zero only
+		// knows the template's tablets and instructs the group to delete any
+		// predicate it is told about but does not list, which would otherwise
+		// delete every partition's data once it fills a whole Badger table.
+		pred = x.TemplateAttr(pred)
 		if tablet, ok := tablets[pred]; ok {
 			tablet.OnDiskBytes += int64(tinfo.OnDiskSize)
 			tablet.UncompressedBytes += int64(tinfo.UncompressedSize)

@@ -433,7 +433,10 @@ func (lc *LocalCache) fillPreds(ctx *api.TxnContext, gid uint32) {
 		}
 		// Also send the group id that the predicate was being served by. This is useful when
 		// checking if Zero should allow a commit during a predicate move.
-		predKey := fmt.Sprintf("%d-%s", gid, pk.Attr)
+		// Zero aborts a commit that names a predicate it has no tablet for, and it
+		// only has the template's, so a partition's writes are reported against
+		// the template predicate.
+		predKey := fmt.Sprintf("%d-%s", gid, x.TemplateAttr(pk.Attr))
 		ctx.Preds = append(ctx.Preds, predKey)
 	}
 	ctx.Preds = x.Unique(ctx.Preds)
