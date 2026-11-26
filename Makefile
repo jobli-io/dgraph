@@ -193,6 +193,16 @@ local-image: ## Build local Docker image (dgraph/dgraph:local)
 .PHONY: image-local
 image-local: local-image ## Alias for local-image
 
+.PHONY: local-image-jemalloc
+local-image-jemalloc: ## Build linux/amd64 Docker image with jemalloc enabled (dgraph/dgraph:local)
+	@echo building local docker image with jemalloc
+	@docker build --platform linux/amd64 -f contrib/Dockerfile.jemalloc \
+		--build-arg BUILD="$(BUILD)" \
+		--build-arg BUILD_BRANCH="$(BUILD_BRANCH)" \
+		--build-arg BUILD_DATE="$(BUILD_DATE)" \
+		--build-arg BUILD_VERSION="$(BUILD_VERSION)" \
+		-t dgraph/dgraph:local .
+
 .PHONY: clean
 clean: ## Clean build artifacts
 	$(MAKE) -C dgraph clean

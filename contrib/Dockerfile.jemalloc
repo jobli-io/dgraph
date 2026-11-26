@@ -1,0 +1,72 @@
+# Multi-stage Dockerfile to build a linux/amd64 Dgraph image with jemalloc enabled.
+# Useful on macOS/non-Linux hosts where cross-compiling jemalloc is not practical.
+
+FROM --platform=linux/amd64 golang:1.27-bookworm AS builder
+
+ARG BUILD=local
+ARG BUILD_BRANCH=local
+ARG BUILD_DATE=unknown
+ARG BUILD_VERSION=local
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    bzip2 \
+    ca-certificates \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build jemalloc 5.3.1 with the je_ symbol prefix required by ristretto/z.
+WORKDIR /tmp/jemalloc-build
+RUN curl -f -s -L https://github.com/jemalloc/jemalloc/releases/download/5.3.1/jemalloc-5.3.1.tar.bz2 -o jemalloc.tar.bz2 \
+    && tar xjf jemalloc.tar.bz2 \
+    && cd jemalloc-5.3.1 \
+    && sed -i.bak 's|std::__throw_bad_alloc()|throw std::bad_alloc()|g' src/jemalloc_cpp.cpp \
+    && ./configure --with-jemalloc-prefix='je_' --with-malloc-conf='background_thread:true,metadata_thp:auto' \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && rm -rf /tmp/jemalloc-build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN cd dgraph && CGO_ENABLED=1 go build \
+    -tags 'jemalloc' \
+    -ldflags "-X github.com/dgraph-io/dgraph/v25/x.lastCommitSHA=${BUILD} -X \"github.com/dgraph-io/dgraph/v25/x.lastCommitTime=${BUILD_DATE}\" -X \"github.com/dgraph-io/dgraph/v25/x.dgraphVersion=${BUILD_VERSION}\" -X \"github.com/dgraph-io/dgraph/v25/x.dgraphCodename=dgraph\" -X github.com/dgraph-io/dgraph/v25/x.gitBranch=${BUILD_BRANCH}" \
+    -o /out/dgraph .
+
+FROM --platform=linux/amd64 ubuntu:24.04
+LABEL maintainer="Istari Digital, Inc. <dgraph-admin@istaridigital.com>"
+
+RUN rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    install_pkgs() { \
+        apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates \
+            htop \
+            curl \
+            iputils-ping \
+            jq \
+            libjemalloc-dev \
+            less \
+            sysstat \
+            gnupg \
+            gnupg2 \
+            tar \
+            libpam0g; \
+    }; \
+    install_pkgs || (sleep 15 && rm -rf /var/lib/apt/lists/* && install_pkgs); \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/dgraph /usr/local/bin/dgraph
+COPY --from=builder /usr/local/lib/libjemalloc* /usr/local/lib/
+RUN ldconfig
+
+RUN mkdir /dgraph
+WORKDIR /dgraph
+
+ENV GODEBUG=madvdontneed=1
+CMD ["dgraph"]
