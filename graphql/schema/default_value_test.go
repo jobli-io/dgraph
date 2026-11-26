@@ -17,6 +17,7 @@ package schema
 // value is always a string in both cases.
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -165,4 +166,104 @@ func TestValidateDirective_DateTimeExprNoSchemaLoadPanic(t *testing.T) {
 	handler, err := NewHandler(gqlSchema, false)
 	require.NoError(t, err, "NewHandler must succeed — @validate with date() on DateTime must not fail at schema load")
 	require.NotNil(t, handler)
+}
+
+func TestGetDefaultValue_TokenUsageCreditsExpr(t *testing.T) {
+	const gqlSchema = `
+		type TokenUsage {
+			id: ID!
+			promptTokens: Int!
+			cachedTokens: Int
+			completionTokens: Int!
+			totalTokens: Int!
+			model: String!
+			credits: Float
+				@generate(mutation: { add: false, update: false, delete: false })
+				@default(add: {
+					expr: """
+					let m = lower(trim(string(after.model ?? "")));
+					let rates = (m contains "embedding") ? [0.0, 0.0]
+						: ((m contains "carbon") || (m contains "-pro")) ? [3.5, 22.0]
+						: ((m contains "flash-lite") || (m contains "hydrogen")) ? [0.2, 0.8]
+						: [0.6, 5.0];
+					let p = float(string(after.promptTokens ?? 0));
+					let rawCached = float(string(after.cachedTokens ?? 0));
+					let cached = rawCached < 0.0 ? 0.0 : (rawCached > p ? p : rawCached);
+					let uncached = p - cached;
+					let c = float(string(after.completionTokens ?? 0));
+					(((uncached * rates[0]) + (cached * rates[0] * 0.25) + (c * rates[1])) / 1000.0)
+					""",
+					evaluationOrder: 10
+				})
+		}
+	`
+
+	handler, err := NewHandler(gqlSchema, false)
+	require.NoError(t, err, "NewHandler must load TokenUsage credits @default expr cleanly")
+
+	sch, err := FromString(handler.GQLSchema(), x.RootNamespace)
+	require.NoError(t, err)
+
+	astSch := sch.(*schema).schema
+	tuDef := astSch.Types["TokenUsage"]
+	require.NotNil(t, tuDef)
+	creditsFd := tuDef.Fields.ForName("credits")
+	require.NotNil(t, creditsFd)
+
+	cases := []struct {
+		name     string
+		parent   map[string]interface{}
+		expected float64
+	}{
+		{
+			name:     "standard flash model (json.Number from GraphQL HTTP decoder)",
+			parent:   map[string]interface{}{"model": "gemini-3.5-flash", "promptTokens": json.Number("5000"), "completionTokens": json.Number("400")},
+			expected: (5000.0*0.6 + 400.0*5.0) / 1000.0, // 5.0 credits
+		},
+		{
+			name:     "standard flash model with 80% cached prompt prefix (75% cache discount)",
+			parent:   map[string]interface{}{"model": "gemini-3.5-flash", "promptTokens": json.Number("10000"), "cachedTokens": json.Number("8000"), "completionTokens": json.Number("200")},
+			expected: (2000.0*0.6 + 8000.0*0.6*0.25 + 200.0*5.0) / 1000.0, // 3.4 credits instead of 7.0
+		},
+		{
+			name:     "cachedTokens clamped safely when exceeding promptTokens",
+			parent:   map[string]interface{}{"model": "gemini-3.5-flash", "promptTokens": json.Number("1000"), "cachedTokens": json.Number("1500"), "completionTokens": json.Number("100")},
+			expected: (1000.0*0.6*0.25 + 100.0*5.0) / 1000.0, // 0.65 credits
+		},
+		{
+			name:     "standard flash model (float64 JSON numbers)",
+			parent:   map[string]interface{}{"model": "gemini-3.5-flash", "promptTokens": float64(5000), "completionTokens": float64(400)},
+			expected: (5000.0*0.6 + 400.0*5.0) / 1000.0, // 5.0 credits
+		},
+		{
+			name:     "flagship carbon model (int64 numbers)",
+			parent:   map[string]interface{}{"model": "gemini-4-carbon", "promptTokens": int64(2000), "completionTokens": int64(1000)},
+			expected: (2000.0*3.5 + 1000.0*22.0) / 1000.0, // 29.0 credits
+		},
+		{
+			name:     "flash-lite / hydrogen model",
+			parent:   map[string]interface{}{"model": "gemini-3.5-flash-lite", "promptTokens": 1000, "completionTokens": 500},
+			expected: (1000.0*0.2 + 500.0*0.8) / 1000.0, // 0.6 credits
+		},
+		{
+			name:     "embedding model defaults to zero credits",
+			parent:   map[string]interface{}{"model": "models/gemini-embedding-001", "promptTokens": json.Number("4000"), "completionTokens": json.Number("0")},
+			expected: 0.0,
+		},
+		{
+			name:     "nil token fields default to zero credits",
+			parent:   map[string]interface{}{"model": "gemini-3.5-flash"},
+			expected: 0.0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			val, _, err := getDefaultValue(astSch, creditsFd, "add", "TokenUsage", tc.parent, AuthCtx{}, nil, nil)
+			require.NoError(t, err)
+			f, ok := val.(float64)
+			require.True(t, ok, "credits @default must return float64, got %T", val)
+			assert.InDelta(t, tc.expected, f, 1e-9)
+		})
+	}
 }
