@@ -45,7 +45,7 @@ const (
 	FeatureFlagsDefaults = `normalize-compatibility-mode=; enable-detailed-metrics=false; log-slow-query-threshold=0; partition-namespaces=false; ` +
 		`partition-resolver=header; partition-claim=ws; partition-dir-ttl=30s; ` +
 		`partition-fast-path=false; partition-grants-ttl=5s; partition-group-grants=false; ` +
-		`partition-tenant-rules=false`
+		`partition-tenant-rules=false; inline-record-rules=false`
 )
 
 // ServerState holds the state of the Dgraph server.

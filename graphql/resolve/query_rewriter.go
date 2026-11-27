@@ -2122,6 +2122,17 @@ func (authRw *authRewriter) addAuthQueries(
 		Filter: dgQuery[0].Filter,
 	}
 
+	// A rule that only tests the record's own values becomes a filter on the root
+	// instead of a block over every record (SPIKE, see record_rules.go). The root
+	// below draws from uid(authRw.varName), which is what those blocks start from.
+	if inlineRecordRulesOn && !typ.IsInterface() && !typ.IsUnion() {
+		guard := typ.DgraphName()
+		if fn := dgQuery[0].Func; fn != nil && fn.Name == "type" && len(fn.Args) == 1 && fn.Args[0].Value == guard {
+			guard = ""
+		}
+		fldAuthQueries, filter = inlineRecordRules(fldAuthQueries, filter, authRw.varName, guard)
+	}
+
 	// build the root auth query like
 	//   TodoRoot as var(func: uid(Todo1), orderasc: ..., first: ..., offset: ...) @filter(... type auth queries ...)
 	// that has the order and pagination params from user query in it and filter set to auth
@@ -3808,6 +3819,12 @@ func addSelectionSetFrom(
 
 		if len(f.SelectionSet()) > 0 && !auth.isWritingAuth && auth.hasAuthRules {
 			commonAuthQueryVars := buildCommonAuthQueries(f, auth, parentVarName)
+			// The selection query draws from uid(auth.varName), which is what the
+			// blocks of a rule about the record itself start from (SPIKE, see
+			// record_rules.go).
+			if inlineRecordRulesOn && !f.Type().IsInterface() && !f.Type().IsUnion() {
+				fieldAuth, authFilter = inlineRecordRules(fieldAuth, authFilter, auth.varName, f.Type().DgraphName())
+			}
 			// add child filter to parent query, auth filters to selection query and
 			// selection query as a filter to child
 			commonAuthQueryVars.parentQry.Children[0].Filter = child.Filter

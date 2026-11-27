@@ -34,7 +34,7 @@ UID, so the same query must return the same bytes in each arm. Where it does
 not, the script names the records that differ and why.
 
 usage: SPIKE_SUB=<a member's userId> SPIKE_EMAIL=<their email> \
-       proof_real.py [restore] [today] [extract] [load] [relayout] [partition] [fastpath] [grants] [report]
+       proof_real.py [restore] [today] [extract] [load] [relayout] [partition] [fastpath] [grants] [records] [report]
        With no stage named, all of them run in that order.
        SPIKE_WS names the workspace (default dc98a028).
        SPIKE_ARMS="ws_rules_off,foreign" reruns only those parts of the partition stage.
@@ -1275,6 +1275,107 @@ def report_grants():
                 res["g_group_asking"][k]["p50"]))
 
 
+# ---------------------------------------------------------------- record rules as filters
+
+INLINE = "; inline-record-rules=true"
+# (arm, caller, flags). Each arm is run again with INLINE added, as <arm>_inline.
+RECORD_ARMS = [("r_root_owner", "owner", HEADER_MODE), ("r_owner_rules", "owner", ON), ("r_owner_full", "owner", FULL),
+               ("r_group_rules", "group", ON), ("r_group_full", "group", FULL)]
+
+
+def stage_records(t):
+    """An auth rule that only tests the record, compiled as a filter and not as a block.
+    It must change no answer and no record seen, in the root namespace or in a partition,
+    with the fast path off or on."""
+    params = load("params")
+    original = open(os.path.join(OUT, "schema_today.graphql")).read()
+    wanted = [a for a in os.environ.get("SPIKE_ARMS", "").split(",") if a]
+
+    def run(c, arm, tok, flags, under_load):
+        c.flags = flags
+        restart(c)
+        print(arm, flush=True)
+        res = measure(c, tok, arm, params, under_load)
+        restart(c, debug=True)
+        res["_compiled"] = compiled(c, tok, arm, params)
+        save(arm, res)
+        return res
+
+    with cluster(ON) as c:
+        try:
+            c.flags = HEADER_MODE
+            restart(c)
+            group = add_callers(c, params["ws_id"])
+            if get_schema(c) != original:
+                set_schema(c, original)
+            toks = {"owner": token(), "reader": token(sub=CALLERS["reader"], email="reader@spike.invalid"),
+                    "group": token(sub=CALLERS["group"], email="group@spike.invalid")}
+            print("test users: one bound to the viewer role on the Workspace, one on the group %r" % group["n"],
+                  flush=True)
+
+            seen = {}
+            for flags in (ON, ON + INLINE, FULL, FULL + INLINE):
+                c.flags = flags
+                restart(c)
+                for who, tok in toks.items():
+                    seen[who, flags] = visible(c, tok)
+            for who in toks:
+                for name, flags in (("the rules as written", ON), ("the fast path", FULL)):
+                    a, b = seen[who, flags], seen[who, flags + INLINE]
+                    t.check("%s, %s: the same %d records on %d types with record rules as filters" % (
+                        who, name, sum(len(v) for v in a.values()), len(LISTED)), a == b and any(a.values()),
+                        {k: (len(a[k]), len(b[k])) for k in LISTED if a[k] != b[k]})
+            if wanted == ["seen"]:
+                return
+
+            for arm, who, flags in RECORD_ARMS:
+                if wanted and arm not in wanted:
+                    continue
+                base = run(c, arm, toks[who], flags, arm.endswith("_full"))
+                mine = run(c, arm + "_inline", toks[who], flags + INLINE, arm.endswith("_full"))
+                asked, differ = same_answers(mine, base)
+                t.check("%s: %d of %d answers are byte-identical with record rules as filters" % (
+                    arm, len(asked) - len(differ), len(asked)), bool(asked) and not differ, differ)
+                fewer = [q for q in asked if mine["_compiled"][q]["blocks"] < base["_compiled"][q]["blocks"]]
+                t.check("%s: %d of %d queries compile to fewer blocks, none to more" % (arm, len(fewer), len(asked)),
+                        bool(fewer) and all(mine["_compiled"][q]["blocks"] <= base["_compiled"][q]["blocks"]
+                                            for q in asked))
+        finally:
+            c.flags = HEADER_MODE
+            restart(c)
+            remove_callers(c)
+            c.flags = ON
+            restart(c)
+            if get_schema(c) != original:
+                set_schema(c, original)
+
+
+def report_records():
+    res = {a: load(a, {}) for arm, _, _ in RECORD_ARMS for a in (arm, arm + "_inline")}
+    res["no_rules"] = load("no_rules", {})
+    if not res["r_owner_rules"]:
+        return
+    labels = [k for k in res["r_owner_rules"] if k[0] != "_"]
+    print("\nrecord rules as filters: median round trip in ms / DQL blocks, without and with")
+    print("%-41s" % "query" + "".join("%30s" % arm[2:] for arm, _, _ in RECORD_ARMS) + "%14s" % "no rules")
+    for k in labels:
+        line = "%-41s" % k
+        for arm, _, _ in RECORD_ARMS:
+            cell = []
+            for a in (arm, arm + "_inline"):
+                v, d = res[a].get(k) or {}, (res[a].get("_compiled") or {}).get(k) or {}
+                cell.append("%6.0f/%4s" % (v["p50"], d.get("blocks", "-")) if "p50" in v else "%11s" % "-")
+            line += "%30s" % " -> ".join(cell)
+        v = res["no_rules"].get(k) or {}
+        print(line + ("%14.0f" % v["p50"] if "p50" in v else ""))
+    print("\n%d clients on the candidate list page" % CLIENTS)
+    for arm, _, _ in RECORD_ARMS:
+        for a in (arm, arm + "_inline"):
+            v = res[a].get("_load")
+            if v:
+                print("  %-24s %8.1f requests/s   p50 %8.0f ms   p95 %8.0f ms" % (a[2:], v["rps"], v["p50"], v["p95"]))
+
+
 ARMS = [("today", "Today"), ("today_again", "Today, again"), ("partition", "Partition"),
         ("ws_rules_off", "+ ws rules off"), ("no_rules", "No rules")]
 
@@ -1311,11 +1412,12 @@ def stage_report(t):
             print("  %-16s %8.1f requests/s   p50 %8.0f ms   p95 %8.0f ms" % (title, v["rps"], v["p50"], v["p95"]))
     report_fast()
     report_grants()
+    report_records()
 
 
 STAGES = [("restore", stage_restore), ("today", stage_today), ("extract", stage_extract), ("load", stage_load),
           ("relayout", stage_relayout), ("partition", stage_partition), ("fastpath", stage_fastpath),
-          ("grants", stage_grants), ("report", stage_report)]
+          ("grants", stage_grants), ("records", stage_records), ("report", stage_report)]
 
 
 def main():

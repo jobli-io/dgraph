@@ -299,6 +299,9 @@ they form a Raft group and provide synchronous replication.
 		Flag("partition-group-grants", "SPIKE: with partition-fast-path, ask once which records "+
 			"that hold grants (groups, job boards) pass for the caller, and compile cascades "+
 			"that end at them against that list.").
+		Flag("inline-record-rules", "SPIKE: compile an auth rule that only tests the record's own "+
+			"values as a filter on the query, not as a block over every record of the type. "+
+			"Does not depend on partition namespaces.").
 		Flag("partition-tenant-rules", "SPIKE: with partition-fast-path, ask a rule that only "+
 			"tests the record's Workspace once of the Workspace, and leave it out where it holds.").
 		String())
@@ -839,6 +842,10 @@ func run() {
 	x.Config.NormalizeCompatibilityMode = featureFlagsConf.GetString("normalize-compatibility-mode")
 	enableDetailedMetrics := featureFlagsConf.GetBool("enable-detailed-metrics")
 	x.WorkerConfig.SlowQueryLogThreshold = featureFlagsConf.GetDuration("log-slow-query-threshold")
+	if featureFlagsConf.GetBool("inline-record-rules") {
+		resolve.EnableInlineRecordRules()
+		glog.Infof("SPIKE: auth rules that only test the record are compiled as filters")
+	}
 	if featureFlagsConf.GetBool("partition-namespaces") {
 		x.SetPartitionNamespaces(true)
 		switch resolver := featureFlagsConf.GetString("partition-resolver"); resolver {
