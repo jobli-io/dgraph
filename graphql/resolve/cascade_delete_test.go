@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	"github.com/dgraph-io/dgraph/v25/graphql/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -380,4 +382,29 @@ func TestSharedVarGen_Deeply_Nested_5Types(t *testing.T) {
 		assert.NotEqual(t, round1[typ], round2[typ],
 			"same type %q must get different var names in round 1 vs 2", typ)
 	}
+}
+
+// A delete by ID names its records, and what cascades from them is added to the delete
+// as plain UIDs. That is only right for a record the delete rule cannot refuse.
+func TestCascadeRootsAreTakenAsReadOnlyWhereNoRuleCanRefuse(t *testing.T) {
+	sch := test.LoadSchemaFromString(t, `
+	type Open { id: ID! name: String }
+	type ByClaim @auth(delete: { rule: "{ $role: { eq: \"admin\" } }" }) { id: ID! name: String }
+	type ByRecord @auth(delete: { rule: """query ($sub: String!) { queryByRecord(filter: { owner: { eq: $sub } }) { id } }""" }) {
+		id: ID!
+		owner: String @search(by: [hash])
+	}`)
+	rule := func(name string) *schema.RuleNode {
+		op, err := sch.Operation(&schema.Request{Query: `mutation { delete` + name + `(filter: {id: ["0x1"]}) { numUids } }`})
+		require.NoError(t, err)
+		return deleteAuthSelector(op.Mutations()[0].MutatedType())
+	}
+	admin := map[string]interface{}{"role": "admin", "sub": "u1"}
+	member := map[string]interface{}{"role": "member", "sub": "u1"}
+
+	require.False(t, ruleCanRefuse(rule("Open"), member), "no delete rule")
+	require.False(t, ruleCanRefuse(rule("ByClaim"), admin), "a claim rule the caller passes")
+	require.True(t, ruleCanRefuse(rule("ByClaim"), member), "a claim rule the caller fails")
+	require.True(t, ruleCanRefuse(rule("ByClaim"), nil), "no claims at all")
+	require.True(t, ruleCanRefuse(rule("ByRecord"), admin), "a rule about the record is only settled by asking")
 }

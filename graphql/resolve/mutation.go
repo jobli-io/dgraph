@@ -618,6 +618,17 @@ func (mr *dgraphResolver) rewriteAndExecute(
 				}
 			}
 
+			// The IDs a mutation names are the records it will delete only if no delete
+			// rule can refuse one of them. Where a rule can, what cascades from a record
+			// the caller is refused would be deleted all the same: the cascade is added
+			// to the mutation as plain UIDs, outside the rule's filter. So the IDs are
+			// taken as read only when the type has no delete rule, or one the caller's
+			// claims alone settle. Otherwise the pre-query below is asked, which returns
+			// the records that pass the rule.
+			if len(rootUIDs) > 0 && deleteRuleCanRefuse(ctx, mutation, mutatedType) {
+				rootUIDs = nil
+			}
+
 			// --- slow path: run the augmented pre-query for filter/bulk deletes ---
 			if len(rootUIDs) == 0 {
 				glog.V(2).Infof("CASCADE-DELETE: Initiating DQL 'SLOW-PATH' augmented Pre-Query resolution for Type -> %s", typeName)

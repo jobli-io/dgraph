@@ -13,10 +13,10 @@ import (
 	"strings"
 
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
-	exprlib "github.com/expr-lang/expr"
 	"github.com/dgraph-io/dgraph/v25/dql"
 	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
 	"github.com/dgraph-io/dgraph/v25/graphql/schema"
+	exprlib "github.com/expr-lang/expr"
 )
 
 // CascadeDeleteCollector pre-queries and collects all nodes that must be deleted
@@ -188,6 +188,26 @@ func CascadeDeleteCollector(
 	}
 
 	return deletes, nil
+}
+
+// deleteRuleCanRefuse reports whether typ has a delete rule that could refuse a record
+// to this caller. A token that cannot be read counts as one that can be refused.
+func deleteRuleCanRefuse(ctx context.Context, mutation schema.Mutation, typ schema.Type) bool {
+	rule := deleteAuthSelector(typ)
+	if rule == nil {
+		return false
+	}
+	claims, err := mutation.GetAuthMeta().ExtractCustomClaims(ctx)
+	if err != nil {
+		return true
+	}
+	return ruleCanRefuse(rule, claims.AuthVariables)
+}
+
+// ruleCanRefuse reports whether rule could refuse a record to a caller with claims:
+// true of any rule the claims alone do not settle as passed.
+func ruleCanRefuse(rule *schema.RuleNode, claims map[string]interface{}) bool {
+	return rule != nil && rule.EvaluateStatic(claims) != schema.Positive
 }
 
 // applyAuthMode filters candidateUIDs according to the configured authMode:
