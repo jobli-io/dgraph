@@ -227,6 +227,7 @@ func (qr *queryRewriter) Rewrite(
 	}
 
 	applyQueryPlanInversion(dgQuery)
+	noteRun(ctx, dgQuery, authRw.varGen)
 	return dgQuery, vars, nil
 }
 
@@ -2388,7 +2389,7 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 		return nil, nil
 	}
 
-	return (&authRewriter{
+	blocks, filter := (&authRewriter{
 		authVariables:        authRw.authVariables,
 		varGen:               authRw.varGen,
 		isWritingAuth:        true,
@@ -2404,6 +2405,8 @@ func (authRw *authRewriter) rewriteAuthQueries(typ schema.Type) ([]*dql.GraphQue
 		isSelective:          authRw.isSelective,
 		allowedTypesForEdge:  authRw.allowedTypesForEdge,
 	}).rewriteRuleNode(typ, authRw.rules(typ))
+	authRw.varGen.ruleCameTo(blocks, filter)
+	return blocks, filter
 }
 
 func (authRw *authRewriter) evaluateStaticRules(typ schema.Type) schema.RuleResult {

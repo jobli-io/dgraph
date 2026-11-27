@@ -137,6 +137,9 @@ type Resolved struct {
 	Field      schema.Field
 	Err        error
 	Extensions *schema.Extensions
+	// Change is what a committed mutation wrote (SPIKE, see change_facts.go). Nil for
+	// a query, a delete, and when nobody asked.
+	Change *Change
 }
 
 // CompletionFunc is an adapter that allows us to compose completions and build a
@@ -618,7 +621,7 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 			res, allSuccessful = r.resolvers.mutationResolverFor(m).Resolve(ctx, m)
 			addResult(resp, res)
 			if allSuccessful && res != nil && len(res.Data) > 0 {
-				triggerMutationInvalidation(ctx, m, res.Data)
+				triggerMutationInvalidation(ctx, m, res.Data, res.Change)
 			}
 		}
 	case op.IsSubscription():
@@ -808,6 +811,8 @@ type Invalidation struct {
 	Namespace               uint64
 	HasNamespace            bool
 	Scope                   map[string]string
+	// Change is what the mutation wrote, when it could say (see change_facts.go).
+	Change *Change
 }
 
 // invalidationScope returns the claims that say which scope a record of the type m
@@ -880,7 +885,7 @@ func extractUIDs(data []byte) []string {
 	return res
 }
 
-func triggerMutationInvalidation(ctx context.Context, m schema.Mutation, data []byte) {
+func triggerMutationInvalidation(ctx context.Context, m schema.Mutation, data []byte, change *Change) {
 	if InvalidationFunc == nil {
 		return
 	}
@@ -911,7 +916,7 @@ func triggerMutationInvalidation(ctx context.Context, m schema.Mutation, data []
 	commitTs := uint64(time.Now().UnixNano())
 
 	inv := Invalidation{UIDs: uids, Types: types, Predicates: predicates, CommitTs: commitTs,
-		Scope: invalidationScope(ctx, m)}
+		Scope: invalidationScope(ctx, m), Change: change}
 	if ns, err := x.ExtractNamespace(ctx); err == nil {
 		inv.Namespace, inv.HasNamespace = ns, true
 	}

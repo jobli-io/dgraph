@@ -46,7 +46,8 @@ const (
 		`partition-resolver=header; partition-claim=ws; partition-dir-ttl=30s; ` +
 		`partition-fast-path=false; partition-grants-ttl=5s; partition-group-grants=false; ` +
 		`partition-tenant-rules=false; inline-record-rules=false; partition-grants-together=false; ` +
-		`partition-mutation-grants=false; subscription-scope-routing=false`
+		`partition-mutation-grants=false; subscription-scope-routing=false; ` +
+		`subscription-change-narrowing=false`
 )
 
 // ServerState holds the state of the Dgraph server.

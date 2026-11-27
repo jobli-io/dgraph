@@ -226,7 +226,9 @@ func adminSubscriptionInvalidateHandler(w http.ResponseWriter, r *http.Request) 
 	}
 
 	broker := subscription.GetBroker()
-	if clusterBroker, ok := broker.(*subscription.NativeClusterBroker); ok {
+	if msg.FromHere() {
+		// our own message, sent back by our own broadcast: it was handled when published
+	} else if clusterBroker, ok := broker.(*subscription.NativeClusterBroker); ok {
 		clusterBroker.PublishLocally(&msg)
 	} else {
 		_ = broker.Publish(r.Context(), &msg)

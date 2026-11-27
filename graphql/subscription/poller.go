@@ -22,6 +22,7 @@ import (
 	"github.com/dgryski/go-farm"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/golang/glog"
+	ostats "go.opencensus.io/stats"
 
 	"github.com/dgraph-io/dgraph/v25/graphql/resolve"
 	"github.com/dgraph-io/dgraph/v25/graphql/schema"
@@ -75,6 +76,8 @@ type bucketScope struct {
 	ns     uint64
 	hasNs  bool
 	claims map[string]interface{}
+	// page is what the bucket's query reads (see narrow.go).
+	page *page
 }
 
 // scopeRouting: a change is only sent to the subscriptions it can have changed.
@@ -82,6 +85,11 @@ var scopeRouting atomic.Bool
 
 // rerunsSkipped counts the re-runs scope routing saved, for the proofs.
 var rerunsSkipped atomic.Uint64
+
+// counted records what became of a change that reached a subscription.
+func counted(what string) {
+	ostats.Record(x.WithMethod(context.Background(), what), x.SubscriptionWakes.M(1))
+}
 
 // EnableScopeRouting turns scope routing on. Without it every subscription that
 // mentions a changed type is run again, whichever workspace or namespace it is in.
@@ -138,6 +146,7 @@ func NewPoller(globalEpoch *uint64, resolver *resolve.RequestResolver) *Poller {
 			Namespace:    inv.Namespace,
 			HasNamespace: inv.HasNamespace,
 			Scope:        inv.Scope,
+			Change:       inv.Change,
 		})
 	}
 
@@ -158,18 +167,37 @@ func (p *Poller) OnInvalidate(msg *InvalidationMessage) {
 	for _, bucketID := range mentioning {
 		if scopeRouting.Load() && !p.reaches(bucketID, msg) {
 			rerunsSkipped.Add(1)
+			counted("scoped")
 			continue
 		}
 		affectedBuckets = append(affectedBuckets, bucketID)
 	}
 
+	if changeNarrowing.Load() {
+		today := make(map[uint64]struct{}, len(affectedBuckets))
+		for _, bucketID := range affectedBuckets {
+			today[bucketID] = struct{}{}
+		}
+		held := make(map[uint64]struct{}, len(holding))
+		for _, bucketID := range holding {
+			held[bucketID] = struct{}{}
+		}
+		p.narrow(msg, today, held)
+		return
+	}
+
 	for _, bucketID := range affectedBuckets {
-		if ch, ok := p.activePollers[bucketID]; ok {
-			select {
-			case ch <- &TriggerPayload{CommitTs: msg.CommitTs}:
-			default:
-				// Channel buffer full; update is already queued. Keep non-blocking.
-			}
+		p.trigger(bucketID, msg)
+	}
+}
+
+// trigger queues a run of the bucket. The caller holds the lock.
+func (p *Poller) trigger(bucketID uint64, msg *InvalidationMessage) {
+	if ch, ok := p.activePollers[bucketID]; ok {
+		select {
+		case ch <- &TriggerPayload{CommitTs: msg.CommitTs}:
+		default:
+			// Channel buffer full; update is already queued. Keep non-blocking.
 		}
 	}
 }
@@ -293,7 +321,8 @@ func (p *Poller) AddSubscriber(req *schema.Request) (*SubscriberResponse, error)
 	}
 
 	// 1. Run the initial query synchronously to return the starting state to the client
-	res := resolver.Resolve(subscriberContext(req.Header), req)
+	facts := &resolve.RunFacts{}
+	res := resolver.Resolve(resolve.WithRunFacts(subscriberContext(req.Header), facts), req)
 	if len(res.Errors) != 0 {
 		return nil, res.Errors
 	}
@@ -320,6 +349,13 @@ func (p *Poller) AddSubscriber(req *schema.Request) (*SubscriberResponse, error)
 			where.ns, where.hasNs = ns, true
 		}
 	}
+	if had, known := p.bucketScope[bucketID]; known {
+		where.page = had.page
+	} else if changeNarrowing.Load() {
+		where.page = &page{shape: resolve.ShapeOf(op), header: req.Header}
+		where.page.begin()
+		where.page.end(facts, res.Data.Bytes(), true)
+	}
 	p.bucketScope[bucketID] = where
 
 	// 2. Set up Reactive Expiry Timer
@@ -342,6 +378,9 @@ func (p *Poller) AddSubscriber(req *schema.Request) (*SubscriberResponse, error)
 
 	// 3. Register GraphQL AST Dependencies and dynamically resolved entities
 	p.dependencyReg.Register(bucketID, subscriptionID, op)
+	if pg := where.page; pg != nil && pg.shape != nil {
+		p.dependencyReg.Mention(bucketID, subscriptionID, pg.shape.RootTypes, pg.shape.NestedTypes)
+	}
 	p.dependencyReg.UpdateResolvedEntities(bucketID, subscriptionID, res.Data.Bytes())
 
 	if ok {
@@ -440,10 +479,17 @@ func (p *Poller) poll(req *pollRequest) {
 			// Set Dgraph consistent read context details
 			ctx = context.WithValue(ctx, "read_ts", trigger.CommitTs)
 		}
-		res := resolver.Resolve(ctx, req.graphqlReq)
+		counted("rerun")
+		p.RLock()
+		pg := p.bucketScope[req.bucketID].page
+		p.RUnlock()
+		facts := &resolve.RunFacts{}
+		pg.begin()
+		res := resolver.Resolve(resolve.WithRunFacts(ctx, facts), req.graphqlReq)
 
 		currentHash := farm.Fingerprint64(res.Data.Bytes())
 		if req.prevHash == currentHash {
+			pg.end(facts, res.Data.Bytes(), len(res.Errors) == 0)
 			// Fast path check: verify if subscribers are still active
 			p.Lock()
 			subscribers, hasSubs := p.pollRegistry[req.bucketID]
@@ -475,6 +521,8 @@ func (p *Poller) poll(req *pollRequest) {
 			p.dependencyReg.UpdateResolvedEntities(req.bucketID, subID, res.Data.Bytes())
 			subscriber.updateCh <- res.Output()
 		}
+		// only now does the bucket hold the records of its new answer
+		pg.end(facts, res.Data.Bytes(), len(res.Errors) == 0)
 		p.Unlock()
 	}
 }

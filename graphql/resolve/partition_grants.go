@@ -572,17 +572,21 @@ func (authRw *authRewriter) rewriteHeldWrap(typ schema.Type, rn *schema.RuleNode
 		if invPred == "" {
 			invPred = "~" + rn.CascadeWrapPred
 		}
-		return []*dql.GraphQuery{{
-				Attr:     "var",
-				Func:     authorities,
-				Children: []*dql.GraphQuery{{Attr: invPred, Var: reverseVar + "_uids"}},
-			}}, &dql.FilterTree{
-				Func: &dql.Function{Name: "uid", Args: []dql.Arg{{Value: reverseVar + "_uids"}}},
-			}
+		block := &dql.GraphQuery{
+			Attr:     "var",
+			Func:     authorities,
+			Children: []*dql.GraphQuery{{Attr: invPred, Var: reverseVar + "_uids"}},
+		}
+		authRw.varGen.settledRule(rn.CascadeWrapPred, invPred, block)
+		return []*dql.GraphQuery{block}, &dql.FilterTree{
+			Func: &dql.Function{Name: "uid", Args: []dql.Arg{{Value: reverseVar + "_uids"}}},
+		}
 	}
 	if rn.CascadeWrapAll {
 		all := authRw.varGen.Next(typ, "", "", authRw.isWritingAuth)
-		return []*dql.GraphQuery{{Var: all, Attr: "var", Func: authorities}}, &dql.FilterTree{
+		block := &dql.GraphQuery{Var: all, Attr: "var", Func: authorities}
+		authRw.varGen.settledRule(rn.CascadeWrapPred, "", block)
+		return []*dql.GraphQuery{block}, &dql.FilterTree{
 			Func: &dql.Function{Name: "uid_in", Args: []dql.Arg{{Value: rn.CascadeWrapPred}, {Value: "uid(" + all + ")"}}},
 		}
 	}
@@ -594,6 +598,7 @@ func (authRw *authRewriter) rewriteHeldWrap(typ schema.Type, rn *schema.RuleNode
 	if len(list) > 1 {
 		lit = "[" + strings.Join(list, ", ") + "]"
 	}
+	authRw.varGen.settledRule(rn.CascadeWrapPred, "")
 	return nil, &dql.FilterTree{
 		Func: &dql.Function{Name: "uid_in", Args: []dql.Arg{{Value: rn.CascadeWrapPred}, {Value: lit}}},
 	}

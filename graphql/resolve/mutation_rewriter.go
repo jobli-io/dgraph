@@ -144,6 +144,12 @@ type resultChecker func(map[string]interface{}) error
 type VariableGenerator struct {
 	counter       int
 	xidVarNameMap map[string]string
+	// What the rules of the request came to (SPIKE, see run_facts.go).
+	settledBlocks map[*dql.GraphQuery]struct{}
+	ruleReads     map[string]struct{}
+	ruleInverse   map[string]struct{}
+	ruled         bool
+	ruledBy       string
 }
 
 func NewVariableGenerator() *VariableGenerator {

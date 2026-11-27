@@ -688,6 +688,7 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	// mutation loop — the nodes will no longer exist once the delete transaction commits.
 	result := make(map[string]interface{})
 	newNodes := make(map[string]schema.Type)
+	facts := newChangeReader(mutation)
 
 	mutationTimer := newtimer(ctx, &dgraphMutationDuration.OffsetDuration)
 	mutationTimer.Start()
@@ -704,6 +705,7 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		}
 
 		ext.TouchedUids += mutResp.GetMetrics().GetNumUids()[touchedUidsKey]
+		facts.read(upsert.Mutations, mutResp.GetUids())
 		if req.Query != "" && len(mutResp.GetJson()) != 0 {
 			if err := json.Unmarshal(mutResp.GetJson(), &result); err != nil {
 				return emptyResult(
@@ -921,6 +923,8 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		// the error path only contains the query field, so we prepend the mutation response name
 		Err:        schema.PrependPath(queryErrs, mutation.ResponseName()),
 		Extensions: ext,
+		Change: facts.change(mutation,
+			mr.mutationRewriter.MutatedRootUIDs(mutation, mutResp.GetUids(), result), result),
 	}, resolverSucceeded
 }
 

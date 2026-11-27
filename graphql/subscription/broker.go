@@ -11,12 +11,14 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dgraph-io/dgraph/v25/conn"
+	"github.com/dgraph-io/dgraph/v25/graphql/resolve"
 	"github.com/golang/glog"
 )
 
@@ -32,6 +34,19 @@ type InvalidationMessage struct {
 	// Scope is the scope the changed record belongs to, by claim (see
 	// resolve.Invalidation). Empty when nothing can be said.
 	Scope map[string]string `json:"scope,omitempty"`
+	// Change is what the mutation wrote, when it could say (see narrow.go).
+	Change *resolve.Change `json:"change,omitempty"`
+	// Origin names the alpha that published the message.
+	Origin string `json:"origin,omitempty"`
+}
+
+// origin names this process. An alpha whose peers are on its own host (addresses it
+// cannot tell from its own) is sent its own messages back, and handled each twice.
+var origin = fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+
+// FromHere reports whether this alpha published the message.
+func (m *InvalidationMessage) FromHere() bool {
+	return m.Origin == origin
 }
 
 // InvalidationBroker defines the interface for publishing and subscribing to cluster-wide invalidations.
@@ -178,6 +193,9 @@ func NewNativeClusterBroker() InvalidationBroker {
 }
 
 func (n *NativeClusterBroker) Publish(ctx context.Context, msg *InvalidationMessage) error {
+	if msg.Origin == "" {
+		msg.Origin = origin
+	}
 	// 1. Process locally first
 	n.PublishLocally(msg)
 

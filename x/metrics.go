@@ -46,6 +46,11 @@ var (
 	// NumQueries is the total number of queries processed so far.
 	NumQueries = ostats.Int64("num_queries_total",
 		"Total number of queries", ostats.UnitDimensionless)
+	// SubscriptionWakes counts what became of a change that reached a subscription:
+	// tagged by method as rerun, skipped (it could not have changed the result) or
+	// checked (the store was asked whether it could).
+	SubscriptionWakes = ostats.Int64("subscription_wakes_total",
+		"Subscription re-runs, and re-runs saved", ostats.UnitDimensionless)
 	// NumMutations is the total number of mutations processed so far.
 	NumMutations = ostats.Int64("num_mutations_total",
 		"Total number of mutations", ostats.UnitDimensionless)
@@ -208,6 +213,13 @@ var (
 			Name:        NumQueries.Name(),
 			Measure:     NumQueries,
 			Description: NumQueries.Description(),
+			Aggregation: view.Count(),
+			TagKeys:     allTagKeys,
+		},
+		{
+			Name:        SubscriptionWakes.Name(),
+			Measure:     SubscriptionWakes,
+			Description: SubscriptionWakes.Description(),
 			Aggregation: view.Count(),
 			TagKeys:     allTagKeys,
 		},

@@ -62,6 +62,37 @@ func (dr *DependencyRegistry) Register(bucketID, subID uint64, op schema.Operati
 	}
 }
 
+// Mention files a subscriber under more types than the fields of its selection have.
+// A count is of the type of its answer (NoteAggregateResult), so it was never filed
+// under the type it counts, and no change to a Note ran it again; nor was a list
+// filed under a type that only its filter looks at.
+func (dr *DependencyRegistry) Mention(bucketID, subID uint64, types ...map[string]struct{}) {
+	dr.Lock()
+	defer dr.Unlock()
+	key := subKey{bucketID: bucketID, subID: subID}
+	if _, ok := dr.subTypes[key]; !ok {
+		return
+	}
+	for _, set := range types {
+		for name := range set {
+			dr.addTypeDep(key, name)
+		}
+	}
+}
+
+// Holds reports whether the answer of any subscriber in the bucket holds the record,
+// or its query names it.
+func (dr *DependencyRegistry) Holds(bucketID uint64, uid string) bool {
+	dr.RLock()
+	defer dr.RUnlock()
+	for sub := range dr.uidIndex[uid] {
+		if sub.bucketID == bucketID {
+			return true
+		}
+	}
+	return false
+}
+
 func (dr *DependencyRegistry) traverseField(key subKey, f schema.Field) {
 	if f == nil {
 		return
