@@ -296,6 +296,11 @@ they form a Raft group and provide synchronous replication.
 			"caller passes its rule, and leave the cascades that end there out of the query.").
 		Flag("partition-grants-ttl", "SPIKE: how long that answer is believed. A revoked grant "+
 			"keeps working for this long. 0 asks on every request.").
+		Flag("partition-group-grants", "SPIKE: with partition-fast-path, ask once which records "+
+			"that hold grants (groups, job boards) pass for the caller, and compile cascades "+
+			"that end at them against that list.").
+		Flag("partition-tenant-rules", "SPIKE: with partition-fast-path, ask a rule that only "+
+			"tests the record's Workspace once of the Workspace, and leave it out where it holds.").
 		String())
 
 	RegisterFlags(flag)
@@ -851,7 +856,8 @@ func run() {
 			glog.Fatalf("unknown partition-resolver %q: use header or jwt", resolver)
 		}
 		if featureFlagsConf.GetBool("partition-fast-path") {
-			resolve.EnablePartitionGrants(featureFlagsConf.GetDuration("partition-grants-ttl"))
+			resolve.EnablePartitionGrants(featureFlagsConf.GetDuration("partition-grants-ttl"),
+				featureFlagsConf.GetBool("partition-group-grants"), featureFlagsConf.GetBool("partition-tenant-rules"))
 			glog.Infof("SPIKE: workspace-level grants are on for partition namespaces")
 		}
 	}

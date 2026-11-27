@@ -34,7 +34,7 @@ UID, so the same query must return the same bytes in each arm. Where it does
 not, the script names the records that differ and why.
 
 usage: SPIKE_SUB=<a member's userId> SPIKE_EMAIL=<their email> \
-       proof_real.py [restore] [today] [extract] [load] [relayout] [partition] [fastpath] [report]
+       proof_real.py [restore] [today] [extract] [load] [relayout] [partition] [fastpath] [grants] [report]
        With no stage named, all of them run in that order.
        SPIKE_WS names the workspace (default dc98a028).
        SPIKE_ARMS="ws_rules_off,foreign" reruns only those parts of the partition stage.
@@ -1107,6 +1107,174 @@ def report_fast():
         print(line)
 
 
+# ---------------------------------------------------------------- group grants and tenant rules
+
+GROUPS = FAST + "; partition-group-grants=true"
+FULL = GROUPS + "; partition-tenant-rules=true"
+FULL_ASKING = FULL.replace("partition-grants-ttl=5s", "partition-grants-ttl=0")
+# The edge each listed type's rules take as given because the schema declares it
+# non-null: inWorkspace for a WorkspaceMember, inGroup for the other Groupable types.
+IN_WORKSPACE = "WorkspaceMember.inWorkspace"
+GIVEN = {t: IN_WORKSPACE for t in ("Candidate", "User", "Group", "Note", "Attachment")}
+# Types read through an owner, and the edge to it.
+OWNED = {"Note": "Note.forResource", "Attachment": "Attachment.forResource"}
+GRANT_ARMS = [("owner", [("rules", ON), ("fast", FAST), ("full", FULL)]),
+              ("reader", [("fast", FAST), ("full", FULL)]),
+              ("group", [("rules", ON), ("groups", GROUPS), ("full", FULL)])]
+
+
+def stage_grants(t):
+    """The two further steps of the fast path, for the three callers of the fastpath
+    stage. Group grants must change no answer. Tenant rules may only add records that
+    lack the edge the schema says they have, or that hang off a candidate that lacks it."""
+    params = load("params")
+    original = open(os.path.join(OUT, "schema_today.graphql")).read()
+    wanted = [a for a in os.environ.get("SPIKE_ARMS", "").split(",") if a]
+
+    def run(c, arm, tok, flags, under_load):
+        c.flags = flags
+        restart(c)
+        print(arm, flush=True)
+        res = measure(c, tok, arm, params, under_load)
+        if flags == FULL_ASKING:
+            log = os.path.join(ROOT, "run", "rj", "alpha0.log")
+            res["_asks"] = {}
+            for label, query, variables in suite(params):
+                before = os.path.getsize(log)
+                gql(c, tok, query, variables)
+                time.sleep(0.2)
+                with open(log, "rb") as f:
+                    f.seek(before)
+                    res["_asks"][label] = f.read().count(b"partition grants: asked")
+        restart(c, debug=True)
+        res["_compiled"] = compiled(c, tok, arm, params)
+        save(arm, res)
+        return res
+
+    with cluster(ON) as c:
+        try:
+            c.flags = HEADER_MODE
+            restart(c)
+            group = add_callers(c, params["ws_id"])
+            if get_schema(c) != original:
+                set_schema(c, original)
+            toks = {"owner": token(), "reader": token(sub=CALLERS["reader"], email="reader@spike.invalid"),
+                    "group": token(sub=CALLERS["group"], email="group@spike.invalid")}
+            print("test users: one bound to the viewer role on the Workspace, one on the group %r (%d jobs)" % (
+                group["n"], group["jobs"]), flush=True)
+
+            seen = {}
+            for flags in (ON, FAST, GROUPS, FULL):
+                c.flags = flags
+                restart(c)
+                for who, tok in toks.items():
+                    seen[who, flags] = visible(c, tok)
+            c.flags = HEADER_MODE
+            restart(c)
+            out = {}
+            # Candidates with no inWorkspace edge, deleted ones included: what hangs
+            # off them is hidden today because they are.
+            adrift = {r["uid"] for r in c.rows("{ q(func: type(Candidate)) @filter(NOT has(%s)) { uid } }" % IN_WORKSPACE,
+                                               ns=1)}
+            for who in toks:
+                rules, fast, groups, full = (seen[who, f] for f in (ON, FAST, GROUPS, FULL))
+                t.check("%s: group grants show exactly the records the fast path without them shows" % who,
+                        groups == fast, {k: (len(fast[k]), len(groups[k])) for k in LISTED if fast[k] != groups[k]})
+                out[who] = {}
+                for typ in LISTED:
+                    extra, lost = sorted(full[typ] - rules[typ]), sorted(rules[typ] - full[typ])
+                    own, owner = set(), set()
+                    if extra:
+                        ids = ", ".join(extra)
+                        own = {r["uid"] for r in c.rows("{ q(func: uid(%s)) @filter(NOT has(%s)) { uid } }" % (
+                            ids, GIVEN.get(typ, "Groupable.inGroup")), ns=1)}
+                        if typ in OWNED:
+                            owner = {r["uid"] for r in c.rows("{ q(func: uid(%s)) { uid o: %s { uid } } }" % (
+                                ids, OWNED[typ]), ns=1) if adrift & set(edges(r.get("o")))} - own
+                    out[who][typ] = {"rules": len(rules[typ]), "fast": len(fast[typ]), "groups": len(groups[typ]),
+                                     "full": len(full[typ]), "extra": len(extra), "lost": len(lost),
+                                     "own": len(own), "owner": len(owner)}
+                    print("  %-7s %-12s rules %6d  fast %6d  groups %6d  full %6d  extra %4d: %4d lack their edge, "
+                          "%4d are on a candidate that does" % (who, typ, len(rules[typ]), len(fast[typ]),
+                                                                 len(groups[typ]), len(full[typ]), len(extra), len(own),
+                                                                 len(owner)), flush=True)
+                t.check("%s: with everything on, nothing the rules as written show is hidden" % who,
+                        all(v["lost"] == 0 for v in out[who].values()),
+                        {k: v["lost"] for k, v in out[who].items() if v["lost"]})
+                t.check("%s: with everything on, %d records show that the rules as written hide; each lacks the edge "
+                        "the schema says it has, or is on a candidate with no inWorkspace" % (
+                            who, sum(v["extra"] for v in out[who].values())),
+                        all(v["extra"] == v["own"] + v["owner"] for v in out[who].values()),
+                        {k: (v["extra"], v["own"], v["owner"]) for k, v in out[who].items()
+                         if v["extra"] != v["own"] + v["owner"]})
+            save("grants_seen", {"seen": out, "group_name": group["n"]})
+            if wanted == ["seen"]:
+                return
+
+            res = {}
+            for who, arms in GRANT_ARMS:
+                for name, flags in arms:
+                    arm = "g_%s_%s" % (who, name)
+                    if wanted and arm not in wanted:
+                        res[arm] = load(arm, {})
+                        continue
+                    res[arm] = run(c, arm, toks[who], flags, name in ("rules", "full"))
+            if not wanted or "g_group_asking" in wanted:
+                res["g_group_asking"] = run(c, "g_group_asking", toks["group"], FULL_ASKING, False)
+
+            # Group grants compile the same rule against the records that pass it.
+            a, b = res.get("g_group_groups"), res.get("g_group_rules")
+            if a and b:
+                asked, differ = same_answers(a, b)
+                t.check("group grants: %d of %d answers are the rules-as-written ones" % (
+                    len(asked) - len(differ), len(asked)), bool(asked) and not differ, differ)
+            for who, arms in GRANT_ARMS:
+                first, full = res.get("g_%s_%s" % (who, arms[0][0])), res.get("g_%s_full" % who)
+                if first and full:
+                    asked, differ = same_answers(full, first)
+                    # Not a check: a difference is a record without an edge, counted above.
+                    print("%s: with everything on, %d of %d answers are those of %r%s" % (
+                        who, len(asked) - len(differ), len(asked), arms[0][0],
+                        "; differing: %s" % differ if differ else ""), flush=True)
+                    save("grants_differ_" + who, differ)
+        finally:
+            c.flags = HEADER_MODE
+            restart(c)
+            remove_callers(c)
+            c.flags = ON
+            restart(c)
+            if get_schema(c) != original:
+                set_schema(c, original)
+
+
+def report_grants():
+    names = [("g_%s_%s" % (who, name), "%s, %s" % (who, name)) for who, arms in GRANT_ARMS for name, _ in arms]
+    res = {a: load(a, {}) for a, _ in names + [("g_group_asking", ""), ("no_rules", "")]}
+    if not res["g_group_rules"]:
+        return
+    labels = [k for k in res["g_group_rules"] if k[0] != "_"]
+    print("\ngroup grants and tenant rules: median round trip in ms / DQL blocks")
+    print("%-41s" % "query" + "".join("%16s" % title for _, title in names) + "%16s" % "no rules")
+    for k in labels:
+        line = "%-41s" % k
+        for a, _ in names + [("no_rules", "")]:
+            v, d = res[a].get(k) or {}, (res[a].get("_compiled") or {}).get(k) or {}
+            line += "%9.1f /%5s" % (v["p50"], d.get("blocks", "-")) if "p50" in v else "%16s" % "-"
+        print(line)
+    print("\n%d clients on the candidate list page" % CLIENTS)
+    for a, title in names:
+        v = res[a].get("_load")
+        if v:
+            print("  %-16s %8.1f requests/s   p50 %8.0f ms   p95 %8.0f ms" % (title, v["rps"], v["p50"], v["p95"]))
+    if res["g_group_asking"]:
+        print("\nthe group caller, everything on: questions per request, and the median with the answers remembered "
+              "/ asked every time")
+        for k in labels:
+            print("  %-41s %3d questions %9.1f ms / %9.1f ms" % (
+                k, res["g_group_asking"].get("_asks", {}).get(k, 0), res["g_group_full"][k]["p50"],
+                res["g_group_asking"][k]["p50"]))
+
+
 ARMS = [("today", "Today"), ("today_again", "Today, again"), ("partition", "Partition"),
         ("ws_rules_off", "+ ws rules off"), ("no_rules", "No rules")]
 
@@ -1142,11 +1310,12 @@ def stage_report(t):
         if v:
             print("  %-16s %8.1f requests/s   p50 %8.0f ms   p95 %8.0f ms" % (title, v["rps"], v["p50"], v["p95"]))
     report_fast()
+    report_grants()
 
 
 STAGES = [("restore", stage_restore), ("today", stage_today), ("extract", stage_extract), ("load", stage_load),
           ("relayout", stage_relayout), ("partition", stage_partition), ("fastpath", stage_fastpath),
-          ("report", stage_report)]
+          ("grants", stage_grants), ("report", stage_report)]
 
 
 def main():

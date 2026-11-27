@@ -2661,6 +2661,10 @@ func (authRw *authRewriter) rewriteRuleNode(
 			return nil, nil
 		}
 
+		if rn.CascadeWrapHeldSet {
+			return authRw.rewriteHeldWrap(typ, rn)
+		}
+
 		inner := rn.CascadeWrapInner
 
 		// Cache check: reuse authority var if already generated in this request.

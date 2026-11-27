@@ -81,6 +81,16 @@ type RuleNode struct {
 	// this CascadeWrap node using a REVERSE lookup strategy (traversing from the
 	// authority to the child) rather than a FORWARD lookup strategy.
 	CascadeWrapReverse bool
+	// CascadeWrapHeld is set on a request's own copy of a CascadeWrap node when the
+	// authority records that pass CascadeWrapInner for the caller are already known
+	// (SPIKE, see resolve/partition_grants.go). With CascadeWrapHeldSet the rewriter
+	// uses these UIDs in place of the authority var and compiles nothing for the
+	// inner rule. An empty list means no authority passes.
+	CascadeWrapHeldSet bool
+	CascadeWrapHeld    []uint64
+	// CascadeWrapAll, with CascadeWrapHeldSet, says every record of CascadeWrapType
+	// passes: the rewriter uses the type itself as the authority set.
+	CascadeWrapAll bool
 	// CascadeInversePred is the Dgraph predicate that the uid_in filter traverses
 	// to scope the child type from the authority's side. On leaf cascade nodes this
 	// mirrors CascadeEdgePred; on bundle nodes CascadeBundlePred takes precedence.
