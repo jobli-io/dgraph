@@ -107,3 +107,41 @@ func TestOldValuePathThroughImplementorField(t *testing.T) {
 		require.Contains(t, err.Error(), "unknown field")
 	})
 }
+
+func TestReferenceScopeDirectiveValidation(t *testing.T) {
+	load := func(directive string) error {
+		h, err := NewHandler(`
+type Space {
+	id: ID!
+	name: String!
+	parent: Space
+}
+
+type Team `+directive+` {
+	id: ID!
+	title: String
+	inSpace: Space
+}`, false)
+		if err != nil {
+			return err
+		}
+		_, err = FromString(h.GQLSchema(), x.RootNamespace)
+		return err
+	}
+	require.NoError(t, load(`@referenceScope(claim: "ws", path: "inSpace.name")`))
+	require.NoError(t, load(`@referenceScope(claim: "ws", path: "inSpace.parent.name")`))
+	require.NoError(t, load(`@referenceScope(claim: "ws", path: "title")`))
+	for path, want := range map[string]string{
+		"inSpace":         "must end on a scalar or enum field",
+		"inSpace.nowhere": "unknown field",
+		"title.name":      "cannot walk through",
+		"":                "needs a claim and a path",
+	} {
+		err := load(`@referenceScope(claim: "ws", path: "` + path + `")`)
+		require.Error(t, err, path)
+		require.Contains(t, err.Error(), want, path)
+	}
+	err := load(`@referenceScope(claim: "", path: "title")`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "needs a claim and a path")
+}

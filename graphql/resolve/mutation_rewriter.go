@@ -125,6 +125,12 @@ type xidMetadata struct {
 	pendingForwardRefs map[string]*pendingForwardRef
 	// isDryRun indicates whether the mutation operation has the @dryRun directive enabled.
 	isDryRun bool
+	// pendingScope and pendingChecks are the @referenceScope blocks noted while the
+	// payload is walked, and refScopes the ones sent with the existence queries, by
+	// block name (see reference_scope.go).
+	pendingScope  []*dql.GraphQuery
+	pendingChecks []*refScopeCheck
+	refScopes     map[string]*refScopeCheck
 }
 
 // A mutationBuilder can build a json mutation []byte from a mutationFragment
@@ -503,6 +509,9 @@ func (arw *AddRewriter) RewriteQueries(
 		}
 		ret = append(ret, queries...)
 		retTypes = append(retTypes, typs...)
+		scopeQueries, scopeTypes := arw.XidMetadata.takeReferenceScopeQueries()
+		ret = append(ret, scopeQueries...)
+		retTypes = append(retTypes, scopeTypes...)
 	}
 	return ret, retTypes, retErrors
 }
@@ -599,6 +608,9 @@ func (urw *UpdateRewriter) RewriteQueries(
 			}
 			ret = append(ret, queries...)
 			retTypes = append(retTypes, typs...)
+			scopeQueries, scopeTypes := urw.XidMetadata.takeReferenceScopeQueries()
+			ret = append(ret, scopeQueries...)
+			retTypes = append(retTypes, scopeTypes...)
 		}
 	}
 
@@ -617,6 +629,9 @@ func (urw *UpdateRewriter) RewriteQueries(
 			}
 			ret = append(ret, queries...)
 			retTypes = append(retTypes, typs...)
+			// What an update removes is not tested: a record tied across the
+			// boundary has to be untied.
+			urw.XidMetadata.dropReferenceScopeQueries()
 		}
 	}
 	return ret, retTypes, retErrors
@@ -3240,6 +3255,8 @@ func existenceQueries(
 				query, err := checkUIDExistsQuery(idVal, variable, typ)
 				if err != nil {
 					retErrors = append(retErrors, err)
+				} else if !atTopLevel {
+					xidMetadata.noteReferenceScope(query, typ, false)
 				}
 				ret = append(ret, query)
 				retTypes = append(retTypes, srcField.Type().DgraphName())
@@ -3317,6 +3334,9 @@ func existenceQueries(
 					query := checkXIDExistsQuery(variable, xidString, xid.Name(), typ, nil)
 					ret = append(ret, query)
 					retTypes = append(retTypes, typ.DgraphName())
+					if !atTopLevel {
+						xidMetadata.noteReferenceScope(query, typ, true)
+					}
 
 					// Add one more existence query if given xid field is inherited from interface and has
 					// interface argument set. This is added to ensure that this xid is unique across all the

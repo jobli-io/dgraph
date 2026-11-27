@@ -309,6 +309,10 @@ type Type interface {
 	IsAggregateResult() bool
 	IsInbuiltOrEnumType() bool
 	fmt.Stringer
+	// ReferenceScopes returns the @referenceScope rules a record of this type must meet
+	// to be named in a mutation, and the Dgraph names of the implementing types that
+	// have none. Both are nil when no rule applies to the type.
+	ReferenceScopes() ([]ReferenceScope, []string)
 }
 
 // A FieldDefinition is a field as defined in some Type in the schema.  As opposed
@@ -3270,6 +3274,101 @@ func (t *astType) PostValidateConfigs(action string) []*PostValidateConfig {
 	}
 
 	return configs
+}
+
+// ReferenceScope is one @referenceScope rule, resolved to Dgraph predicates: walking
+// Edges from a record and reading Value must give the caller's Claim.
+type ReferenceScope struct {
+	Claim string
+	Edges []string
+	Value string
+}
+
+// ReferenceScopes returns the @referenceScope rules that apply to t. A type takes its
+// own rule and those of the interfaces it implements, and a record meets them when it
+// meets any one. An interface or a union takes the rules of every type it can be; the
+// types that have none are returned by name, so that their records are let through.
+func (t *astType) ReferenceScopes() ([]ReferenceScope, []string) {
+	if t == nil || t.typ == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return nil, nil
+	}
+	sch := t.inSchema.schema
+	def := sch.Types[t.typ.Name()]
+	if def == nil {
+		return nil, nil
+	}
+	defs := []*ast.Definition{def}
+	if def.Kind == ast.Interface || def.Kind == ast.Union {
+		defs = sch.PossibleTypes[def.Name]
+	}
+	var scopes []ReferenceScope
+	var unscoped []string
+	seen := make(map[string]bool)
+	for _, d := range defs {
+		found := false
+		for _, name := range append([]string{d.Name}, d.Interfaces...) {
+			holder := sch.Types[name]
+			if holder == nil {
+				continue
+			}
+			dir := holder.Directives.ForName(referenceScopeDirective)
+			if dir == nil {
+				continue
+			}
+			scope, ok := t.resolveReferenceScope(holder, dir)
+			if !ok {
+				continue
+			}
+			found = true
+			key := scope.Claim + "\x00" + strings.Join(scope.Edges, "\x00") + "\x00" + scope.Value
+			if !seen[key] {
+				seen[key] = true
+				scopes = append(scopes, scope)
+			}
+		}
+		if !found {
+			name := typeName(d)
+			if name == "" {
+				name = d.Name
+			}
+			unscoped = append(unscoped, name)
+		}
+	}
+	if len(scopes) == 0 {
+		return nil, nil
+	}
+	return scopes, unscoped
+}
+
+func (t *astType) resolveReferenceScope(holder *ast.Definition, dir *ast.Directive) (ReferenceScope, bool) {
+	var scope ReferenceScope
+	claim, path := dir.Arguments.ForName("claim"), dir.Arguments.ForName("path")
+	if claim == nil || path == nil || claim.Value == nil || path.Value == nil {
+		return scope, false
+	}
+	scope.Claim = claim.Value.Raw
+	cur := holder
+	segments := strings.Split(path.Value.Raw, ".")
+	for i, seg := range segments {
+		fd := cur.Fields.ForName(seg)
+		if fd == nil {
+			return scope, false
+		}
+		pred := (&astType{typ: &ast.Type{NamedType: cur.Name}, inSchema: t.inSchema,
+			dgraphPredicate: t.dgraphPredicate}).DgraphPredicate(seg)
+		if pred == "" {
+			return scope, false
+		}
+		if i == len(segments)-1 {
+			scope.Value = pred
+			return scope, scope.Claim != ""
+		}
+		scope.Edges = append(scope.Edges, pred)
+		if cur = t.inSchema.schema.Types[fd.Type.Name()]; cur == nil {
+			return scope, false
+		}
+	}
+	return scope, false
 }
 
 func (t *astType) PostValidateConfig(action string) *PostValidateConfig {

@@ -39,6 +39,7 @@ func init() {
 		passwordDirectiveValidation, conflictingDirectiveValidation, nonIdFieldsCheck,
 		remoteTypeValidation, generateDirectiveValidation, apolloKeyValidation,
 		apolloExtendsValidation, lambdaOnMutateValidation, postValidateDirectiveValidation,
+		referenceScopeDirectiveValidation,
 		validateInterfacePolicy, validateTypeDirectiveValidation)
 	fieldValidations = append(fieldValidations, listValidityCheck, fieldArgumentCheck,
 		fieldNameCheck, isValidFieldForList, hasAuthDirective, fieldDirectiveCheck)
@@ -2030,6 +2031,53 @@ func validateTypeDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqler
 	}
 
 	return errs
+}
+
+// referenceScopeDirectiveValidation checks that the path of @referenceScope walks edges
+// of the type and ends on a scalar or enum field, and that a claim is named.
+func referenceScopeDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqlerror.List {
+	dir := typ.Directives.ForName(referenceScopeDirective)
+	if dir == nil {
+		return nil
+	}
+	claim, path := "", ""
+	if a := dir.Arguments.ForName("claim"); a != nil && a.Value != nil {
+		claim = a.Value.Raw
+	}
+	if a := dir.Arguments.ForName("path"); a != nil && a.Value != nil {
+		path = a.Value.Raw
+	}
+	if claim == "" || path == "" {
+		return gqlerror.List{gqlerror.ErrorPosf(dir.Position,
+			"Type %s; @referenceScope needs a claim and a path.", typ.Name)}
+	}
+	cur := typ
+	segments := strings.Split(path, ".")
+	for i, seg := range segments {
+		fd := cur.Fields.ForName(seg)
+		if fd == nil {
+			return gqlerror.List{gqlerror.ErrorPosf(dir.Position,
+				"Type %s; @referenceScope path %q names unknown field %q on type %s.",
+				typ.Name, path, seg, cur.Name)}
+		}
+		next := sch.Types[fd.Type.Name()]
+		leaf := isScalar(fd.Type.Name()) || (next != nil && next.Kind == ast.Enum)
+		if i == len(segments)-1 {
+			if !leaf {
+				return gqlerror.List{gqlerror.ErrorPosf(dir.Position,
+					"Type %s; @referenceScope path %q must end on a scalar or enum field.",
+					typ.Name, path)}
+			}
+			return nil
+		}
+		if leaf || next == nil {
+			return gqlerror.List{gqlerror.ErrorPosf(dir.Position,
+				"Type %s; @referenceScope path %q cannot walk through field %q on type %s.",
+				typ.Name, path, seg, cur.Name)}
+		}
+		cur = next
+	}
+	return nil
 }
 
 // postValidateDirectiveValidation compiles the @postValidate expr arguments at

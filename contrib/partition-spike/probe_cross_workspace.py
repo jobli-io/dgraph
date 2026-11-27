@@ -8,6 +8,9 @@ write is sent with @dryRun under each schema:
   today      schema_today.graphql, the rules as written
   fix        the same, with the Groupable and AttachmentOwner rules of graph/.graphql,
              when that file differs
+  scope      today's rules, with the @referenceScope lines of graph/.graphql and nothing
+             else: the engine tests every record a mutation names
+  both       fix and scope together
 
 The records the probe needs of its own are added for real under today's schema and
 removed again, with every edge to them, and the schema is put back.
@@ -65,6 +68,24 @@ def arms(original):
         fixed = fixed.replace(field, field.replace("@cascadeAuth", marker + "\n        @cascadeAuth", 1), 1)
     if fixed != original:
         out.append(("fix", fixed))
+    # @referenceScope: copy each line of graph/.graphql that carries it to under the
+    # same declaration here.
+    def scoped(schema):
+        lines = now.split("\n")
+        for i, line in enumerate(lines):
+            if line.strip().startswith("@referenceScope("):
+                j = i - 1
+                while not re.match(r"(type|interface) ", lines[j]):
+                    j -= 1
+                head = lines[j] + "\n"
+                if schema.count("\n" + head) != 1:
+                    raise SystemExit("cannot place %s under %r" % (line.strip(), lines[j][:50]))
+                schema = schema.replace("\n" + head, "\n" + head + line + "\n", 1)
+        return schema
+    if "@referenceScope(" in now:
+        out.append(("scope", scoped(original)))
+        if fixed != original:
+            out.append(("both", scoped(fixed)))
     return out
 
 
@@ -74,7 +95,8 @@ def run(c, tok, query, variables):
         m = errs[0]
         short = "refused" if "uthoriz" in m else "error"
         return short, m
-    return str((d or {}).get("numUids")), ""
+    # A dry run that changes nothing can still say why.
+    return str((d or {}).get("numUids")), (errs[0] if errs else "")
 
 
 def main():
@@ -131,6 +153,12 @@ def main():
             updc = "mutation($in: UpdateCandidateInput!) @dryRun { m: updateCandidate(input: $in) { numUids } }"
             updo = "mutation($in: UpdateCompanyInput!) @dryRun { m: updateCompany(input: $in) { numUids } }"
             updt = "mutation($in: UpdateAttachmentInput!) @dryRun { m: updateAttachment(input: $in) { numUids } }"
+            note = "mutation($in: [AddNoteInput!]!) @dryRun { m: addNote(input: $in) { numUids } }"
+            tag = "mutation($in: [AddTagInput!]!) @dryRun { m: addTag(input: $in) { numUids } }"
+            app = "mutation($in: [AddApplicationInput!]!) @dryRun { m: addApplication(input: $in) { numUids } }"
+            msg = rows("{ q(func: type(Message), first: 200) @cascade { uid c: Message.conversation @filter(uid_in(%s, %s)) { uid } } }" % (WSM, ws))
+            MSG = msg[0]["uid"] if msg else None
+            print("a message of %s: %s" % (P.WS, MSG))
             C = lambda **k: [dict({"firstName": "Spike", "lastName": "Cross"}, **k)]
             O = lambda **k: [dict({"name": "Spike Cross Co"}, **k)]
             T = lambda **k: [dict({"category": "OTHER"}, **k)]
@@ -154,6 +182,15 @@ def main():
                      {"in": {"filter": {"id": [OC]}, "set": {"hasAttachment": g(t["T_A"])}}}),
                     ("outsider", "add candidate with an attachment of %s inside" % P.WS, cand,
                      {"in": C(inGroup=g(OG), hasAttachment=g(t["T_A"]))}),
+                    ("outsider", "add a note on a candidate of %s" % P.WS, note, {"in": [{"text": "spike", "forResource": g(A)}]}),
+                    ("outsider", "add a note mentioning a user of %s" % P.WS, note, {"in": [{"text": "spike", "forResource": g(OC), "mentions": g(t["U"])}]}),
+                    ("outsider", "add a tag on a candidate of %s" % P.WS, tag, {"in": [{"name": "spike-cross", "tagable": g(A)}]}),
+                    ("outsider", "add a tag in a group of %s" % P.WS, tag, {"in": [{"name": "spike-cross", "inGroup": g(G)}]}),
+                    ("outsider", "add an application for a candidate of %s" % P.WS, app, {"in": [{"hasCandidate": {"id": A}, "inGroup": g(OG)}]}),
+                    ("outsider", "update own candidate: an address of %s" % P.WS, updc,
+                     {"in": {"filter": {"id": [OC]}, "set": {"hasAddress": {"id": t["A2_addr"]}}}}),
+                    ("outsider", "add an attachment on a message of %s" % P.WS, att, {"in": T(inGroup=g(OG), forResource=g(MSG))} if MSG else None),
+                    ("outsider", "add a candidate naming the workspace %s" % P.WS, cand, {"in": C(inGroup=g(OG), inWorkspace={"id": ws})}),
                 ]),
                 ("should be allowed", [
                     ("outsider", "add candidate into own group", cand, {"in": C(inGroup=g(OG))}),
@@ -175,6 +212,17 @@ def main():
                     ("editor", "add company into their group", comp, {"in": O(inGroup=g(G))}),
                     ("editor", "add attachment on a candidate of their group", att, {"in": T(forResource=g(N))}),
                     ("editor", "update a candidate of their group", updc, {"in": {"filter": {"id": [N]}, "set": {"specialty": "spike"}}}),
+                    ("outsider", "update own candidate: remove a group of %s" % P.WS, updc,
+                     {"in": {"filter": {"id": [OC]}, "remove": {"inGroup": g(G)}}}),
+                    ("outsider", "add a note on own candidate", note, {"in": [{"text": "spike", "forResource": g(OC)}]}),
+                    ("outsider", "add a tag on own candidate", tag, {"in": [{"name": "spike-cross", "tagable": g(OC)}]}),
+                    ("outsider", "add an application for own candidate", app, {"in": [{"hasCandidate": {"id": OC}, "inGroup": g(OG)}]}),
+                    ("owner", "add a note on a candidate", note, {"in": [{"text": "spike", "forResource": g(N)}]}),
+                    ("owner", "add a note mentioning a user", note, {"in": [{"text": "spike", "forResource": g(N), "mentions": g(t["U"])}]}),
+                    ("owner", "add a tag on a candidate", tag, {"in": [{"name": "spike-cross", "tagable": g(N)}]}),
+                    ("owner", "add an application for a candidate", app, {"in": [{"hasCandidate": {"id": N}, "inGroup": g(G)}]}),
+                    ("owner", "add an attachment on a message", att, {"in": T(forResource=g(MSG))} if MSG else None),
+                    ("editor", "add a note on a candidate of their group", note, {"in": [{"text": "spike", "forResource": g(N)}]}),
                 ]),
             ]
             schemas = arms(original)
@@ -186,6 +234,8 @@ def main():
                     continue
                 for _, group in cases:
                     for who, label, q, v in group:
+                        if v is None:
+                            continue
                         got, m = run(c, toks[who], q, v)
                         results[(name, who, label)] = got
                         if m:

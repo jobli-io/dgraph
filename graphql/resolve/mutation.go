@@ -411,6 +411,21 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		return emptyResult(gqlErr), resolverFailed
 	}
 
+	// Records the mutation names that the caller is out of scope of (@referenceScope).
+	hiddenRefs, err := referencesOutOfScope(mr.mutationRewriter, queryResultMap,
+		func() (map[string]interface{}, error) {
+			claims, err := mutation.GetAuthMeta().ExtractCustomClaims(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return claims.AuthVariables, nil
+		})
+	if err != nil {
+		gqlErr := schema.GQLWrapLocationf(
+			err, mutation.Location(), "mutation %s failed", mutation.Name())
+		return emptyResult(gqlErr), resolverFailed
+	}
+
 	x.AssertTrue(len(filterTypes) == len(queries))
 	// qNameToType map contains the mapping from the query name to type/interface the query response
 	// has to be filtered upon.
@@ -433,6 +448,10 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		if key == UpdateMutationFilterVar {
 			// Defer handling — must not add to qNameToUID, but do capture for SetOldValue.
 			updateMutFilterResults = result
+			continue
+		}
+		if hiddenRefs[key] {
+			// Named by ID and out of the caller's scope: as if it were not there.
 			continue
 		}
 		var matchedResults []idExistenceRes
