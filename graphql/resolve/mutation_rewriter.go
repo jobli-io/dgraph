@@ -2744,6 +2744,11 @@ func rewriteObject(
 				// update idExistence for default node
 				var fieldQueries []*dql.GraphQuery
 				var fieldTypes []string
+				// A @default can build a reference from what the caller sent, so the record
+				// it names is held to its type's @referenceScope like one the caller wrote.
+				var scopeQueries []*dql.GraphQuery
+				var scopeChecks map[string]*refScopeCheck
+				xidMetadata.dropReferenceScopeQueries()
 				// defaultXidVar is set when the defaulted field is an @id (XID) field.
 				// It is read after the existence-query execution block below.
 				var defaultXidVar string
@@ -2800,11 +2805,19 @@ func rewriteObject(
 					}
 				}
 
+				switch value.(type) {
+				case []interface{}, map[string]interface{}:
+					scopeQueries, scopeChecks = xidMetadata.takeReferenceScopeChecks()
+				default:
+					// The record's own @id value: not a reference.
+					xidMetadata.dropReferenceScopeQueries()
+				}
+
 				// Execute existence queries
 				// todo: consider moving the execution of the existence queries to outside this loop.
 				if len(fieldQueries) > 0 {
 					// Execute queries and parse its result into a map
-					qry := dgraph.AsString(fieldQueries)
+					qry := dgraph.AsString(append(append([]*dql.GraphQuery{}, fieldQueries...), scopeQueries...))
 					req := &dgoapi.Request{Query: qry}
 
 					if req.Query != "" {
@@ -2828,6 +2841,12 @@ func rewriteObject(
 							continue
 						}
 
+						hiddenRefs, err := outOfScope(scopeChecks, queryResultMap, authVariables)
+						if err != nil {
+							retErrors = append(retErrors, err)
+							continue
+						}
+
 						x.AssertTrue(len(fieldTypes) == len(fieldQueries))
 						// qNameToType map contains the mapping from the query name to type/interface the query response
 						// has to be filtered upon.
@@ -2843,6 +2862,10 @@ func rewriteObject(
 						// As only Add and Update mutations generate queries using RewriteQueries,
 						// qNameToUID map will be non-empty only in case of Add or Update Mutation.
 						for key, result := range queryResultMap {
+							if _, isScope := scopeChecks[key]; isScope || hiddenRefs[key] {
+								// A scope block, or a record the caller cannot name: as if not there.
+								continue
+							}
 							var matchedResults []idExistenceRes
 							typ := qNameToType[key]
 							for _, res := range result {

@@ -219,3 +219,58 @@ func TestReferenceScopeNotAskedForWhatAnUpdateRemoves(t *testing.T) {
 		require.Equal(t, "Team", c.typeName)
 	}
 }
+
+// A @default can build a reference from what the caller sent. rewriteObject takes the
+// blocks for it and tests them itself, against the claims it was given.
+func TestReferenceScopeOfAReferenceTheServerMade(t *testing.T) {
+	scope := []schema.ReferenceScope{{Claim: "ws", Edges: []string{"Member.inSpace"}, Value: "Space.name"}}
+	theirs := `[{"uid":"0x1","dgraph.type":["Person"],"s0":{"v":"globex"}}]`
+	ours := `[{"uid":"0x2","dgraph.type":["Person"],"s0":{"v":"acme"}}]`
+	held := map[string]interface{}{"ws": "acme"}
+
+	t.Run("taken blocks are handed over once, and are not left for the mutation's own pass", func(t *testing.T) {
+		xm := &xidMetadata{
+			pendingScope:  []*dql.GraphQuery{{Attr: "Person_1__scope"}},
+			pendingChecks: []*refScopeCheck{{typeName: "Person", scopes: scope}},
+		}
+		queries, checks := xm.takeReferenceScopeChecks()
+		require.Len(t, queries, 1)
+		require.Contains(t, checks, "Person_1__scope")
+		require.Empty(t, xm.refScopes)
+		queries, checks = xm.takeReferenceScopeChecks()
+		require.Empty(t, queries)
+		require.Empty(t, checks)
+	})
+
+	t.Run("nothing taken, nothing tested", func(t *testing.T) {
+		hidden, err := outOfScope(nil, map[string][]idExistenceRes{"Person_1": scopeRows(t, theirs)}, held)
+		require.NoError(t, err)
+		require.Empty(t, hidden)
+	})
+
+	t.Run("named by ID: theirs is hidden, ours is not", func(t *testing.T) {
+		checks := map[string]*refScopeCheck{
+			"Person_1__scope": {typeName: "Person", scopes: scope},
+			"Person_2__scope": {typeName: "Person", scopes: scope},
+		}
+		hidden, err := outOfScope(checks, map[string][]idExistenceRes{
+			"Person_1__scope": scopeRows(t, theirs),
+			"Person_2__scope": scopeRows(t, ours),
+		}, held)
+		require.NoError(t, err)
+		require.Equal(t, map[string]bool{"Person_1": true}, hidden)
+	})
+
+	t.Run("a caller with no claims can have no scoped record named for it", func(t *testing.T) {
+		checks := map[string]*refScopeCheck{"Person_2__scope": {typeName: "Person", scopes: scope}}
+		hidden, err := outOfScope(checks, map[string][]idExistenceRes{"Person_2__scope": scopeRows(t, ours)}, nil)
+		require.NoError(t, err)
+		require.Equal(t, map[string]bool{"Person_2": true}, hidden)
+	})
+
+	t.Run("named by an @id value: theirs fails the mutation", func(t *testing.T) {
+		checks := map[string]*refScopeCheck{"Person_1__scope": {typeName: "Person", scopes: scope, byXID: true}}
+		_, err := outOfScope(checks, map[string][]idExistenceRes{"Person_1__scope": scopeRows(t, theirs)}, held)
+		require.Error(t, err)
+	})
+}

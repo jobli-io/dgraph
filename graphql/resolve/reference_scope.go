@@ -32,15 +32,18 @@ import (
 //   - A record named by an @id value that is out of scope fails the mutation. It
 //     cannot be treated as missing, because a missing @id value means "create it".
 //
-// What is tested is a reference the caller wrote: in an add, or in the set patch of
-// an update. Not tested:
+// What is tested is a reference to a record that is already there: one the caller
+// wrote, in an add or in the set patch of an update, and one a @default made, which
+// an expression can build from what the caller sent (see rewriteObject). Not tested:
 //
 //   - the record a mutation is about; its @auth rules decide that
 //   - the remove patch of an update, so that a record tied across the boundary can
 //     be untied
-//   - a reference the server made, from @default or @transform
 //   - a record of a type that has no rule, alone or among the types an interface or
 //     union field can hold
+//
+// @transform cannot name a record that was not named before it ran: no existence
+// check is made for what it returns, so an ID it introduces is refused as unknown.
 //
 // A type takes its own rule and those of its interfaces, and a record is in scope if
 // it meets any one of them. A path can pass through a list; one matching value is
@@ -104,6 +107,21 @@ func (xm *xidMetadata) takeReferenceScopeQueries() ([]*dql.GraphQuery, []string)
 	}
 	xm.pendingScope, xm.pendingChecks = nil, nil
 	return queries, make([]string, len(queries))
+}
+
+// takeReferenceScopeChecks returns the blocks noted since the last call with the test
+// for each, for a caller that runs and tests them itself.
+func (xm *xidMetadata) takeReferenceScopeChecks() ([]*dql.GraphQuery, map[string]*refScopeCheck) {
+	if xm == nil || len(xm.pendingScope) == 0 {
+		return nil, nil
+	}
+	queries := xm.pendingScope
+	checks := make(map[string]*refScopeCheck, len(queries))
+	for i, q := range queries {
+		checks[q.Attr] = xm.pendingChecks[i]
+	}
+	xm.pendingScope, xm.pendingChecks = nil, nil
+	return queries, checks
 }
 
 // dropReferenceScopeQueries forgets the blocks noted since the last call.
@@ -184,6 +202,16 @@ func referencesOutOfScope(rewriter interface{}, results map[string][]idExistence
 	held, err := claims()
 	if err != nil {
 		return nil, err
+	}
+	return outOfScope(checks, results, held)
+}
+
+// outOfScope tests the rows of each scope block against the claims a caller holds.
+func outOfScope(checks map[string]*refScopeCheck, results map[string][]idExistenceRes,
+	held map[string]interface{}) (map[string]bool, error) {
+
+	if len(checks) == 0 {
+		return nil, nil
 	}
 	hidden := make(map[string]bool)
 	for name, check := range checks {
