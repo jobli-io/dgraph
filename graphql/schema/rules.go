@@ -2184,6 +2184,19 @@ func validateOldValuePath(sch *ast.Schema, typeName, path string,
 
 	fd := def.Fields.ForName(head)
 	if fd == nil {
+		// A path may name a field that only some implementors of an interface have,
+		// such as inWorkspace on the records an attachment is held by. Every
+		// implementor that has it must store it the same way, because the path
+		// becomes one DQL edge.
+		var mismatch string
+		fd, mismatch = oldValueFieldOnImplementor(sch, def, head)
+		if mismatch != "" {
+			return gqlerror.ErrorPosf(dir.Position,
+				"Type %s; Field %s: @oldValue path %q %s",
+				parentTypName, parentFieldName, path, mismatch)
+		}
+	}
+	if fd == nil {
 		return gqlerror.ErrorPosf(dir.Position,
 			"Type %s; Field %s: @oldValue path %q references unknown field %q on type %s",
 			parentTypName, parentFieldName, path, head, typeName)
@@ -2204,6 +2217,38 @@ func validateOldValuePath(sch *ast.Schema, typeName, path string,
 	}
 
 	return validateOldValuePath(sch, nextTypeName, tail, dir, parentTypName, parentFieldName, visited)
+}
+
+// oldValueFieldOnImplementor returns a field of that name held by a type that
+// implements def, when def is an interface and does not have the field itself.
+// A non-empty string says why the field cannot be used.
+func oldValueFieldOnImplementor(sch *ast.Schema, def *ast.Definition, head string) (*ast.FieldDefinition, string) {
+	if def.Kind != ast.Interface {
+		return nil, ""
+	}
+	var found *ast.FieldDefinition
+	var pred, typ, ownerName string
+	for _, impl := range sch.PossibleTypes[def.Name] {
+		fd := impl.Fields.ForName(head)
+		if fd == nil {
+			continue
+		}
+		owner := impl
+		if parent := parentInterface(sch, impl, head); parent != nil {
+			owner = parent
+		}
+		p := fieldName(fd, owner.Name)
+		t := fd.Type.Name()
+		if found == nil {
+			found, pred, typ, ownerName = fd, p, t, impl.Name
+			continue
+		}
+		if p != pred || t != typ {
+			return nil, fmt.Sprintf("field %q is stored differently by %s and %s, which both implement %s",
+				head, ownerName, impl.Name, def.Name)
+		}
+	}
+	return found, ""
 }
 
 // cascadeDeleteDirectiveValidation validates the @cascadeDelete directive.

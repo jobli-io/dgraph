@@ -56,6 +56,13 @@ def arms(original):
         c, _ = block(now, start)
         d = now.index("\n}\n", c)
         fixed = fixed[:a] + now[c:d] + fixed[b:]
+    # The check of forResource after an update reads @oldValue on Attachment.forResource.
+    # Match the live field, not the same words inside a comment higher up.
+    marker = '@oldValue(fields: ["inWorkspace.name", "inGroup.inWorkspace.name"])'
+    field = ("    forResource: [AttachmentOwner!]! @search @bypassAuth\n"
+             "        @cascadeAuth(operations: [add, update, delete, query], variableContext: self, bidirectional: false)\n")
+    if marker in now and field in fixed and marker not in fixed:
+        fixed = fixed.replace(field, field.replace("@cascadeAuth", marker + "\n        @cascadeAuth", 1), 1)
     if fixed != original:
         out.append(("fix", fixed))
     return out

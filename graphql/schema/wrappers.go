@@ -2817,6 +2817,36 @@ func (t *astType) Field(name string) FieldDefinition {
 	}
 }
 
+// implementorField returns a field that this interface does not declare but at
+// least one type that implements it does. Used by @oldValue paths. Every such
+// type must store the field under the same predicate and named type.
+func (t *astType) implementorField(name string) FieldDefinition {
+	def := t.inSchema.schema.Types[t.Name()]
+	if def == nil || def.Kind != ast.Interface {
+		return nil
+	}
+	var found FieldDefinition
+	for _, impl := range t.inSchema.schema.PossibleTypes[t.Name()] {
+		implType := &astType{
+			inSchema:        t.inSchema,
+			dgraphPredicate: t.dgraphPredicate,
+			typ:             &ast.Type{NamedType: impl.Name},
+		}
+		fd := implType.Field(name)
+		if fd == nil {
+			continue
+		}
+		if found == nil {
+			found = fd
+			continue
+		}
+		if fd.DgraphPredicate() != found.DgraphPredicate() || fd.Type().Name() != found.Type().Name() {
+			return nil
+		}
+	}
+	return found
+}
+
 func (t *astType) Fields() []FieldDefinition {
 	var result []FieldDefinition
 
@@ -3353,6 +3383,12 @@ func buildSelectionTree(t Type, paths []string) map[string]*OldValueSelection {
 	result := make(map[string]*OldValueSelection, len(grouped))
 	for head, tails := range grouped {
 		fd := t.Field(head)
+		if fd == nil {
+			// The path names a field only some implementors of an interface have.
+			if at, ok := t.(*astType); ok {
+				fd = at.implementorField(head)
+			}
+		}
 		if fd == nil {
 			// Caught by validation — skip gracefully at runtime.
 			continue
