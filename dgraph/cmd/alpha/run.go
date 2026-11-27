@@ -302,6 +302,9 @@ they form a Raft group and provide synchronous replication.
 		Flag("inline-record-rules", "SPIKE: compile an auth rule that only tests the record's own "+
 			"values as a filter on the query, not as a block over every record of the type. "+
 			"Does not depend on partition namespaces.").
+		Flag("partition-grants-together", "SPIKE: with partition-fast-path, ask the partition every "+
+			"question a query can raise about its caller in one read before the query is rewritten, "+
+			"and let requests that find the same answers expired wait for one read.").
 		Flag("partition-tenant-rules", "SPIKE: with partition-fast-path, ask a rule that only "+
 			"tests the record's Workspace once of the Workspace, and leave it out where it holds.").
 		String())
@@ -864,7 +867,8 @@ func run() {
 		}
 		if featureFlagsConf.GetBool("partition-fast-path") {
 			resolve.EnablePartitionGrants(featureFlagsConf.GetDuration("partition-grants-ttl"),
-				featureFlagsConf.GetBool("partition-group-grants"), featureFlagsConf.GetBool("partition-tenant-rules"))
+				featureFlagsConf.GetBool("partition-group-grants"), featureFlagsConf.GetBool("partition-tenant-rules"),
+				featureFlagsConf.GetBool("partition-grants-together"))
 			glog.Infof("SPIKE: workspace-level grants are on for partition namespaces")
 		}
 	}

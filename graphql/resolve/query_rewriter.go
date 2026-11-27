@@ -181,6 +181,7 @@ func (qr *queryRewriter) Rewrite(
 	}
 	if gqlQuery.QueryType() != schema.PasswordQuery {
 		authRw.grants = newCallerGrants(ctx, customClaims.AuthVariables)
+		authRw.grants.askTogether(gqlQuery, authRw.selector)
 	}
 	authRw.hasAuthRules = hasAuthRules(gqlQuery, authRw)
 	authRw.hasCascade = hasCascadeDirective(gqlQuery)
@@ -3747,7 +3748,7 @@ func addSelectionSetFrom(
 		if shouldBypass && len(exceptRules) > 0 {
 			rbac = schema.Uncertain
 			auth.selector = func(t schema.Type) *schema.RuleNode {
-				return schema.FilterRuleNode(oldSelector(t), exceptRules)
+				return filteredRules(oldSelector(t), exceptRules)
 			}
 		}
 
@@ -4455,7 +4456,7 @@ func buildFilter(typ schema.Type,
 							rbac = schema.Uncertain
 							originalSelector := wr.selector
 							wr.selector = func(t schema.Type) *schema.RuleNode {
-								return schema.FilterRuleNode(originalSelector(t), exceptRules)
+								return filteredRules(originalSelector(t), exceptRules)
 							}
 						}
 
@@ -4542,7 +4543,7 @@ func buildFilter(typ schema.Type,
 							rbac = schema.Uncertain
 							originalSelector := wr.selector
 							wr.selector = func(t schema.Type) *schema.RuleNode {
-								return schema.FilterRuleNode(originalSelector(t), exceptRules)
+								return filteredRules(originalSelector(t), exceptRules)
 							}
 						}
 

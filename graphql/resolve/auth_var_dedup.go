@@ -34,6 +34,7 @@ package resolve
 //     the same canonical-leaf fingerprint and merge in the next pass.
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/dgraph-io/dgraph/v25/dql"
@@ -260,7 +261,13 @@ func fingerprintAuthFunc(fn *dql.Function, subst map[string]string) string {
 		}
 		args[i] = val
 	}
-	return fn.Name + "(" + strings.Join(args, ",") + ")"
+	out := fn.Name + "(" + strings.Join(args, ",") + ")"
+	// A function over a list of UIDs has no arguments: uid(0x1) and uid(0x2)
+	// are different sets and must not be taken for the same block.
+	if len(fn.UID) > 0 {
+		out += fmt.Sprint(fn.UID)
+	}
+	return out
 }
 
 // applyAuthVarSubst recursively walks a FilterTree and substitutes all

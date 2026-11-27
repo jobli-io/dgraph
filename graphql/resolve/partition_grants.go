@@ -66,6 +66,10 @@ import (
 //     partition is asked once which of those records pass, and the cascade is
 //     compiled against that list of UIDs instead of the walk that finds them.
 //     The answer is the one the walk would give, so this changes no result.
+//     Where every record of that type is already known to pass, there is no
+//     list to ask for and the cascade is compiled as "has the edge, to a
+//     record of that type". Like the first step, that takes a non-null edge on
+//     the authority as present.
 //
 //   - Tenant rules (partition-tenant-rules). A rule that only walks from the
 //     record to the Workspace and tests the Workspace ("the record is in the
@@ -98,6 +102,9 @@ type answer struct {
 	uids    []uint64
 	tooMany bool
 	until   time.Time
+	// pending: not asked yet. The question was noted for the next read of
+	// several together (partition_grants_lookup.go); unknown is set with it.
+	pending bool
 }
 
 // ruleKey names one question: this caller, this rule, this partition. The rule
@@ -114,24 +121,36 @@ var grantsConf struct {
 	ttl         time.Duration
 	groups      bool
 	tenantRules bool
+	// together: ask every question a query can raise in one read, before the
+	// query is rewritten (partition_grants_lookup.go).
+	together bool
 
 	mu     sync.RWMutex
 	byText map[string]answer
 	byRule map[ruleKey]answer
+	// asking holds one lock per caller, so that requests that find the same
+	// answers expired wait for one read instead of each making it.
+	asking map[string]*sync.Mutex
 
 	// Counters for the proofs: how often the partition was asked, and how often
 	// a remembered answer was used instead.
 	asked, remembered atomic.Uint64
+	// lookups counts the reads that asked several questions together, questions
+	// what they asked, and failed the ones that did not come back.
+	lookups, questions, failed atomic.Uint64
 }
 
 // EnablePartitionGrants turns the fast path on. An answer about a caller is
 // believed for ttl, so a revoked grant keeps working for up to that long; with
 // ttl zero the partition is asked on every request. groups and tenantRules turn
-// on the two further steps described at the top of this file.
-func EnablePartitionGrants(ttl time.Duration, groups, tenantRules bool) {
+// on the two further steps described at the top of this file. together asks a
+// query's questions in one read.
+func EnablePartitionGrants(ttl time.Duration, groups, tenantRules, together bool) {
 	grantsConf.ttl = ttl
 	grantsConf.groups = groups
 	grantsConf.tenantRules = tenantRules
+	grantsConf.together = together
+	grantsConf.asking = make(map[string]*sync.Mutex)
 	grantsConf.byText = make(map[string]answer)
 	grantsConf.byRule = make(map[ruleKey]answer)
 	grantsConf.on = true
@@ -169,6 +188,17 @@ type callerGrants struct {
 	// that compile to the same question are asked once.
 	byText map[string]answer
 	rules  map[simplifyKey]*schema.RuleNode
+
+	// noting is set while the questions a query raises are being gathered: a
+	// question with no answer yet is added to noted instead of being asked.
+	noting  bool
+	noted   []question
+	isNoted map[*schema.RuleNode]bool
+	// waiting counts the times, while noting, that an answer was wanted that
+	// could settle a rule and was not there. A cascade that sees it rise does
+	// not go on to ask which records pass, which it would only want if that
+	// answer were no. Outside noting it never changes.
+	waiting int
 }
 
 // newCallerGrants returns nil when the fast path does not apply: it is off, or
@@ -248,8 +278,14 @@ func (g *callerGrants) strip(typ schema.Type, rn *schema.RuleNode, arr *arrival)
 	case rn == nil:
 		return nil, false
 	case rn.CascadeWrapPred != "":
+		before := g.waiting
 		if g.settled(typ, rn, arr) {
 			return nil, true
+		}
+		if g.waiting != before {
+			// Which records pass is only asked once it is known that not
+			// all of them do.
+			return rn, false
 		}
 		if grantsConf.groups {
 			return g.narrow(typ, rn), false
@@ -348,12 +384,19 @@ func (g *callerGrants) settled(cur schema.Type, rn *schema.RuleNode, arr *arriva
 		if rn.CascadeBundlePred != "" {
 			return false
 		}
+		awaited := false
 		for _, child := range rn.And {
+			before := g.waiting
 			if !g.settled(cur, child, arr) {
-				return false
+				if g.waiting == before {
+					return false
+				}
+				// Not known yet. The rest is looked at all the same, so that
+				// what it would take to settle this is asked in one round.
+				awaited = true
 			}
 		}
-		return true
+		return !awaited
 	case len(rn.Or) > 0:
 		for _, child := range rn.Or {
 			if g.settled(cur, child, arr) {
@@ -421,8 +464,28 @@ func (g *callerGrants) narrow(cur schema.Type, rn *schema.RuleNode) *schema.Rule
 	if target == nil {
 		return rn
 	}
+	// If every record of the target passes, there is no list to ask for. That
+	// did not settle the cascade, because this record may have no such edge;
+	// what is left of it is "has the edge, to a record of that type". A type
+	// that holds grants can have a great many records (Candidate does), and
+	// asking which of them pass means running its whole rule over all of them.
+	before := g.waiting
+	if g.settled(target, rn.CascadeWrapInner, nil) {
+		cp := *rn
+		cp.CascadeWrapHeldSet = true
+		cp.CascadeWrapAll = true
+		return &cp
+	}
+	if g.waiting != before {
+		return rn
+	}
 	if holdsGrants(target) {
-		a := g.answerFor(rn, func() (string, bool) { return g.wrapQuestion(cur, rn) })
+		a := g.answerFor(cur, rn, false)
+		if a.pending {
+			// Its answer will say which records pass, and then nothing below
+			// this point is looked at. So nothing below it is asked about yet.
+			return rn
+		}
 		if !a.unknown && !a.tooMany {
 			cp := *rn
 			cp.CascadeWrapHeldSet = true
@@ -496,7 +559,10 @@ func (authRw *authRewriter) rewriteHeldWrap(typ schema.Type, rn *schema.RuleNode
 // authorityHolds reports whether every Workspace in the partition passes the
 // rule wrap carries for it. cur is the type that has the edge to the Workspace.
 func (g *callerGrants) authorityHolds(cur schema.Type, wrap *schema.RuleNode) bool {
-	a := g.answerFor(wrap, func() (string, bool) { return g.wrapQuestion(cur, wrap) })
+	a := g.answerFor(cur, wrap, false)
+	if a.pending {
+		g.waiting++
+	}
 	return !a.unknown && a.all
 }
 
@@ -507,16 +573,26 @@ func (g *callerGrants) tenantRuleHolds(cur schema.Type, rule *schema.RuleNode) b
 	if !grantsConf.tenantRules || cur == nil {
 		return false
 	}
-	a := g.answerFor(rule, func() (string, bool) { return g.tenantQuestion(cur, rule) })
+	a := g.answerFor(cur, rule, true)
+	if a.pending {
+		g.waiting++
+	}
 	return !a.unknown && a.all
 }
 
-// answerFor returns what the partition says about rule for this caller. It asks
-// with the query build returns unless this request, or another within the ttl,
-// already has. A rule build cannot turn into a question is remembered as unknown.
-func (g *callerGrants) answerFor(rule *schema.RuleNode, build func() (string, bool)) answer {
+// answerFor returns what the partition says about rule, which sits in the rules
+// of cur, for this caller. It asks unless this request, or another within the
+// ttl, already has. tenant says which of the two kinds of question rule is. A
+// rule that cannot be turned into a question is remembered as unknown.
+func (g *callerGrants) answerFor(cur schema.Type, rule *schema.RuleNode, tenant bool) answer {
 	if a, ok := g.answers[rule]; ok {
 		return a
+	}
+	build := func() (string, bool) {
+		if tenant {
+			return g.tenantQuestion(cur, rule)
+		}
+		return g.wrapQuestion(cur, rule)
 	}
 	key := ruleKey{ns: g.ns, caller: g.caller, rule: rule}
 	now := time.Now()
@@ -529,6 +605,13 @@ func (g *callerGrants) answerFor(rule *schema.RuleNode, build func() (string, bo
 			g.answers[rule] = a
 			return a
 		}
+	}
+	if g.noting {
+		if !g.isNoted[rule] {
+			g.isNoted[rule] = true
+			g.noted = append(g.noted, question{cur: cur, rule: rule, tenant: tenant})
+		}
+		return answer{unknown: true, pending: true}
 	}
 	a := g.ask(build)
 	g.answers[rule] = a
@@ -557,52 +640,98 @@ func (g *callerGrants) freshRewriter() *authRewriter {
 	}
 }
 
-var uidOnly = []*dql.GraphQuery{{Attr: "uid"}}
+// compiledQuestion is one question as DQL: the blocks that find the records that
+// pass, the type whose records are asked about, and the blocks that return the
+// answer.
+//
+// The answer is three things: how many records the type has, how many of them
+// pass, and the first maxHeld+1 that pass. A type that holds grants can have a
+// great many records (Candidate does), so neither set is returned whole.
+type compiledQuestion struct {
+	vars []*dql.GraphQuery
+	of   string
+	// held returns the records that pass. passed, if set, counts the ones of
+	// the type among them; without it they are counted from held.
+	held, passed *dql.GraphQuery
+}
 
-// wrapQuestion turns a cascade into a query for the authorities that pass it.
+var countOnly = []*dql.GraphQuery{{Attr: "count(uid)"}}
+
+func allOf(typ string) *dql.GraphQuery {
+	return &dql.GraphQuery{
+		Attr:     "all",
+		Func:     &dql.Function{Name: "type", Args: []dql.Arg{{Value: typ}}},
+		Children: countOnly,
+	}
+}
+
+// results returns the blocks that return the answer to c.
+func (c compiledQuestion) results() []*dql.GraphQuery {
+	out := []*dql.GraphQuery{allOf(c.of), c.held}
+	if c.passed != nil {
+		out = append(out, c.passed)
+	}
+	return out
+}
+
+// compileWrap turns a cascade into a query for the authorities that pass it.
 // The rule is compiled by the rewriter exactly as it would be inside a query.
-func (g *callerGrants) wrapQuestion(cur schema.Type, wrap *schema.RuleNode) (string, bool) {
+func (g *callerGrants) compileWrap(cur schema.Type, wrap *schema.RuleNode) (compiledQuestion, bool) {
 	blocks, filter := g.freshRewriter().rewriteRuleNode(cur, wrap)
 	// The rewriter answers a cascade with uid_in(<edge>, uid(<var>)), where
 	// <var> is the set of authorities that pass. Anything else is not understood.
 	if filter == nil || filter.Func == nil || filter.Func.Name != "uid_in" ||
 		len(filter.Func.Args) != 2 || len(filter.Child) != 0 {
-		return "", false
+		return compiledQuestion{}, false
 	}
 	passing := filter.Func.Args[1].Value
 	if !strings.HasPrefix(passing, "uid(") || !strings.HasSuffix(passing, ")") {
-		return "", false
+		return compiledQuestion{}, false
 	}
 	passing = passing[len("uid(") : len(passing)-1]
-
-	blocks = append(blocks,
-		&dql.GraphQuery{
-			Attr:     "all",
-			Func:     &dql.Function{Name: "type", Args: []dql.Arg{{Value: wrap.CascadeWrapType}}},
-			Children: uidOnly,
-		},
-		&dql.GraphQuery{
+	return compiledQuestion{
+		vars: blocks,
+		of:   wrap.CascadeWrapType,
+		held: &dql.GraphQuery{
 			Attr:     "held",
 			Func:     &dql.Function{Name: "uid", Args: []dql.Arg{{Value: passing}}},
-			Children: uidOnly,
-		})
+			Args:     map[string]string{"first": strconv.Itoa(maxHeld + 1)},
+			Children: []*dql.GraphQuery{{Attr: "uid"}},
+		},
+		passed: &dql.GraphQuery{
+			Attr: "passed",
+			Func: &dql.Function{Name: "uid", Args: []dql.Arg{{Value: passing}}},
+			Filter: &dql.FilterTree{
+				Func: &dql.Function{Name: "type", Args: []dql.Arg{{Value: wrap.CascadeWrapType}}}},
+			Children: countOnly,
+		},
+	}, true
+}
+
+func (g *callerGrants) wrapQuestion(cur schema.Type, wrap *schema.RuleNode) (string, bool) {
+	c, ok := g.compileWrap(cur, wrap)
+	if !ok {
+		return "", false
+	}
 	// The caller's claims are compiled into the text, so the text names both the
 	// question and who is asking. The type's name only labels variables.
+	blocks := append(append([]*dql.GraphQuery{}, c.vars...), c.results()...)
 	return strings.ReplaceAll(dgraph.AsString(blocks), cur.Name()+"_Auth", "A"), true
 }
 
-// tenantQuestion turns a rule into a query on the Workspace, if the rule is of
+// compileTenant turns a rule into a query on the Workspace, if the rule is of
 // the one shape that allows it: no condition on the record itself, and a single
 // selection, the record's non-null edge to the Workspace. What the rule asks of
 // the Workspace under that edge is then asked of the Workspace directly.
-func (g *callerGrants) tenantQuestion(cur schema.Type, rule *schema.RuleNode) (string, bool) {
+func (g *callerGrants) compileTenant(cur schema.Type, rule *schema.RuleNode) (compiledQuestion, bool) {
+	none := compiledQuestion{}
 	blocks, filter := g.freshRewriter().rewriteRuleNode(cur, rule)
 	if len(blocks) != 1 || filter == nil || filter.Func == nil || filter.Func.Name != "uid" {
-		return "", false
+		return none, false
 	}
 	root := blocks[0]
 	if root.Filter != nil || len(root.Args) != 0 || len(root.Order) != 0 {
-		return "", false
+		return none, false
 	}
 	var edge *dql.GraphQuery
 	for _, c := range root.Children {
@@ -610,28 +739,35 @@ func (g *callerGrants) tenantQuestion(cur schema.Type, rule *schema.RuleNode) (s
 			continue
 		}
 		if edge != nil {
-			return "", false
+			return none, false
 		}
 		edge = c
 	}
 	if edge == nil || edge.Var != "" || len(edge.Args) != 0 || len(edge.Order) != 0 {
-		return "", false
+		return none, false
 	}
 	fd := fieldByPredicate(cur, edge.Attr)
 	if fd == nil || fd.Type().Name() != partitionAuthority || fd.Type().Nullable() {
-		return "", false
+		return none, false
 	}
-	authority := &dql.Function{Name: "type", Args: []dql.Arg{{Value: partitionAuthority}}}
-	return dgraph.AsString([]*dql.GraphQuery{
-		{Attr: "all", Func: authority, Children: uidOnly},
-		{
+	return compiledQuestion{
+		of: partitionAuthority,
+		held: &dql.GraphQuery{
 			Attr:     "held",
-			Func:     authority,
+			Func:     &dql.Function{Name: "type", Args: []dql.Arg{{Value: partitionAuthority}}},
 			Filter:   edge.Filter,
 			Cascade:  []string{"__all__"},
 			Children: append([]*dql.GraphQuery{{Attr: "uid"}}, edge.Children...),
 		},
-	}), true
+	}, true
+}
+
+func (g *callerGrants) tenantQuestion(cur schema.Type, rule *schema.RuleNode) (string, bool) {
+	c, ok := g.compileTenant(cur, rule)
+	if !ok {
+		return "", false
+	}
+	return dgraph.AsString(c.results()), true
 }
 
 // ask puts one question to the partition, unless the same text was answered
@@ -677,40 +813,67 @@ func (g *callerGrants) ask(build func() (string, bool)) answer {
 	return a
 }
 
+// row is a row of an answer: a record, or a count of records.
+type row struct {
+	UID   string `json:"uid"`
+	Count int    `json:"count"`
+}
+
 func runAuthorityQuery(ns uint64, query string) (answer, error) {
-	// Read on the engine's own authority, in the partition the request runs in.
-	qctx := x.AttachTrustedTenant(context.Background(), ns)
-	resp, err := (&edgraph.Server{}).QueryNoAuth(qctx, &api.Request{Query: query, ReadOnly: true})
+	out, err := readPartition(ns, query)
 	if err != nil {
 		return answer{}, err
 	}
-	var out struct {
-		All  []struct{ UID string } `json:"all"`
-		Held []struct{ UID string } `json:"held"`
+	passed, counted := out["passed"]
+	return answerOf(out["all"], out["held"], passed, counted)
+}
+
+// readPartition runs query on the engine's own authority, in the partition the
+// request runs in, and returns the rows of each block by its name.
+func readPartition(ns uint64, query string) (map[string][]row, error) {
+	qctx := x.AttachTrustedTenant(context.Background(), ns)
+	resp, err := (&edgraph.Server{}).QueryNoAuth(qctx, &api.Request{Query: query, ReadOnly: true})
+	if err != nil {
+		return nil, err
 	}
+	out := make(map[string][]row)
 	if err := json.Unmarshal(resp.GetJson(), &out); err != nil {
-		return answer{}, err
+		return nil, err
 	}
-	passing := make(map[string]bool, len(out.Held))
-	uids := make([]uint64, 0, len(out.Held))
-	for _, h := range out.Held {
-		if passing[h.UID] {
+	return out, nil
+}
+
+func counted(rows []row) int {
+	n := 0
+	for _, r := range rows {
+		n += r.Count
+	}
+	return n
+}
+
+// answerOf reads an answer: all is the count of the type's records, held the
+// first records that pass, and passed the count of the type's records that
+// pass. Where the question has no passed block, isCounted is false and the
+// records in held are all of them, and are of the type.
+func answerOf(all, held, passed []row, isCounted bool) (answer, error) {
+	seen := make(map[string]bool, len(held))
+	uids := make([]uint64, 0, len(held))
+	for _, h := range held {
+		if h.UID == "" || seen[h.UID] {
 			continue
 		}
-		passing[h.UID] = true
+		seen[h.UID] = true
 		u, err := strconv.ParseUint(h.UID, 0, 64)
 		if err != nil {
 			return answer{}, err
 		}
 		uids = append(uids, u)
 	}
-	a := answer{all: len(out.All) > 0}
-	for _, r := range out.All {
-		if !passing[r.UID] {
-			a.all = false
-			break
-		}
+	total, pass := counted(all), len(uids)
+	if isCounted {
+		pass = counted(passed)
 	}
+	a := answer{all: total > 0 && pass == total}
 	if len(uids) > maxHeld {
 		a.tooMany = true
 		return a, nil

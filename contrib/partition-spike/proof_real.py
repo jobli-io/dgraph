@@ -34,7 +34,7 @@ UID, so the same query must return the same bytes in each arm. Where it does
 not, the script names the records that differ and why.
 
 usage: SPIKE_SUB=<a member's userId> SPIKE_EMAIL=<their email> \
-       proof_real.py [restore] [today] [extract] [load] [relayout] [partition] [fastpath] [grants] [records] [report]
+       proof_real.py [restore] [today] [extract] [load] [relayout] [partition] [fastpath] [grants] [records] [lookup] [report]
        With no stage named, all of them run in that order.
        SPIKE_WS names the workspace (default dc98a028).
        SPIKE_ARMS="ws_rules_off,foreign" reruns only those parts of the partition stage.
@@ -237,7 +237,9 @@ def measure(c, tok, arm, params, under_load=True):
     for label, query, variables in suite(params):
         if ONLY and not any(o in label for o in ONLY):
             continue
+        t = time.perf_counter()
         r = gql(c, tok, query, variables)
+        first = (time.perf_counter() - t) * 1000
         if not r.get("data"):
             print("  %-42s ERROR %s" % (label, json.dumps(r.get("errors"))[:300]), flush=True)
             out[label] = {"error": (r.get("errors") or [{}])[0].get("message", "")[:300]}
@@ -254,6 +256,7 @@ def measure(c, tok, arm, params, under_load=True):
             f.write(answer(r))
         ext = r.get("extensions") or {}
         out[label] = {"p50": statistics.median(wall), "p95": pct(wall, 0.95), "min": min(wall), "runs": len(wall),
+                      "first": first,
                       "sha": hashlib.sha256(answer(r).encode()).hexdigest(), "rows": rows_in(data),
                       "touched": ext.get("touched_uids", 0), "errors": len(r.get("errors") or [])}
         print("  %-42s p50 %9.1f ms  p95 %9.1f ms  rows %4d  touched %9d  (%d runs)%s" % (
@@ -1376,6 +1379,186 @@ def report_records():
                 print("  %-24s %8.1f requests/s   p50 %8.0f ms   p95 %8.0f ms" % (a[2:], v["rps"], v["p50"], v["p95"]))
 
 
+# ---------------------------------------------------------------- one read for a query's questions
+
+TOGETHER = "; partition-grants-together=true"
+# (name, flags, under load). Each is run again with TOGETHER added, as <arm>_together.
+LOOKUP_ARMS = [("kept", FULL + INLINE, True), ("asking", FULL_ASKING + INLINE, True)]
+LOOKUP_CALLERS = ("group", "owner")
+READ_LINE = re.compile(rb"partition grants: read (\d+) questions together in namespace \d+: (\d+) blocks of (\d+), "
+                       rb"built in (\S+), answered in (\S+)")
+
+
+def ms(text):
+    """A Go duration as milliseconds."""
+    total = 0.0
+    for value, unit in re.findall(r"([0-9.]+)(ms|µs|us|s|m)", text):
+        total += float(value) * {"m": 60000, "s": 1000, "ms": 1, "µs": 0.001, "us": 0.001}[unit]
+    return total
+
+
+def dql_of(arm):
+    d = os.path.join(OUT, arm)
+    return {f: open(os.path.join(d, f)).read() for f in sorted(os.listdir(d)) if f.endswith(".dql")}
+
+
+def blocks_of(dql):
+    """The lines of a compiled query, without their order or the numbers in generated
+    variable names. The rewriter does not always emit the arms of an OR in the same
+    order, so two runs of one build can differ in exactly this."""
+    return sorted(re.sub(r"_Auth\d+", "_Auth", line.strip()) for line in dql.split("\n"))
+
+
+def stage_lookup(t):
+    """The questions a query raises about its caller, read together before the query is
+    rewritten. It must change no answer, no compiled query and no record seen."""
+    params = load("params")
+    original = open(os.path.join(OUT, "schema_today.graphql")).read()
+    wanted = [a for a in os.environ.get("SPIKE_ARMS", "").split(",") if a]
+    log = os.path.join(ROOT, "run", "rj", "alpha0.log")
+
+    def run(c, arm, tok, flags, under_load):
+        c.flags = flags
+        restart(c)
+        print(arm, flush=True)
+        res = measure(c, tok, arm, params, under_load)
+        if "partition-grants-ttl=0" in flags:
+            res["_asks"] = {}
+            for label, query, variables in suite(params):
+                before = os.path.getsize(log)
+                gql(c, tok, query, variables)
+                time.sleep(0.2)
+                with open(log, "rb") as f:
+                    f.seek(before)
+                    text = f.read()
+                reads = READ_LINE.findall(text)
+                res["_asks"][label] = {
+                    "single": text.count(b"partition grants: asked namespace"),
+                    "failed": text.count(b"partition grants: could not read"),
+                    "reads": len(reads), "questions": sum(int(r[0]) for r in reads),
+                    "blocks": sum(int(r[1]) for r in reads), "unmerged": sum(int(r[2]) for r in reads),
+                    "built_ms": sum(ms(r[3].decode()) for r in reads),
+                    "answered_ms": sum(ms(r[4].decode()) for r in reads)}
+        restart(c, debug=True)
+        res["_compiled"] = compiled(c, tok, arm, params)
+        save(arm, res)
+        return res
+
+    def check_arm(arm, base, mine):
+        asked, differ = same_answers(mine, base)
+        t.check("%s: %d of %d answers are byte-identical with the questions read together" % (
+            arm, len(asked) - len(differ), len(asked)), bool(asked) and not differ, differ)
+        a, b = dql_of(arm), dql_of(arm + "_together")
+        moved = [f for f in a if a[f] != b.get(f)]
+        changed = [f for f in moved if blocks_of(a[f]) != blocks_of(b.get(f, ""))]
+        t.check("%s: %d of %d queries compile to the same DQL character for character, and the other %d to the "
+                "same lines in another order" % (arm, len(a) - len(moved), len(a), len(moved) - len(changed)),
+                bool(a) and not changed, changed)
+        if "_asks" in mine:
+            asks = mine["_asks"]
+            t.check("%s: no read of several questions failed" % arm, all(v["failed"] == 0 for v in asks.values()),
+                    {k: v["failed"] for k, v in asks.items() if v["failed"]})
+            left = {k: v["single"] for k, v in asks.items() if v["single"]}
+            t.check("%s: after the reads, no question is asked on its own" % arm, not left, left)
+
+    if os.environ.get("SPIKE_ARMS") == "recheck":
+        # The checks again, on what the last run saved.
+        for who in LOOKUP_CALLERS:
+            for name, _, _ in LOOKUP_ARMS:
+                arm = "l_%s_%s" % (who, name)
+                check_arm(arm, load(arm), load(arm + "_together"))
+            a, b = dql_of("l_%s_kept" % who), dql_of("l_%s_asking" % who)
+            moved = [f for f in a if a[f] != b.get(f)]
+            t.check("%s: two runs without the flag compile %d of %d queries to the same lines in another order" % (
+                who, len(moved), len(a)), all(blocks_of(a[f]) == blocks_of(b[f]) for f in moved), moved)
+        return
+
+    with cluster(ON) as c:
+        try:
+            c.flags = HEADER_MODE
+            restart(c)
+            group = add_callers(c, params["ws_id"])
+            if get_schema(c) != original:
+                set_schema(c, original)
+            toks = {"owner": token(), "reader": token(sub=CALLERS["reader"], email="reader@spike.invalid"),
+                    "group": token(sub=CALLERS["group"], email="group@spike.invalid")}
+            print("test users: one bound to the viewer role on the Workspace, one on the group %r" % group["n"],
+                  flush=True)
+
+            seen = {}
+            variants = (("remembered for 5 s", FULL + INLINE + TOGETHER), ("asked every time", FULL_ASKING + INLINE + TOGETHER))
+            for flags in (ON, FULL, FULL + INLINE) + tuple(f for _, f in variants):
+                c.flags = flags
+                restart(c)
+                for who, tok in toks.items():
+                    seen[who, flags] = visible(c, tok)
+            for who in toks:
+                rules, a = seen[who, ON], seen[who, FULL + INLINE]
+                t.check("%s: the fast path shows the same records with and without record rules as filters" % who,
+                        a == seen[who, FULL], {k: (len(seen[who, FULL][k]), len(a[k])) for k in LISTED if a[k] != seen[who, FULL][k]})
+                for name, flags in variants:
+                    b = seen[who, flags]
+                    t.check("%s: the same %d records on %d types with the questions read together, %s" % (
+                        who, sum(len(v) for v in a.values()), len(LISTED), name), a == b and any(a.values()),
+                        {k: (len(a[k]), len(b[k])) for k in LISTED if a[k] != b[k]})
+                    t.check("%s: read together, %s, nothing the rules as written show is hidden (%d records more show)" % (
+                        who, name, sum(len(b[k] - rules[k]) for k in LISTED)),
+                        all(rules[k] <= b[k] for k in LISTED), {k: len(rules[k] - b[k]) for k in LISTED if rules[k] - b[k]})
+            if wanted == ["seen"]:
+                return
+
+            for who in LOOKUP_CALLERS:
+                for name, flags, under_load in LOOKUP_ARMS:
+                    arm = "l_%s_%s" % (who, name)
+                    if wanted and arm not in wanted:
+                        continue
+                    base = run(c, arm, toks[who], flags, under_load)
+                    mine = run(c, arm + "_together", toks[who], flags + TOGETHER, under_load)
+                    check_arm(arm, base, mine)
+        finally:
+            c.flags = HEADER_MODE
+            restart(c)
+            remove_callers(c)
+            c.flags = ON
+            restart(c)
+            if get_schema(c) != original:
+                set_schema(c, original)
+
+
+def report_lookup():
+    res = {"l_%s_%s%s" % (w, n, x): load("l_%s_%s%s" % (w, n, x), {})
+           for w in LOOKUP_CALLERS for n, _, _ in LOOKUP_ARMS for x in ("", "_together")}
+    if not res["l_group_kept"]:
+        return
+    labels = [k for k in res["l_group_kept"] if k[0] != "_"]
+    for who in LOOKUP_CALLERS:
+        kept, kept_t = res["l_%s_kept" % who], res["l_%s_kept_together" % who]
+        ask, ask_t = res["l_%s_asking" % who], res["l_%s_asking_together" % who]
+        if not (kept and kept_t and ask and ask_t):
+            continue
+        print("\nthe questions a query raises, read together: the %s, median round trip in ms" % who)
+        print("%-41s| %-21s| %-21s| %-17s| %s" % ("", "remembered for 5 s", "asked every time", "reads per request",
+                                                 "the reads, asked every time"))
+        print("%-41s|%10s%11s |%10s%11s |%8s%9s |%10s%8s%10s%8s" % (
+            "query", "one each", "together", "one each", "together", "one each", "together", "questions", "blocks",
+            "unmerged", "ms"))
+        for k in labels:
+            n, m = (ask.get("_asks") or {}).get(k) or {}, (ask_t.get("_asks") or {}).get(k) or {}
+            print("%-41s|%10.0f%11.0f |%10.0f%11.0f |%8s%9s |%10s%8s%10s%8.1f" % (
+                k, kept[k]["p50"], kept_t[k]["p50"], ask[k]["p50"], ask_t[k]["p50"], n.get("single", "-"),
+                m.get("reads", "-"), m.get("questions", "-"), m.get("blocks", "-"), m.get("unmerged", "-"),
+                m.get("answered_ms", 0)))
+        print("  p95 remembered for 5 s, and the first request after a restart, one each and together:")
+        for k in labels:
+            print("    %-41s p95 %8.0f%8.0f    first %8.0f%8.0f" % (
+                k, kept[k]["p95"], kept_t[k]["p95"], kept[k].get("first", 0), kept_t[k].get("first", 0)))
+    print("\n%d clients on the candidate list page" % CLIENTS)
+    for arm in sorted(res):
+        v = res[arm].get("_load")
+        if v:
+            print("  %-28s %8.1f requests/s   p50 %8.0f ms   p95 %8.0f ms" % (arm[2:], v["rps"], v["p50"], v["p95"]))
+
+
 ARMS = [("today", "Today"), ("today_again", "Today, again"), ("partition", "Partition"),
         ("ws_rules_off", "+ ws rules off"), ("no_rules", "No rules")]
 
@@ -1413,11 +1596,12 @@ def stage_report(t):
     report_fast()
     report_grants()
     report_records()
+    report_lookup()
 
 
 STAGES = [("restore", stage_restore), ("today", stage_today), ("extract", stage_extract), ("load", stage_load),
           ("relayout", stage_relayout), ("partition", stage_partition), ("fastpath", stage_fastpath),
-          ("grants", stage_grants), ("records", stage_records), ("report", stage_report)]
+          ("grants", stage_grants), ("records", stage_records), ("lookup", stage_lookup), ("report", stage_report)]
 
 
 def main():
