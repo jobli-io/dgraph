@@ -66,6 +66,9 @@ def arms(original):
              "        @cascadeAuth(operations: [add, update, delete, query], variableContext: self, bidirectional: false)\n")
     if marker in now and field in fixed and marker not in fixed:
         fixed = fixed.replace(field, field.replace("@cascadeAuth", marker + "\n        @cascadeAuth", 1), 1)
+    # The blocks copied from graph/.graphql may carry @referenceScope. This arm is the
+    # per-type rules alone.
+    fixed = "\n".join(l for l in fixed.split("\n") if not l.strip().startswith("@referenceScope("))
     if fixed != original:
         out.append(("fix", fixed))
     # @referenceScope: copy each line of graph/.graphql that carries it to under the
@@ -80,7 +83,8 @@ def arms(original):
                 head = lines[j] + "\n"
                 if schema.count("\n" + head) != 1:
                     raise SystemExit("cannot place %s under %r" % (line.strip(), lines[j][:50]))
-                schema = schema.replace("\n" + head, "\n" + head + line + "\n", 1)
+                if line.strip() not in schema[schema.index("\n" + head):schema.index("\n" + head) + len(head) + 400]:
+                    schema = schema.replace("\n" + head, "\n" + head + line + "\n", 1)
         return schema
     if "@referenceScope(" in now:
         out.append(("scope", scoped(original)))
