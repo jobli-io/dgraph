@@ -27,6 +27,11 @@ type InvalidationMessage struct {
 	Predicates []string `json:"predicates,omitempty"`
 	Namespace  uint64   `json:"namespace,omitempty"`
 	CommitTs   uint64   `json:"commit_ts,omitempty"`
+	// HasNamespace says Namespace was set: 0 is the root namespace, not "unknown".
+	HasNamespace bool `json:"has_namespace,omitempty"`
+	// Scope is the scope the changed record belongs to, by claim (see
+	// resolve.Invalidation). Empty when nothing can be said.
+	Scope map[string]string `json:"scope,omitempty"`
 }
 
 // InvalidationBroker defines the interface for publishing and subscribing to cluster-wide invalidations.

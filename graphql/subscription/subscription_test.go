@@ -7,6 +7,7 @@ package subscription
 
 import (
 	"context"
+	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
@@ -157,4 +158,46 @@ func TestLocalBrokerDispatchesAsynchronously(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Error("Timeout waiting for local broker async dispatch callback")
 	}
+}
+
+// A change is sent to a bucket that only mentions the changed type if the change can
+// have reached it: same namespace, and no claim of the change's scope held with
+// another value. A subscriber with no scope picked is sent everything.
+func TestInvalidationReachesOnlyItsScope(t *testing.T) {
+	p := &Poller{bucketScope: map[uint64]bucketScope{
+		1: {claims: map[string]interface{}{"ws": "acme"}},
+		2: {claims: map[string]interface{}{"ws": "globex"}},
+		3: {claims: map[string]interface{}{"ws": "*"}},
+		4: {claims: map[string]interface{}{}},
+		5: {ns: 7, hasNs: true, claims: map[string]interface{}{"ws": "acme"}},
+		6: {ns: 8, hasNs: true, claims: map[string]interface{}{"ws": "acme"}},
+	}}
+	inAcme := &InvalidationMessage{Scope: map[string]string{"ws": "acme"}}
+	require.True(t, p.reaches(1, inAcme), "the same scope")
+	require.False(t, p.reaches(2, inAcme), "another scope")
+	require.True(t, p.reaches(3, inAcme), "no scope picked")
+	require.True(t, p.reaches(4, inAcme), "no claim")
+	require.True(t, p.reaches(99, inAcme), "a bucket nothing is known about")
+
+	unscoped := &InvalidationMessage{}
+	require.True(t, p.reaches(2, unscoped), "a type with no scope goes to everyone")
+
+	inSeven := &InvalidationMessage{Namespace: 7, HasNamespace: true, Scope: map[string]string{"ws": "acme"}}
+	require.True(t, p.reaches(5, inSeven), "the same namespace")
+	require.False(t, p.reaches(6, inSeven), "another namespace, even with the same claim")
+	require.True(t, p.reaches(1, inSeven), "a subscriber whose namespace is not known is judged by its claims")
+}
+
+// A bucket whose result holds a changed record is told apart from one that only
+// mentions its type, so that it is run again wherever the change came from.
+func TestAffectedBucketsInTwoParts(t *testing.T) {
+	dr := NewDependencyRegistry()
+	for _, k := range []subKey{{bucketID: 1, subID: 1}, {bucketID: 2, subID: 1}} {
+		dr.subUIDs[k], dr.subTypes[k], dr.subPredicates[k] = map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
+		dr.addTypeDep(k, "User")
+	}
+	dr.addUIDDep(subKey{bucketID: 1, subID: 1}, "0x123")
+	holding, mentioning := dr.AffectedBuckets([]string{"0x123"}, []string{"User"}, nil)
+	require.Equal(t, []uint64{1}, holding)
+	require.Equal(t, []uint64{2}, mentioning)
 }

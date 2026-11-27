@@ -228,6 +228,40 @@ func (dr *DependencyRegistry) traverseJSON(key subKey, val interface{}) {
 	}
 }
 
+// AffectedBuckets is GetAffectedBuckets in two parts: the buckets whose result holds
+// one of the changed records, and the buckets that only mention a changed type or
+// predicate. A bucket in the first is not repeated in the second.
+func (dr *DependencyRegistry) AffectedBuckets(mutatedUIDs, mutatedTypes, mutatedPredicates []string) (holding, mentioning []uint64) {
+	dr.RLock()
+	defer dr.RUnlock()
+
+	held := make(map[uint64]struct{})
+	for _, uid := range mutatedUIDs {
+		for sub := range dr.uidIndex[uid] {
+			held[sub.bucketID] = struct{}{}
+		}
+	}
+	mentioned := make(map[uint64]struct{})
+	for _, typeName := range mutatedTypes {
+		for sub := range dr.typeIndex[typeName] {
+			mentioned[sub.bucketID] = struct{}{}
+		}
+	}
+	for _, pred := range mutatedPredicates {
+		for sub := range dr.predicateIndex[pred] {
+			mentioned[sub.bucketID] = struct{}{}
+		}
+	}
+	for bid := range held {
+		holding = append(holding, bid)
+		delete(mentioned, bid)
+	}
+	for bid := range mentioned {
+		mentioning = append(mentioning, bid)
+	}
+	return holding, mentioning
+}
+
 // GetAffectedBuckets maps mutated UIDs, Types, and Predicates to active subscription bucket IDs.
 func (dr *DependencyRegistry) GetAffectedBuckets(mutatedUIDs, mutatedTypes, mutatedPredicates []string) []uint64 {
 	dr.RLock()

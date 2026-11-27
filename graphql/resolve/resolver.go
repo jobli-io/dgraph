@@ -618,7 +618,7 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 			res, allSuccessful = r.resolvers.mutationResolverFor(m).Resolve(ctx, m)
 			addResult(resp, res)
 			if allSuccessful && res != nil && len(res.Data) > 0 {
-				triggerMutationInvalidation(m, res.Data)
+				triggerMutationInvalidation(ctx, m, res.Data)
 			}
 		}
 	case op.IsSubscription():
@@ -795,7 +795,52 @@ func newtimer(ctx context.Context, Duration *schema.OffsetDuration) schema.Offse
 }
 
 // InvalidationFunc is registered by the subscription package to avoid circular package imports.
-var InvalidationFunc func(uids, types, predicates []string, commitTs uint64)
+var InvalidationFunc func(Invalidation)
+
+// Invalidation is what a mutation tells the subscriptions: what it changed, and
+// where. Where is the namespace it ran in and, when the type it changed carries
+// @referenceScope, the caller's value of each claim the scope names. A record of
+// such a type belongs to the scope its caller holds, so only subscribers in that
+// scope can have had their result changed by it.
+type Invalidation struct {
+	UIDs, Types, Predicates []string
+	CommitTs                uint64
+	Namespace               uint64
+	HasNamespace            bool
+	Scope                   map[string]string
+}
+
+// invalidationScope returns the claims that say which scope a record of the type m
+// changed is in, with the caller's value of each. Nil if the type carries no rule,
+// can be a type that carries none, or the caller holds none of the claims.
+func invalidationScope(ctx context.Context, m schema.Mutation) map[string]string {
+	typ := m.MutatedType()
+	if typ == nil {
+		return nil
+	}
+	scopes, unscoped := typ.ReferenceScopes()
+	if len(scopes) == 0 || len(unscoped) > 0 {
+		return nil
+	}
+	claims, err := m.GetAuthMeta().ExtractCustomClaims(ctx)
+	if err != nil || claims == nil {
+		return nil
+	}
+	var out map[string]string
+	for _, s := range scopes {
+		v, ok := claims.AuthVariables[s.Claim].(string)
+		if !ok || v == "" {
+			// The caller could change a record of the type without holding this
+			// claim, so nothing can be said about whose record it was.
+			return nil
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[s.Claim] = v
+	}
+	return out
+}
 
 var hexRegex = regexp.MustCompile(`^0x[0-9a-fA-F]+$`)
 
@@ -835,7 +880,7 @@ func extractUIDs(data []byte) []string {
 	return res
 }
 
-func triggerMutationInvalidation(m schema.Mutation, data []byte) {
+func triggerMutationInvalidation(ctx context.Context, m schema.Mutation, data []byte) {
 	if InvalidationFunc == nil {
 		return
 	}
@@ -865,5 +910,10 @@ func triggerMutationInvalidation(m schema.Mutation, data []byte) {
 
 	commitTs := uint64(time.Now().UnixNano())
 
-	InvalidationFunc(uids, types, predicates, commitTs)
+	inv := Invalidation{UIDs: uids, Types: types, Predicates: predicates, CommitTs: commitTs,
+		Scope: invalidationScope(ctx, m)}
+	if ns, err := x.ExtractNamespace(ctx); err == nil {
+		inv.Namespace, inv.HasNamespace = ns, true
+	}
+	InvalidationFunc(inv)
 }

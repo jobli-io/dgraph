@@ -41,6 +41,7 @@ import (
 	"github.com/dgraph-io/dgraph/v25/edgraph"
 	"github.com/dgraph-io/dgraph/v25/graphql/admin"
 	"github.com/dgraph-io/dgraph/v25/graphql/resolve"
+	"github.com/dgraph-io/dgraph/v25/graphql/subscription"
 	"github.com/dgraph-io/dgraph/v25/posting"
 	"github.com/dgraph-io/dgraph/v25/schema"
 	"github.com/dgraph-io/dgraph/v25/tok"
@@ -307,6 +308,10 @@ they form a Raft group and provide synchronous replication.
 			"and let requests that find the same answers expired wait for one read.").
 		Flag("partition-tenant-rules", "SPIKE: with partition-fast-path, ask a rule that only "+
 			"tests the record's Workspace once of the Workspace, and leave it out where it holds.").
+		Flag("subscription-scope-routing", "SPIKE: after a mutation, run again only the subscriptions "+
+			"it can have changed: those in its namespace and, for a type that carries @referenceScope, "+
+			"those whose caller holds the same claim. Without it every subscription that mentions the "+
+			"type is run again. Does not depend on partition namespaces.").
 		Flag("partition-mutation-grants", "SPIKE: with partition-fast-path, simplify the rules a "+
 			"mutation asks as a query's are. Without it mutations run the rules as written.").
 		String())
@@ -847,6 +852,10 @@ func run() {
 	x.Config.NormalizeCompatibilityMode = featureFlagsConf.GetString("normalize-compatibility-mode")
 	enableDetailedMetrics := featureFlagsConf.GetBool("enable-detailed-metrics")
 	x.WorkerConfig.SlowQueryLogThreshold = featureFlagsConf.GetDuration("log-slow-query-threshold")
+	if featureFlagsConf.GetBool("subscription-scope-routing") {
+		subscription.EnableScopeRouting()
+		glog.Infof("SPIKE: subscription changes are routed by scope")
+	}
 	if featureFlagsConf.GetBool("inline-record-rules") {
 		resolve.EnableInlineRecordRules()
 		glog.Infof("SPIKE: auth rules that only test the record are compiled as filters")

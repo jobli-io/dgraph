@@ -65,6 +65,53 @@ type Poller struct {
 	dependencyReg  *DependencyRegistry
 	subscriptionID uint64
 	globalEpoch    *uint64
+	// bucketScope says where each bucket's subscribers are: see reaches.
+	bucketScope map[uint64]bucketScope
+}
+
+// bucketScope is where the subscribers of a bucket read from: their namespace, if
+// it could be resolved, and their claims.
+type bucketScope struct {
+	ns     uint64
+	hasNs  bool
+	claims map[string]interface{}
+}
+
+// scopeRouting: a change is only sent to the subscriptions it can have changed.
+var scopeRouting atomic.Bool
+
+// rerunsSkipped counts the re-runs scope routing saved, for the proofs.
+var rerunsSkipped atomic.Uint64
+
+// EnableScopeRouting turns scope routing on. Without it every subscription that
+// mentions a changed type is run again, whichever workspace or namespace it is in.
+func EnableScopeRouting() {
+	scopeRouting.Store(true)
+}
+
+// anyScope is the claim value of a caller who has not picked a scope: Jobli's
+// discovery mode. Such a subscriber can see records of several scopes, so it is
+// sent every change. A real implementation would take this from the schema.
+const anyScope = "*"
+
+// reaches reports whether a change described by msg can have changed the result of
+// the subscribers in bucket. It is only asked of buckets that mention a changed
+// type or predicate; a bucket whose result holds a changed record is always run.
+func (p *Poller) reaches(bucket uint64, msg *InvalidationMessage) bool {
+	where, ok := p.bucketScope[bucket]
+	if !ok {
+		return true
+	}
+	if msg.HasNamespace && where.hasNs && msg.Namespace != where.ns {
+		return false
+	}
+	for claim, changed := range msg.Scope {
+		held, ok := where.claims[claim].(string)
+		if ok && held != "" && held != anyScope && held != changed {
+			return false
+		}
+	}
+	return true
 }
 
 // NewPoller returns an initialized Poller.
@@ -75,18 +122,22 @@ func NewPoller(globalEpoch *uint64, resolver *resolve.RequestResolver) *Poller {
 		activePollers: make(map[uint64]chan *TriggerPayload),
 		dependencyReg: NewDependencyRegistry(),
 		globalEpoch:   globalEpoch,
+		bucketScope:   make(map[uint64]bucketScope),
 	}
 
 	// Register poller to receive cluster-wide invalidations from the broker
 	GetBroker().Subscribe(context.Background(), p.OnInvalidate)
 
 	// Bind package resolve's InvalidationFunc to avoid circular package imports
-	resolve.InvalidationFunc = func(uids, types, predicates []string, commitTs uint64) {
+	resolve.InvalidationFunc = func(inv resolve.Invalidation) {
 		GetBroker().Publish(context.Background(), &InvalidationMessage{
-			UIDs:       uids,
-			Types:      types,
-			Predicates: predicates,
-			CommitTs:   commitTs,
+			UIDs:         inv.UIDs,
+			Types:        inv.Types,
+			Predicates:   inv.Predicates,
+			CommitTs:     inv.CommitTs,
+			Namespace:    inv.Namespace,
+			HasNamespace: inv.HasNamespace,
+			Scope:        inv.Scope,
 		})
 	}
 
@@ -95,13 +146,22 @@ func NewPoller(globalEpoch *uint64, resolver *resolve.RequestResolver) *Poller {
 
 // OnInvalidate is the broker callback. It routes incoming invalidations to the correct poll buckets.
 func (p *Poller) OnInvalidate(msg *InvalidationMessage) {
-	affectedBuckets := p.dependencyReg.GetAffectedBuckets(msg.UIDs, msg.Types, msg.Predicates)
-	if len(affectedBuckets) == 0 {
+	holding, mentioning := p.dependencyReg.AffectedBuckets(msg.UIDs, msg.Types, msg.Predicates)
+	if len(holding)+len(mentioning) == 0 {
 		return
 	}
 
 	p.RLock()
 	defer p.RUnlock()
+
+	affectedBuckets := holding
+	for _, bucketID := range mentioning {
+		if scopeRouting.Load() && !p.reaches(bucketID, msg) {
+			rerunsSkipped.Add(1)
+			continue
+		}
+		affectedBuckets = append(affectedBuckets, bucketID)
+	}
 
 	for _, bucketID := range affectedBuckets {
 		if ch, ok := p.activePollers[bucketID]; ok {
@@ -254,6 +314,13 @@ func (p *Poller) AddSubscriber(req *schema.Request) (*SubscriberResponse, error)
 	}
 
 	glog.Infof("Subscription reactive routing started for ID: %d in bucket: %d", subscriptionID, bucketID)
+	where := bucketScope{claims: customClaims.AuthVariables}
+	if tctx, err := x.ResolveTenant(subscriberContext(req.Header)); err == nil {
+		if ns, err := x.ExtractNamespace(tctx); err == nil {
+			where.ns, where.hasNs = ns, true
+		}
+	}
+	p.bucketScope[bucketID] = where
 
 	// 2. Set up Reactive Expiry Timer
 	var expiryTimer *time.Timer
@@ -382,6 +449,7 @@ func (p *Poller) poll(req *pollRequest) {
 			subscribers, hasSubs := p.pollRegistry[req.bucketID]
 			if !hasSubs || len(subscribers) == 0 {
 				delete(p.pollRegistry, req.bucketID)
+				delete(p.bucketScope, req.bucketID)
 				delete(p.activePollers, req.bucketID)
 				p.Unlock()
 				return
@@ -396,6 +464,7 @@ func (p *Poller) poll(req *pollRequest) {
 		subscribers, hasSubs := p.pollRegistry[req.bucketID]
 		if !hasSubs || len(subscribers) == 0 {
 			delete(p.pollRegistry, req.bucketID)
+			delete(p.bucketScope, req.bucketID)
 			delete(p.activePollers, req.bucketID)
 			p.Unlock()
 			return
@@ -430,6 +499,7 @@ func (p *Poller) terminateSubscriptions(bucketID uint64) {
 		p.dependencyReg.Deregister(bucketID, subID)
 	}
 	delete(p.pollRegistry, bucketID)
+	delete(p.bucketScope, bucketID)
 	if ch, ok := p.activePollers[bucketID]; ok {
 		close(ch)
 		delete(p.activePollers, bucketID)
@@ -465,6 +535,7 @@ func (p *Poller) terminateSubscription(bucketID, subscriptionID uint64) {
 
 	if len(subscriptions) == 0 {
 		delete(p.pollRegistry, bucketID)
+		delete(p.bucketScope, bucketID)
 		if ch, ok := p.activePollers[bucketID]; ok {
 			close(ch)
 			delete(p.activePollers, bucketID)
