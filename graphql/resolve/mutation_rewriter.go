@@ -579,6 +579,7 @@ func (urw *UpdateRewriter) RewriteQueries(
 				parentVarName: m.MutatedType().Name() + "Root",
 				mutVarCache:   &updateAuthVarCache,
 				forceForward:  true,
+				grants:        mutationGrants(ctx, customClaims.AuthVariables, m.MutatedType(), updateAuthSelector, true),
 			}
 			authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 
@@ -834,6 +835,7 @@ func (arw *AddRewriter) Rewrite(
 				parentVarName: fmt.Sprintf("%sRoot_%d", m.MutatedType().Name(), pos), // append node position to avoid conflict in multi-node upsert.
 				mutVarCache:   &upsertAuthVarCache,
 				forceForward:  true,
+				grants:        mutationGrants(ctx, customClaims.AuthVariables, m.MutatedType(), updateAuthSelector, true),
 			}
 			authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 			// Get upsert query of the form,
@@ -975,6 +977,7 @@ func (urw *UpdateRewriter) Rewrite(
 		parentVarName: m.MutatedType().Name() + "Root",
 		mutVarCache:   &updateMutAuthVarCache,
 		forceForward:  true,
+		grants:        mutationGrants(ctx, customClaims.AuthVariables, m.MutatedType(), updateAuthSelector, true),
 	}
 	authRw.hasAuthRules = hasAuthRules(m.QueryField(), authRw)
 
@@ -1183,6 +1186,7 @@ func (arw *AddRewriter) FromMutationResult(
 		parentVarName: mutation.MutatedType().Name() + "Root",
 		mutVarCache:   &addResultAuthVarCache,
 		forceForward:  true,
+		grants:        mutationResultGrants(ctx, customClaims.AuthVariables, mutation.QueryField()),
 	}
 	authRw.hasAuthRules = hasAuthRules(mutation.QueryField(), authRw)
 
@@ -1227,6 +1231,7 @@ func (urw *UpdateRewriter) FromMutationResult(
 		parentVarName: mutation.MutatedType().Name() + "Root",
 		mutVarCache:   &updateResultAuthVarCache,
 		forceForward:  true,
+		grants:        mutationResultGrants(ctx, customClaims.AuthVariables, mutation.QueryField()),
 	}
 	authRw.hasAuthRules = hasAuthRules(mutation.QueryField(), authRw)
 	return rewriteAsQueryByIds(mutation.QueryField(), uids, authRw, mutation.Alias()), nil
@@ -1466,6 +1471,7 @@ func (drw *deleteRewriter) Rewrite(
 		parentVarName: m.MutatedType().Name() + "Root",
 		mutVarCache:   &deleteAuthVarCache,
 		forceForward:  true,
+		grants:        mutationGrants(ctx, customClaims.AuthVariables, m.MutatedType(), deleteAuthSelector, true),
 	}
 	// Delete root queries don't have nested auth traversals referencing the root var;
 	// the result pre-query (queryAuthRw below) handles its own auth separately.
@@ -1518,6 +1524,7 @@ func (drw *deleteRewriter) Rewrite(
 			hasAuthRules:  childHasQueryAuth,
 			mutVarCache:   &deleteQryAuthVarCache,
 			forceForward:  true,
+			grants:        mutationResultGrants(ctx, customClaims.AuthVariables, queryField),
 		}
 
 		// these queries are responsible for querying the queryField
@@ -3801,13 +3808,14 @@ func addDelete(
 		parentVarName: qryFld.Type().Name() + "Root",
 		mutVarCache:   &nestedAuthVarCache,
 		forceForward:  true,
+		grants:        mutationGrants(ctx, authVars, qryFld.Type(), selector, true),
 	}
 	if rn := newRw.selector(qryFld.Type()); rn != nil {
 		newRw.hasAuthRules = true
 	}
 
 	authQueries, authFilter := newRw.rewriteAuthQueries(qryFld.Type())
-	if len(authQueries) == 0 {
+	if len(authQueries) == 0 && authFilter == nil {
 		// there's no auth to add for this type
 		return
 	}

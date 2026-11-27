@@ -124,6 +124,8 @@ var grantsConf struct {
 	// together: ask every question a query can raise in one read, before the
 	// query is rewritten (partition_grants_lookup.go).
 	together bool
+	// mutations: the rules a mutation asks are simplified as a query's are.
+	mutations bool
 
 	mu     sync.RWMutex
 	byText map[string]answer
@@ -154,6 +156,45 @@ func EnablePartitionGrants(ttl time.Duration, groups, tenantRules, together bool
 	grantsConf.byText = make(map[string]answer)
 	grantsConf.byRule = make(map[ruleKey]answer)
 	grantsConf.on = true
+}
+
+// EnablePartitionGrantsForMutations lets the rules a mutation asks take the fast
+// path too. Without it only queries do.
+func EnablePartitionGrantsForMutations() {
+	grantsConf.mutations = true
+}
+
+// mutationGrants returns what a mutation knows about its caller, for the rules of
+// typ that selector picks, or nil when mutations are left on the rules as written.
+// The questions those rules raise are put to the partition first, together.
+//
+// lists says whether a cascade may be compiled against the remembered list of the
+// records that pass. It may not where the mutation can have made such a record
+// itself: the list was read before the mutation ran and does not have it.
+func mutationGrants(ctx context.Context, claims map[string]interface{}, typ schema.Type,
+	selector func(schema.Type) *schema.RuleNode, lists bool) *callerGrants {
+
+	if !grantsConf.mutations {
+		return nil
+	}
+	g := newCallerGrants(ctx, claims)
+	if g == nil {
+		return nil
+	}
+	g.noLists = !lists
+	g.askRulesTogether(typ, selector)
+	return g
+}
+
+// mutationResultGrants is mutationGrants for the query that reads a mutation's
+// result back, which is rewritten as any query is.
+func mutationResultGrants(ctx context.Context, claims map[string]interface{}, f schema.Field) *callerGrants {
+	if !grantsConf.mutations {
+		return nil
+	}
+	g := newCallerGrants(ctx, claims)
+	g.askTogether(f, queryAuthSelector)
+	return g
 }
 
 // PartitionGrantsStats returns how many times the partition was asked and how
@@ -199,6 +240,8 @@ type callerGrants struct {
 	// not go on to ask which records pass, which it would only want if that
 	// answer were no. Outside noting it never changes.
 	waiting int
+	// noLists: a cascade is not compiled against a list of the records that pass.
+	noLists bool
 }
 
 // newCallerGrants returns nil when the fast path does not apply: it is off, or
@@ -287,7 +330,7 @@ func (g *callerGrants) strip(typ schema.Type, rn *schema.RuleNode, arr *arrival)
 			// all of them do.
 			return rn, false
 		}
-		if grantsConf.groups {
+		if grantsConf.groups && !g.noLists {
 			return g.narrow(typ, rn), false
 		}
 		return rn, false

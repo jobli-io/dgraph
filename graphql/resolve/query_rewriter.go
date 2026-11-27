@@ -2082,7 +2082,10 @@ func (authRw *authRewriter) addAuthQueries(
 
 	}
 
-	if len(fldAuthQueries) == 0 && !authRw.hasAuthRules {
+	// A rule can come back as a filter with no block of its own: a cascade compiled
+	// against the list of records that pass, or against none. That filter is the
+	// rule, so the query is only left as it is when there is no filter either.
+	if len(fldAuthQueries) == 0 && filter == nil && !authRw.hasAuthRules {
 		return dgQuery, nil
 	}
 

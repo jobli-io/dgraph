@@ -1039,6 +1039,16 @@ func authorizeNewNodes(
 	}
 	sort.Strings(createdTypes)
 
+	// In a partition the caller's grants settle the same cascades they settle for a
+	// query. A list of the records that pass is not used if this mutation made a
+	// record that can hold a grant: the list was read before it existed.
+	lists := true
+	for _, typeName := range createdTypes {
+		if holdsGrants(namesToType[typeName]) {
+			lists = false
+		}
+	}
+
 	// Write auth queries for each set of node types
 
 	var needsAuth []string
@@ -1048,6 +1058,7 @@ func authorizeNewNodes(
 		varName := newRw.varGen.Next(typ, "", "", false)
 		newRw.varName = varName
 		newRw.parentVarName = typ.Name() + "Root"
+		newRw.grants = mutationGrants(ctx, authVariables, typ, addAuthSelector, lists)
 		authQueries, authFilter := newRw.rewriteAuthQueries(typ)
 
 		rn := newRw.selector(typ)
@@ -1061,7 +1072,8 @@ func authorizeNewNodes(
 			continue
 		}
 
-		if len(authQueries) == 0 {
+		// A rule can be a filter with no block of its own (see addAuthQueries).
+		if len(authQueries) == 0 && authFilter == nil {
 			continue
 		}
 

@@ -208,6 +208,28 @@ func (g *callerGrants) askTogether(f schema.Field, selector func(schema.Type) *s
 	}
 }
 
+// askRulesTogether does for the rules of one type what askTogether does for a
+// query: a mutation asks the rules of the type it changes, not of a selection.
+func (g *callerGrants) askRulesTogether(typ schema.Type, selector func(schema.Type) *schema.RuleNode) {
+	if g == nil || !grantsConf.together || typ == nil {
+		return
+	}
+	types := append([]schema.Type{typ}, typ.ImplementingTypes()...)
+	for round := 0; round < maxRounds; round++ {
+		g.noting, g.noted, g.isNoted = true, nil, make(map[*schema.RuleNode]bool)
+		for _, t := range types {
+			if rules := selector(t); rules != nil {
+				g.strip(t, rules, nil)
+			}
+		}
+		need := g.noted
+		g.noting, g.noted, g.isNoted = false, nil, nil
+		if len(need) == 0 || !g.readOnce(need) {
+			return
+		}
+	}
+}
+
 // readOnce gets the answers to need, from one read unless another request from
 // this caller has just made it. It reports whether need is now answered.
 func (g *callerGrants) readOnce(need []question) bool {

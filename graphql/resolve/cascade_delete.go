@@ -281,7 +281,7 @@ func queryAuthorizedUIDs(
 	authRw.varName = varName
 
 	authQueries, authFilter := authRw.rewriteAuthQueries(typ)
-	if len(authQueries) == 0 {
+	if len(authQueries) == 0 && authFilter == nil {
 		return candidateUIDs, nil
 	}
 

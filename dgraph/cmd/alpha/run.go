@@ -307,6 +307,8 @@ they form a Raft group and provide synchronous replication.
 			"and let requests that find the same answers expired wait for one read.").
 		Flag("partition-tenant-rules", "SPIKE: with partition-fast-path, ask a rule that only "+
 			"tests the record's Workspace once of the Workspace, and leave it out where it holds.").
+		Flag("partition-mutation-grants", "SPIKE: with partition-fast-path, simplify the rules a "+
+			"mutation asks as a query's are. Without it mutations run the rules as written.").
 		String())
 
 	RegisterFlags(flag)
@@ -870,6 +872,10 @@ func run() {
 				featureFlagsConf.GetBool("partition-group-grants"), featureFlagsConf.GetBool("partition-tenant-rules"),
 				featureFlagsConf.GetBool("partition-grants-together"))
 			glog.Infof("SPIKE: workspace-level grants are on for partition namespaces")
+			if featureFlagsConf.GetBool("partition-mutation-grants") {
+				resolve.EnablePartitionGrantsForMutations()
+				glog.Infof("SPIKE: mutations take the partition fast path too")
+			}
 		}
 	}
 
