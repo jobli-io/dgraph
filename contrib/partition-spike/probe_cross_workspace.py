@@ -6,8 +6,10 @@ outsider is a member of another workspace, holding a token for that workspace. E
 write is sent with @dryRun under each schema:
 
   today      schema_today.graphql, the rules as written
-  fix        the same, with the Groupable and AttachmentOwner rules of graph/.graphql,
-             when that file differs
+  fix        the same, with the Groupable and AttachmentOwner declarations of
+             graph/.graphql, when they differ. The per-type rules these once carried
+             have been removed from that file; to compare against them again, point
+             SPIKE_GRAPHQL at a copy that has them (git show 918a82a:.graphql, in graph)
   scope      today's rules, with the @referenceScope lines of graph/.graphql and nothing
              else: the engine tests every record a mutation names
   both       fix and scope together
@@ -51,7 +53,7 @@ def block(schema, start):
 
 def arms(original):
     out = [("today", original)]
-    now = open(os.path.join(P.JOBLI, "graph", ".graphql")).read()
+    now = open(os.environ.get("SPIKE_GRAPHQL") or os.path.join(P.JOBLI, "graph", ".graphql")).read()
     fixed = original
     for start in ("\ninterface Groupable\n", "\ninterface AttachmentOwner\n"):
         a, _ = block(fixed, start)
@@ -306,4 +308,5 @@ def main():
                 n, edges, left, json.dumps(before, sort_keys=True) == json.dumps(after, sort_keys=True)))
 
 
-main()
+if __name__ == "__main__":
+    main()
