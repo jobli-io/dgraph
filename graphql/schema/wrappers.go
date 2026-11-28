@@ -348,6 +348,8 @@ type Type interface {
 	// Plane returns where the type's records live: PlaneControl for a type placed in
 	// the control plane with @scope, PlaneTenant for every other.
 	Plane() string
+	// PlaneOfType returns the plane of the named type of the same schema.
+	PlaneOfType(typeName string) string
 }
 
 // A FieldDefinition is a field as defined in some Type in the schema.  As opposed
@@ -3454,6 +3456,14 @@ func (t *astType) TenantLevel(rule *RuleNode) bool {
 func (t *astType) Plane() string {
 	sch, def := t.definition()
 	return planeOf(sch, def)
+}
+
+func (t *astType) PlaneOfType(typeName string) string {
+	sch, _ := t.definition()
+	if sch == nil {
+		return PlaneTenant
+	}
+	return planeOf(sch, sch.Types[typeName])
 }
 
 func (t *astType) IsTenant() bool {

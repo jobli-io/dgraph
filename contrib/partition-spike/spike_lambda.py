@@ -163,6 +163,8 @@ def start(bundle, as_caller, notify=True):
            "LAMBDA_DQL_AS_CALLER": "true" if as_caller else "false", "TOKEN_ENCRYPTION_KEY": TOKEN_KEY}
     if notify:
         env.update(NOTIFY_ENABLED="true", BACKEND_API="http://host.docker.internal:%d" % SINK_PORT, BACKEND_API_KEY="spike")
+        # the gateway's own API (OAuth clients of apps) is the same sink: nothing of the gateway is reached
+        env.update(GATEWAY_INTERNAL="http://host.docker.internal:%d" % SINK_PORT, GATEWAY_INTERNAL_ADMIN_KEY="spike")
     cmd = ["docker", "run", "-d", "--name", NAME, "-p", "127.0.0.1:%d:8686" % P.LAMBDA_PORT,
            "--add-host", "host.docker.internal:host-gateway", "--dns", "127.0.0.1",
            "-v", "%s:/app/script/script.js:ro" % bundle,

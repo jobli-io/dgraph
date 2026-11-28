@@ -7,12 +7,15 @@ package resolve
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"strings"
 
 	"github.com/pkg/errors"
 
+	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/dgraph/v25/dql"
+	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
 	"github.com/dgraph-io/dgraph/v25/graphql/schema"
 	"github.com/dgraph-io/dgraph/v25/x"
 )
@@ -47,6 +50,45 @@ func splitByPlane(ctx context.Context, m schema.Mutation, queries []*dql.GraphQu
 		return queries, nil, ctx
 	}
 	return local, control, x.AttachNamespace(ctx, x.TemplateNamespace(ns))
+}
+
+// lookUpByPlane runs the lookups a @default makes of the records it names, each
+// where the type looked for lives, and returns what they found together. from is the
+// type the default is on; also holds the checks that go with the lookups made here.
+func lookUpByPlane(ctx context.Context, from schema.Type, queries []*dql.GraphQuery, types []string,
+	also []*dql.GraphQuery) (map[string][]idExistenceRes, error) {
+	local, control, controlCtx := queries, []*dql.GraphQuery(nil), ctx
+	if ns, err := x.ExtractNamespace(ctx); err == nil && x.IsPartitionNamespace(ns) && len(queries) == len(types) {
+		local = nil
+		for i, q := range queries {
+			if from.PlaneOfType(types[i]) == schema.PlaneControl {
+				control = append(control, q)
+			} else {
+				local = append(local, q)
+			}
+		}
+		if len(control) > 0 {
+			controlCtx = x.AttachNamespace(ctx, x.TemplateNamespace(ns))
+		}
+	}
+	found := make(map[string][]idExistenceRes)
+	run := func(ctx context.Context, blocks []*dql.GraphQuery, readOnly bool) error {
+		if len(blocks) == 0 {
+			return nil
+		}
+		resp, err := NewDgraphExecutor().Execute(ctx, &dgoapi.Request{Query: dgraph.AsString(blocks), ReadOnly: readOnly}, nil)
+		if err != nil || resp == nil {
+			return err
+		}
+		return json.Unmarshal(resp.Json, &found)
+	}
+	if err := run(ctx, append(append([]*dql.GraphQuery{}, local...), also...), false); err != nil {
+		return nil, err
+	}
+	if err := run(controlCtx, control, true); err != nil {
+		return nil, err
+	}
+	return found, nil
 }
 
 // noControlRecordsMade refuses a mutation that, running in a partition, would make

@@ -30,6 +30,7 @@ import os
 import re
 import time
 
+import catalogue as K
 import proof_real as P
 import probe_phase1_writes as W
 import probe_cross_workspace as X
@@ -148,6 +149,10 @@ def main():
         c.start()
         c.wait_ready(0, timeout=900)
         schema = dict(X.arms(original))["scope"]
+        if os.environ.get("SPIKE_CATALOGUE"):
+            # SPIKE_CATALOGUE=1: the app catalogue placed in the control plane (catalogue.py).
+            # Its data migration is one way; run probe_catalogue.py once first.
+            schema = K.place(schema)
         if P.get_schema(c) != schema:
             r = P.set_schema(c, schema)
             if r.get("errors"):

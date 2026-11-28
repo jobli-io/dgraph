@@ -19,7 +19,6 @@ import (
 	dgoapi "github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/dgraph/v25/dql"
 	"github.com/dgraph-io/dgraph/v25/graphql/authorization"
-	"github.com/dgraph-io/dgraph/v25/graphql/dgraph"
 	"github.com/dgraph-io/dgraph/v25/graphql/schema"
 	"github.com/dgraph-io/dgraph/v25/protos/pb"
 	"github.com/dgraph-io/dgraph/v25/x"
@@ -2830,25 +2829,11 @@ func rewriteObject(
 				// todo: consider moving the execution of the existence queries to outside this loop.
 				if len(fieldQueries) > 0 {
 					// Execute queries and parse its result into a map
-					qry := dgraph.AsString(append(append([]*dql.GraphQuery{}, fieldQueries...), scopeQueries...))
-					req := &dgoapi.Request{Query: qry}
-
-					if req.Query != "" {
-						// Executing and processing existence queries
-						mutResp, err := NewDgraphExecutor().Execute(ctx, req, nil)
-						if err != nil {
-							retErrors = append(retErrors, err)
-							continue
-						}
-
-						type res struct {
-							Uid   string   `json:"uid"`
-							Types []string `json:"dgraph.type"`
-						}
-						queryResultMap := make(map[string][]idExistenceRes)
-						if mutResp != nil {
-							err = json.Unmarshal(mutResp.Json, &queryResultMap)
-						}
+					{
+						// Executing and processing existence queries. A record of a
+						// control type is looked for in the root namespace (SPIKE, see
+						// partition_planes.go), as one the caller named is.
+						queryResultMap, err := lookUpByPlane(ctx, typ, fieldQueries, fieldTypes, scopeQueries)
 						if err != nil {
 							retErrors = append(retErrors, err)
 							continue
