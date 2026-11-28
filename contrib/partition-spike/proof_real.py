@@ -144,7 +144,13 @@ def app_query(path, name, _seen=None):
         raise SystemExit("%s not found in %s" % (name, path))
     text = m.group(1)
     for frag in re.findall(r"\$\{(\w+)\}", text):
-        text = text.replace("${%s}" % frag, app_query(path, frag))
+        home = path
+        if not re.search(r"export const %s = gql`" % re.escape(frag), src):
+            # a fragment kept in another file of the app: `import { X } from '@api/plugin'`
+            imp = re.search(r"import \{[^}]*\b%s\b[^}]*\} from '@api/(\w+)'" % re.escape(frag), src)
+            if imp:
+                home = "api/%s.ts" % imp.group(1)
+        text = text.replace("${%s}" % frag, app_query(home, frag))
     return text
 
 
