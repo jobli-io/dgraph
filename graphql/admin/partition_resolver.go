@@ -16,6 +16,7 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/dgraph-io/dgo/v250/protos/api"
@@ -86,12 +87,23 @@ var door struct {
 	// asked counts the times a partition was asked about a caller, and refused
 	// the times the answer was no.
 	asked, refused atomic.Uint64
+	// asking makes the requests that arrive with the same token while it is
+	// being asked about wait for that one answer instead of each asking.
+	asking singleflight.Group
 }
 
 // EnablePartitionDoor makes the resolver refuse a request for a partition from a
 // caller who holds nothing in it. The answer about a token is believed for ttl,
 // so a caller whose last grant is revoked keeps getting in for up to that long.
+//
+// The resolver runs more than once for one request (at the HTTP edge, in the
+// GraphQL handler and in the resolver), so an answer has to be kept at least long
+// enough to cover a request: a ttl under a second is taken as a second.
 func EnablePartitionDoor(ttl time.Duration) {
+	if ttl < time.Second {
+		glog.Warningf("SPIKE: partition-door-ttl %s is under a second; using 1s", ttl)
+		ttl = time.Second
+	}
 	door.on, door.ttl = true, ttl
 }
 
@@ -106,9 +118,9 @@ func refusal(ws string) error {
 }
 
 // holdsAnything asks the partition whether its rules show the caller any record
-// that can hold a grant. The question is a GraphQL query resolved in the
+// that can hold a grant. Each question is a GraphQL query resolved in the
 // partition with the caller's own token, on a context the resolver does not
-// attribute again.
+// attribute again. They are asked in turn and the first record found settles it.
 func holdsAnything(ns uint64, headerName, token string) (bool, error) {
 	gh, ok := adminServerVar.gqlServer.(*graphqlHandler)
 	if !ok {
@@ -124,19 +136,33 @@ func holdsAnything(ns uint64, headerName, token string) (bool, error) {
 	if r == nil {
 		return false, errors.New("the partition has no GraphQL schema")
 	}
+	questions := resolve.DoorQuestions(r.Schema())
+	if len(questions) == 0 {
+		return false, errors.New("the schema has no type that holds grants to ask about")
+	}
 	header := http.Header{}
 	header.Set(headerName, token)
 	door.asked.Add(1)
-	resp := r.Resolve(x.AttachTrustedTenant(context.Background(), ns),
-		&schema.Request{Query: resolve.DoorQuestion(), Header: header})
-	if len(resp.Errors) > 0 {
-		return false, resp.Errors
+	start := time.Now()
+	for i, q := range questions {
+		resp := r.Resolve(x.AttachTrustedTenant(context.Background(), ns),
+			&schema.Request{Query: q, Header: header})
+		if len(resp.Errors) > 0 {
+			return false, resp.Errors
+		}
+		var out map[string][]json.RawMessage
+		if err := json.Unmarshal(resp.Data.Bytes(), &out); err != nil {
+			return false, err
+		}
+		if len(out[resolve.DoorField]) > 0 {
+			glog.V(2).Infof("partition door: namespace %d let the caller in on question %d of %d, in %s",
+				ns, i+1, len(questions), time.Since(start))
+			return true, nil
+		}
 	}
-	var out map[string][]json.RawMessage
-	if err := json.Unmarshal(resp.Data.Bytes(), &out); err != nil {
-		return false, err
-	}
-	return len(out[resolve.DoorField]) > 0, nil
+	glog.V(2).Infof("partition door: namespace %d refused the caller after %d questions, in %s",
+		ns, len(questions), time.Since(start))
+	return false, nil
 }
 
 type jwtTenantResolver struct {
@@ -297,7 +323,10 @@ func (t *jwtTenantResolver) resolve(ctx context.Context) (context.Context, error
 	// it. What the partition says is believed for the door's ttl at most.
 	refused := false
 	if door.on && ns != x.RootNamespace {
-		in, err := holdsAnything(ns, meta.GetHeader(), token)
+		answer, err, _ := door.asking.Do(token, func() (interface{}, error) {
+			return holdsAnything(ns, meta.GetHeader(), token)
+		})
+		in, _ := answer.(bool)
 		if err != nil {
 			return ctx, errors.Wrapf(err, "could not ask workspace %q about the caller", ws)
 		}

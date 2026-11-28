@@ -18,6 +18,8 @@ the events lambda sent to its backend, the errors lambda logged, and the records
 in each namespace. A request with no token lands in the root namespace, so in a
 partition that is a read of nothing or a write to the wrong place.
 
+SPIKE_DOOR=1 adds a fourth arm: the target with `partition-door` on.
+
 What the flows add is removed from both namespaces afterwards.
 
   SPIKE_SUB=... SPIKE_EMAIL=... python3 probe_target_lambda.py
@@ -36,7 +38,11 @@ import spike_lambda as L
 
 TARGET = (P.FULL + P.INLINE + P.TOGETHER + S.MUTATIONS
           + "; subscription-scope-routing=true; subscription-change-narrowing=true")
+DOOR = "; partition-door=true; partition-door-ttl=5s"
 ARMS = [("today", P.OFF, None, False), ("as it is", TARGET, 1, False), ("target", TARGET, 1, True)]
+if os.environ.get("SPIKE_DOOR"):
+    # SPIKE_DOOR=1 adds the target state with the door on each partition
+    ARMS.append(("door", TARGET + DOOR, 1, True))
 ARMS = [a for a in ARMS if not os.environ.get("SPIKE_ARMS") or a[0] in os.environ["SPIKE_ARMS"].split(",")]
 STRANGER = "non-member: "
 DETAIL = os.path.join(P.ROOT, "run", "target-lambda-calls.txt")

@@ -1,6 +1,6 @@
 """The target state, up and running on this machine, for the web app to be pointed at.
 
-  the proof cluster   the workspace in its partition, every spike flag on
+  the proof cluster   the workspace in its partition, every spike flag on, the door included
   lambda              Jobli's whole bundle in the stock runtime, LAMBDA_DQL_AS_CALLER=true
                       (spike_lambda.py: recording proxy, local backend sink, no name server)
   a stand-in gateway  on this machine, in place of api.dev.jobli.io
@@ -248,7 +248,7 @@ def main():
         c.flags = P.HEADER_MODE
         P.restart(c)
         marker = c.mutate('_:m <dgraph.type> "SpikeMarker" .', ns=0)["data"]["uids"]["m"]
-        c.flags = T.TARGET
+        c.flags = T.TARGET + T.DOOR
         P.restart(c)
         probe = P.token(sub=P.SUB or "nobody", email=P.EMAIL)
         end = time.time() + 180
