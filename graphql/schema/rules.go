@@ -34,7 +34,8 @@ func init() {
 		customQueryNameValidation, customMutationNameValidation)
 	defnValidations = append(defnValidations, dataTypeCheck, nameCheck, directiveLocationCheck)
 
-	schemaValidations = append(schemaValidations, dgraphDirectivePredicateValidation)
+	schemaValidations = append(schemaValidations, dgraphDirectivePredicateValidation,
+		tenantDirectiveValidation)
 	typeValidations = append(typeValidations, idCountCheck, dgraphDirectiveTypeValidation,
 		passwordDirectiveValidation, conflictingDirectiveValidation, nonIdFieldsCheck,
 		remoteTypeValidation, generateDirectiveValidation, apolloKeyValidation,
@@ -2030,6 +2031,48 @@ func validateTypeDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqler
 		}
 	}
 
+	return errs
+}
+
+// tenantDirectiveValidation checks the two markers a partition's permissions are read
+// from. @tenant names the type a partition holds exactly one record of, so a schema
+// can have one at most, and it must be a stored type. @grants names the types whose
+// records can hold a grant; it means nothing without a tenant to hold them in.
+func tenantDirectiveValidation(sch *ast.Schema, definitions []string) gqlerror.List {
+	var errs gqlerror.List
+	var tenants, holders []*ast.Definition
+	for _, name := range definitions {
+		typ := sch.Types[name]
+		if typ == nil {
+			continue
+		}
+		if typ.Directives.ForName(tenantDirective) != nil {
+			tenants = append(tenants, typ)
+			if typ.Directives.ForName(remoteDirective) != nil {
+				errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+					"Type %s; @tenant is for a stored type and cannot be used with @remote.", typ.Name))
+			}
+		}
+		if typ.Directives.ForName(grantsDirective) != nil {
+			holders = append(holders, typ)
+			if typ.Directives.ForName(remoteDirective) != nil {
+				errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+					"Type %s; @grants is for a stored type and cannot be used with @remote.", typ.Name))
+			}
+		}
+	}
+	for _, typ := range tenants[min(1, len(tenants)):] {
+		errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+			"Type %s; @tenant is already on type %s, and a schema can have only one tenant type.",
+			typ.Name, tenants[0].Name))
+	}
+	if len(tenants) == 0 {
+		for _, typ := range holders {
+			errs = append(errs, gqlerror.ErrorPosf(typ.Position,
+				"Type %s; @grants needs a type with @tenant in the schema: a grant is held inside a tenant.",
+				typ.Name))
+		}
+	}
 	return errs
 }
 

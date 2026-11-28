@@ -78,13 +78,9 @@ import (
 //     Workspace and left out where it holds. Like the first step this treats a
 //     non-null edge as present, so a record without it is no longer hidden.
 
-// partitionAuthority is the type a partition holds exactly one of. A real
-// implementation would take it from the schema.
-const partitionAuthority = "Workspace"
-
-// grantInterface is implemented by the types whose records can hold a grant. A
-// real implementation would take it from the schema too.
-const grantInterface = "IAMResource"
+// The schema says which type a partition holds exactly one record of (@tenant) and
+// which types' records can hold a grant (@grants). Nothing here names either. A
+// schema that marks no tenant gets no fast path: every rule runs as written.
 
 const maxCachedGrants = 50000
 
@@ -419,7 +415,7 @@ func (g *callerGrants) settled(cur schema.Type, rn *schema.RuleNode, arr *arriva
 		if next == nil {
 			return false
 		}
-		if rn.CascadeWrapType == partitionAuthority {
+		if tenant := cur.Tenant(); tenant != "" && rn.CascadeWrapType == tenant {
 			return g.authorityHolds(cur, rn)
 		}
 		return g.settled(next, rn.CascadeWrapInner, nil)
@@ -487,12 +483,7 @@ func wrapTarget(cur schema.Type, rn *schema.RuleNode) schema.Type {
 }
 
 func holdsGrants(t schema.Type) bool {
-	for _, i := range t.Interfaces() {
-		if i == grantInterface {
-			return true
-		}
-	}
-	return false
+	return t != nil && t.HoldsGrants()
 }
 
 // narrow returns the cascade rn with the walk to its authorities replaced by the
@@ -795,14 +786,15 @@ func (g *callerGrants) compileTenant(cur schema.Type, rule *schema.RuleNode) (co
 		return none, false
 	}
 	fd := fieldByPredicate(cur, edge.Attr)
-	if fd == nil || fd.Type().Name() != partitionAuthority || fd.Type().Nullable() {
+	if fd == nil || !fd.Type().IsTenant() || fd.Type().Nullable() {
 		return none, false
 	}
+	tenant := fd.Type().DgraphName()
 	return compiledQuestion{
-		of: partitionAuthority,
+		of: tenant,
 		held: &dql.GraphQuery{
 			Attr:     "held",
-			Func:     &dql.Function{Name: "type", Args: []dql.Arg{{Value: partitionAuthority}}},
+			Func:     &dql.Function{Name: "type", Args: []dql.Arg{{Value: tenant}}},
 			Filter:   edge.Filter,
 			Cascade:  []string{"__all__"},
 			Children: append([]*dql.GraphQuery{{Attr: "uid"}}, edge.Children...),

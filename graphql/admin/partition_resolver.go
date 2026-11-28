@@ -138,7 +138,7 @@ func holdsAnything(ns uint64, headerName, token string) (bool, error) {
 	}
 	questions := resolve.DoorQuestions(r.Schema())
 	if len(questions) == 0 {
-		return false, errors.New("the schema has no type that holds grants to ask about")
+		return false, errors.New("the schema marks no @tenant or @grants type to ask about")
 	}
 	header := http.Header{}
 	header.Set(headerName, token)

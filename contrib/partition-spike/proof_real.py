@@ -331,11 +331,58 @@ def restart(c, debug=False):
     c.wait_ready(0, timeout=900)
 
 
+# The engine reads which type a partition is built around, and which types' records can
+# hold a grant, from two markers in the schema: @tenant and @grants. Jobli's schema
+# (graph/.graphql) says where they go. The schema restored from the dev backup is older
+# and has neither, so every schema a probe loads is given them, and they are taken out
+# again of what a probe reads back. With the partition flags off nothing reads them.
+MARKERS = ("@tenant", "@grants")
+
+
+def marker_homes():
+    """(the declaration line, the marker) for each marker in graph/.graphql."""
+    lines = open(os.environ.get("SPIKE_GRAPHQL") or os.path.join(JOBLI, "graph", ".graphql")).read().split("\n")
+    out = []
+    for i, line in enumerate(lines):
+        if line.strip() in MARKERS:
+            j = i - 1
+            while not re.match(r"(type|interface) ", lines[j]):
+                j -= 1
+            out.append((lines[j], line.strip()))
+    if sorted(m for _, m in out) != sorted(MARKERS):
+        raise SystemExit("graph/.graphql should carry each of %s once: found %s" % (MARKERS, out))
+    return out
+
+
+def marked(schema):
+    for head, marker in marker_homes():
+        at = "\n" + head + "\n"
+        if schema.count(at) != 1:
+            raise SystemExit("cannot place %s: %r is not in the schema once" % (marker, head[:60]))
+        if at + "    " + marker + "\n" not in schema:
+            schema = schema.replace(at, at + "    " + marker + "\n", 1)
+    return schema
+
+
+def unmarked(schema):
+    for head, marker in marker_homes():
+        schema = schema.replace("\n" + head + "\n    " + marker + "\n", "\n" + head + "\n", 1)
+    return schema
+
+
 def get_schema(c):
-    return c.admin("{ getGQLSchema { schema } }")["getGQLSchema"]["schema"]
+    """The schema the cluster holds, without the markers. A cluster that holds a schema
+    with no markers (one just restored) is given them here."""
+    raw = c.admin("{ getGQLSchema { schema } }")["getGQLSchema"]["schema"]
+    if raw and marked(raw) != raw:
+        r = set_schema(c, raw)
+        if r.get("errors"):
+            raise SystemExit("the schema was refused with its markers: %s" % json.dumps(r["errors"])[:400])
+    return unmarked(raw)
 
 
 def set_schema(c, schema):
+    schema = marked(schema)
     r = c.post("/admin", json.dumps({
         "query": "mutation($s: String!) { updateGQLSchema(input: { set: { schema: $s } }) { gqlSchema { id } } }",
         "variables": {"s": schema}}))

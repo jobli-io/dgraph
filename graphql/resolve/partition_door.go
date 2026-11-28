@@ -18,9 +18,9 @@ import (
 // points.
 //
 // So the tenant resolver asks, before it lets a request into a partition,
-// whether the rules would show this caller any record that can hold a grant: the
-// Workspace, a Group, or a record of any other type implementing the grant
-// interface. Each is asked as a GraphQL query, so it is the schema's own rules
+// whether the rules would show this caller the tenant's record (the type marked
+// @tenant) or any record that can hold a grant (a type marked @grants, or
+// implementing an interface that is). Each is asked as a GraphQL query, so it is the schema's own rules
 // that answer, with whatever the fast path does to them. A caller who holds a
 // grant somewhere in the workspace sees the record that holds it. A caller who
 // holds none sees none, and is not let in.
@@ -32,39 +32,39 @@ const DoorField = "held"
 // caller can see a record of one grant-holding type, in the order to ask them. A
 // caller is let in on the first that returns a record.
 //
-// The partition's authority is asked about last. Its own rule is the dearest of
-// them: a Workspace is also visible through every record that points at it, so
-// asking for it walks those records (47 blocks and 133,000 UIDs on the dev
-// workspace, about 200 ms). A Group's rule ends at the Workspace's grants, which
-// the fast path asks about once and the request that follows needs anyway.
+// The tenant's own record is asked about last. Its rule can be the dearest of them:
+// in Jobli's schema a Workspace is also visible through every record that points
+// at it, so asking for it walks those records (47 blocks and 133,000 UIDs on the
+// dev workspace, about 200 ms). The rule of a record that holds grants ends at the
+// tenant's grants, which the fast path asks about once and the request that
+// follows needs anyway.
 //
-// It returns nil if the schema has no grant-holding type with a query of its
-// own, and then nobody can be let in.
+// It returns nil if the schema marks no tenant and no grant-holding type with a
+// query of its own, and then nobody can be let in.
 func DoorQuestions(sch schema.Schema) []string {
 	if sch == nil {
-		return nil
-	}
-	op, err := sch.Operation(&schema.Request{
-		Query: "query { " + DoorField + ": query" + grantInterface + "(first: 1) { __typename } }"})
-	if err != nil || len(op.Queries()) != 1 {
 		return nil
 	}
 	queryable := make(map[string]bool)
 	for _, q := range sch.Queries(schema.FilterQuery) {
 		queryable[q] = true
 	}
-	var last, rest []string
-	for _, typ := range op.Queries()[0].Type().ImplementingTypes() {
-		field := "query" + typ.Name()
-		if !queryable[field] {
-			continue
+	question := func(typ string) string {
+		field := "query" + typ
+		if typ == "" || !queryable[field] {
+			return ""
 		}
-		q := "query { " + DoorField + ": " + field + "(first: 1) { __typename } }"
-		if typ.Name() == partitionAuthority {
-			last = append(last, q)
-		} else {
-			rest = append(rest, q)
+		return "query { " + DoorField + ": " + field + "(first: 1) { __typename } }"
+	}
+	tenant := sch.Tenant()
+	var out []string
+	for _, typ := range sch.GrantHolders() {
+		if q := question(typ); q != "" && typ != tenant {
+			out = append(out, q)
 		}
 	}
-	return append(rest, last...)
+	if q := question(tenant); q != "" {
+		out = append(out, q)
+	}
+	return out
 }

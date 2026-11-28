@@ -139,6 +139,13 @@ type Schema interface {
 	IsFederated() bool
 	SetMeta(meta *metaInfo)
 	Meta() *metaInfo
+	// Tenant returns the name of the type marked @tenant, the type a partition holds
+	// exactly one record of, or "" if the schema marks none.
+	Tenant() string
+	// GrantHolders returns the names of the stored object types whose records can hold
+	// a grant: those marked @grants or implementing an interface that is, in the order
+	// the schema declares them.
+	GrantHolders() []string
 }
 
 // An Operation is a single valid GraphQL operation.  It contains either
@@ -313,6 +320,13 @@ type Type interface {
 	// to be named in a mutation, and the Dgraph names of the implementing types that
 	// have none. Both are nil when no rule applies to the type.
 	ReferenceScopes() ([]ReferenceScope, []string)
+	// IsTenant reports whether the type is marked @tenant.
+	IsTenant() bool
+	// HoldsGrants reports whether a record of the type can hold a grant: the type, or
+	// an interface it implements, is marked @grants.
+	HoldsGrants() bool
+	// Tenant returns the name of the schema's @tenant type, or "".
+	Tenant() string
 }
 
 // A FieldDefinition is a field as defined in some Type in the schema.  As opposed
@@ -3282,6 +3296,96 @@ type ReferenceScope struct {
 	Claim string
 	Edges []string
 	Value string
+}
+
+// tenantOf returns the name of the type marked @tenant in sch, or "".
+func tenantOf(sch *ast.Schema) string {
+	if sch == nil {
+		return ""
+	}
+	name := ""
+	for _, def := range sch.Types {
+		if def.Kind == ast.Object && def.Directives.ForName(tenantDirective) != nil &&
+			(name == "" || def.Name < name) {
+			// validation allows one; the least name keeps this stable if it is ever bypassed
+			name = def.Name
+		}
+	}
+	return name
+}
+
+// holdsGrants reports whether def, or an interface it implements, is marked @grants.
+func holdsGrants(sch *ast.Schema, def *ast.Definition) bool {
+	if sch == nil || def == nil {
+		return false
+	}
+	if def.Directives.ForName(grantsDirective) != nil {
+		return true
+	}
+	for _, name := range def.Interfaces {
+		if i := sch.Types[name]; i != nil && i.Directives.ForName(grantsDirective) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *schema) Tenant() string {
+	if s == nil {
+		return ""
+	}
+	return tenantOf(s.schema)
+}
+
+func (s *schema) GrantHolders() []string {
+	if s == nil || s.schema == nil {
+		return nil
+	}
+	var defs []*ast.Definition
+	for _, def := range s.schema.Types {
+		if def.Kind == ast.Object && !def.BuiltIn && holdsGrants(s.schema, def) {
+			defs = append(defs, def)
+		}
+	}
+	line := func(d *ast.Definition) int {
+		if d.Position == nil {
+			return 0
+		}
+		return d.Position.Line
+	}
+	sort.Slice(defs, func(i, j int) bool {
+		if line(defs[i]) != line(defs[j]) {
+			return line(defs[i]) < line(defs[j])
+		}
+		return defs[i].Name < defs[j].Name
+	})
+	names := make([]string, 0, len(defs))
+	for _, def := range defs {
+		names = append(names, def.Name)
+	}
+	return names
+}
+
+func (t *astType) definition() (*ast.Schema, *ast.Definition) {
+	if t == nil || t.typ == nil || t.inSchema == nil || t.inSchema.schema == nil {
+		return nil, nil
+	}
+	return t.inSchema.schema, t.inSchema.schema.Types[t.typ.Name()]
+}
+
+func (t *astType) IsTenant() bool {
+	_, def := t.definition()
+	return def != nil && def.Kind == ast.Object && def.Directives.ForName(tenantDirective) != nil
+}
+
+func (t *astType) HoldsGrants() bool {
+	sch, def := t.definition()
+	return holdsGrants(sch, def)
+}
+
+func (t *astType) Tenant() string {
+	sch, _ := t.definition()
+	return tenantOf(sch)
 }
 
 // ReferenceScopes returns the @referenceScope rules that apply to t. A type takes its

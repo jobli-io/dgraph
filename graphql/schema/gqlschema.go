@@ -45,6 +45,8 @@ const (
 	validateDirective            = "validate"
 	postValidateDirective        = "postValidate"
 	referenceScopeDirective      = "referenceScope"
+	tenantDirective              = "tenant"
+	grantsDirective              = "grants"
 	oldValueDirective            = "oldValue"
 	cascadeDeleteDirective       = "cascadeDelete"
 	cascadeAuthDirective         = "cascadeAuth"
@@ -346,6 +348,8 @@ directive @bypassAuth(except: [String!], if: String) on FIELD_DEFINITION
 directive @validate(rule: String, expr: String, reason: String, rules: [DgraphValidate], add: [DgraphValidate], update: [DgraphValidate]) on FIELD_DEFINITION | OBJECT | INTERFACE
 directive @postValidate(expr: String, reason: String, rules: [DgraphPostValidate], add: [DgraphPostValidate], update: [DgraphPostValidate]) on OBJECT | INTERFACE
 directive @referenceScope(claim: String!, path: String!) on OBJECT | INTERFACE
+directive @tenant on OBJECT
+directive @grants on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
@@ -396,6 +400,8 @@ directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filte
 directive @validate(rule: String, expr: String, reason: String, rules: [DgraphValidate], add: [DgraphValidate], update: [DgraphValidate]) on FIELD_DEFINITION
 directive @postValidate(expr: String, reason: String, rules: [DgraphPostValidate], add: [DgraphPostValidate], update: [DgraphPostValidate]) on OBJECT | INTERFACE
 directive @referenceScope(claim: String!, path: String!) on OBJECT | INTERFACE
+directive @tenant on OBJECT
+directive @grants on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
@@ -697,6 +703,8 @@ var directiveValidators = map[string]directiveValidator{
 	transformDirective:         transformDirectiveValidation,
 	validateDirective:          validateDirectiveValidation,
 	referenceScopeDirective:    ValidatorNoOp, // type-level; the path is checked in referenceScopeDirectiveValidation (typeValidations)
+	tenantDirective:            ValidatorNoOp, // type-level; checked across the schema in tenantDirectiveValidation
+	grantsDirective:            ValidatorNoOp, // type-level; checked across the schema in tenantDirectiveValidation
 	postValidateDirective:      ValidatorNoOp, // type-level; compile-time expr check in postValidateDirectiveValidation (typeValidations)
 	oldValueDirective:          oldValueDirectiveValidation,
 	cascadeDeleteDirective:     cascadeDeleteDirectiveValidation,
@@ -734,6 +742,8 @@ var directiveLocationMap = map[string]map[ast.DefinitionKind]bool{
 	lambdaOnMutateDirective:      {ast.Object: true, ast.Interface: true},
 	postValidateDirective:        {ast.Object: true, ast.Interface: true},
 	referenceScopeDirective:      {ast.Object: true, ast.Interface: true},
+	tenantDirective:              {ast.Object: true},
+	grantsDirective:              {ast.Object: true, ast.Interface: true},
 	cascadeAuthPolicyDirective:   {ast.Object: true, ast.Interface: true},
 	authVariablesDirective:       {ast.Object: true, ast.Interface: true},
 	generateDirective:            {ast.Object: true, ast.Interface: true},

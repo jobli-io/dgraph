@@ -74,7 +74,8 @@ def arms(original):
     if fixed != original:
         out.append(("fix", fixed))
     # @referenceScope: copy each line of graph/.graphql that carries it to under the
-    # same declaration here.
+    # same declaration here. (@tenant and @grants are carried by every schema a probe
+    # loads: proof_real.set_schema.)
     def scoped(schema):
         lines = now.split("\n")
         for i, line in enumerate(lines):
@@ -85,7 +86,7 @@ def arms(original):
                 head = lines[j] + "\n"
                 if schema.count("\n" + head) != 1:
                     raise SystemExit("cannot place %s under %r" % (line.strip(), lines[j][:50]))
-                if line.strip() not in schema[schema.index("\n" + head):schema.index("\n" + head) + len(head) + 400]:
+                if "\n" + line + "\n" not in schema[schema.index("\n" + head):schema.index("\n" + head) + len(head) + 400]:
                     schema = schema.replace("\n" + head, "\n" + head + line + "\n", 1)
         return schema
     if "@referenceScope(" in now:
