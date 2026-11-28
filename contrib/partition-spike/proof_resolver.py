@@ -224,6 +224,18 @@ def main():
         t.check("so no name can send a workspace to the root namespace", rejected(d), d)
         why = c.name_partition(a, "7")
         t.check("a name that is a number is refused", bool(why), why)
+        # -- what a partition says its schema is
+        def listing(headers):
+            r = c.post("/query", "schema {}", ctype="application/dql", headers=headers)
+            d = r.get("data") or {}
+            return sorted(x["predicate"] for x in d.get("schema") or []), sorted(x["name"] for x in d.get("types") or [])
+        root_preds, root_types = listing(None)
+        part_preds, part_types = listing(auth(acme))
+        own = lambda names: [n for n in names if not n.startswith("dgraph.namespace")]
+        t.check("a partition lists the template's schema, less the registry's own predicates",
+                part_preds == own(root_preds) and part_types == own(root_types) and "Note.text" in part_preds
+                and len(part_preds) < len(root_preds), "%d of %d predicates, %d of %d types" % (
+                    len(part_preds), len(root_preds), len(part_types), len(root_types)))
         r = c.admin("{ state { namespaces } }", check=False)
         listed = sorted(((r.get("data") or {}).get("state") or {}).get("namespaces") or [])
         t.check("the partitions are listed with the root namespace", listed == sorted([0, a, b]), listed)

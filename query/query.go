@@ -3113,13 +3113,28 @@ func (req *Request) Process(ctx context.Context) (er ExecutionResult, err error)
 	return er, nil
 }
 
+// servesSchemaOf reports whether a schema entry filed under namespace from is part
+// of the schema of namespace ns. A namespace has its own entries. A partition has
+// none: its schema is its template's, less what only the root namespace holds (the
+// registry of namespaces). So a listing of the whole schema, asked in a partition,
+// is the template's, and an operator's console shows what the partition really uses.
+func servesSchemaOf(ns, from uint64, name string) bool {
+	if from == ns {
+		return true
+	}
+	if !x.IsPartitionNamespace(ns) || from != x.TemplateNamespace(ns) {
+		return false
+	}
+	return name != "dgraph.namespace" && !strings.HasPrefix(name, "dgraph.namespace.")
+}
+
 // filterTypesForNamespace filters types for the given namespace.
 func filterTypesForNamespace(namespace uint64, types []*pb.TypeUpdate) []*pb.TypeUpdate {
 	out := []*pb.TypeUpdate{}
 	for _, update := range types {
 		// Type name doesn't have reverse.
 		typeNamespace, typeName := x.ParseNamespaceAttr(update.TypeName)
-		if typeNamespace != namespace {
+		if !servesSchemaOf(namespace, typeNamespace, typeName) {
 			continue
 		}
 		update.TypeName = typeName
@@ -3142,7 +3157,7 @@ func filterSchemaNodeForNamespace(namespace uint64, nodes []*pb.SchemaNode) []*p
 
 	for _, node := range nodes {
 		nodeNamespace, attrName := x.ParseNamespaceAttr(node.Predicate)
-		if nodeNamespace != namespace {
+		if !servesSchemaOf(namespace, nodeNamespace, attrName) {
 			continue
 		}
 		node.Predicate = attrName
