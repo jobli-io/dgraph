@@ -236,6 +236,7 @@ directive @referenceScope(claim: String!, path: String!) on OBJECT | INTERFACE
 directive @tenant on OBJECT
 directive @grants on OBJECT | INTERFACE
 directive @access(scope: AccessScope!) on OBJECT | INTERFACE
+directive @scope(plane: ScopePlane!) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
@@ -418,6 +419,11 @@ enum LookupStrategy {
 	FORWARD
 	REVERSE
 	DYNAMIC
+}
+
+enum ScopePlane {
+	tenant
+	control
 }
 
 #######################

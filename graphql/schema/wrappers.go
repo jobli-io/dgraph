@@ -330,6 +330,9 @@ type Type interface {
 	// TenantLevel reports whether rule is written on a type or interface that declares,
 	// with @access, that its query rule is decided by the tenant and the caller alone.
 	TenantLevel(rule *RuleNode) bool
+	// Plane returns where the type's records live: PlaneControl for a type placed in
+	// the control plane with @scope, PlaneTenant for every other.
+	Plane() string
 }
 
 // A FieldDefinition is a field as defined in some Type in the schema.  As opposed
@@ -3403,6 +3406,11 @@ func (t *astType) TenantLevel(rule *RuleNode) bool {
 	s := t.inSchema
 	s.tenantLevelOnce.Do(func() { s.tenantLevel = tenantLevelRules(s.schema) })
 	return s.tenantLevel[rule.RuleTemplate]
+}
+
+func (t *astType) Plane() string {
+	sch, def := t.definition()
+	return planeOf(sch, def)
 }
 
 func (t *astType) IsTenant() bool {

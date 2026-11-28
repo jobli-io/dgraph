@@ -135,3 +135,51 @@ func TestAccessDeclaresARuleAboutTheTenant(t *testing.T) {
 		require.Error(t, load(base+`type Note @access(scope: PUBLIC) { id: ID! inWorkspace: Workspace! }`))
 	})
 }
+
+func TestScopePlacesTypesInAPlane(t *testing.T) {
+	load := func(sch string) error {
+		_, err := NewHandler(sch, false)
+		return err
+	}
+	const base = `
+		type Workspace @tenant { name: String! @id }
+		interface InWorkspace @scope(plane: tenant) { id: ID! inWorkspace: Workspace! }
+		type App @scope(plane: control) { clientId: String! @id title: String }
+	`
+
+	t.Run("a tenant type may point at a control type, one way", func(t *testing.T) {
+		require.NoError(t, load(base+`
+			type Plugin implements InWorkspace { label: String hasApp: App }
+			type Candidate { id: ID! name: String madeBy: App }`))
+	})
+
+	t.Run("a schema that places nothing is as it was", func(t *testing.T) {
+		require.NoError(t, load(`
+			type App { clientId: String! @id plugins: [Plugin] @hasInverse(field: hasApp) }
+			type Plugin { id: ID! hasApp: App }`))
+	})
+
+	for name, c := range map[string]struct{ sch, want string }{
+		"an edge into the control plane with an inverse": {`
+			type App2 @scope(plane: control) { clientId: String! @id plugins: [Plugin] }
+			type Plugin implements InWorkspace { label: String hasApp: App2 @hasInverse(field: plugins) }`,
+			"cannot hold an edge to Plugin"},
+		"an inverse declared from the tenant side": {`
+			type Plugin implements InWorkspace { label: String hasApp: App @hasInverse(field: title) }`,
+			"read-only and cannot have @hasInverse"},
+		"a control type that points at a tenant type": {`
+			type Catalogue @scope(plane: control) { id: ID! featured: [Candidate] }
+			type Candidate { id: ID! name: String }`,
+			"a control type cannot hold an edge to Candidate"},
+		"a type in two planes": {`
+			interface Listed @scope(plane: control) { id: ID! }
+			type Plugin implements InWorkspace & Listed { label: String }`,
+			"puts it in two planes"},
+	} {
+		t.Run(name+" is refused", func(t *testing.T) {
+			err := load(base + c.sch)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), c.want)
+		})
+	}
+}

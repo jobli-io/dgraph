@@ -36,7 +36,7 @@ func init() {
 	defnValidations = append(defnValidations, dataTypeCheck, nameCheck, directiveLocationCheck)
 
 	schemaValidations = append(schemaValidations, dgraphDirectivePredicateValidation,
-		tenantDirectiveValidation)
+		tenantDirectiveValidation, scopeDirectiveValidation)
 	typeValidations = append(typeValidations, idCountCheck, dgraphDirectiveTypeValidation,
 		passwordDirectiveValidation, conflictingDirectiveValidation, nonIdFieldsCheck,
 		remoteTypeValidation, generateDirectiveValidation, apolloKeyValidation,
@@ -2072,6 +2072,126 @@ func tenantDirectiveValidation(sch *ast.Schema, definitions []string) gqlerror.L
 			errs = append(errs, gqlerror.ErrorPosf(typ.Position,
 				"Type %s; @grants needs a type with @tenant in the schema: a grant is held inside a tenant.",
 				typ.Name))
+		}
+	}
+	return errs
+}
+
+// The two planes a type's records can live in.
+const (
+	PlaneTenant  = "tenant"
+	PlaneControl = "control"
+)
+
+// declaredPlanes returns the planes @scope gives def: its own, and those of the
+// interfaces it implements.
+func declaredPlanes(sch *ast.Schema, def *ast.Definition) map[string]string {
+	out := make(map[string]string)
+	add := func(d *ast.Definition) {
+		if d == nil {
+			return
+		}
+		if dir := d.Directives.ForName(scopeDirective); dir != nil {
+			if a := dir.Arguments.ForName("plane"); a != nil && a.Value != nil {
+				out[a.Value.Raw] = d.Name
+			}
+		}
+	}
+	add(def)
+	for _, name := range def.Interfaces {
+		add(sch.Types[name])
+	}
+	return out
+}
+
+// planeOf returns the plane def's records live in. A type that says nothing, and
+// implements no interface that does, is a tenant's: it is the control plane that
+// is declared.
+func planeOf(sch *ast.Schema, def *ast.Definition) string {
+	if sch == nil || def == nil {
+		return PlaneTenant
+	}
+	if _, ok := declaredPlanes(sch, def)[PlaneControl]; ok {
+		return PlaneControl
+	}
+	return PlaneTenant
+}
+
+// usesPlanes reports whether any type of the schema is placed in the control plane.
+func usesPlanes(sch *ast.Schema) bool {
+	for _, def := range sch.Types {
+		if dir := def.Directives.ForName(scopeDirective); dir != nil {
+			if a := dir.Arguments.ForName("plane"); a != nil && a.Value != nil && a.Value.Raw == PlaneControl {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scopeDirectiveValidation checks where @scope puts the schema's types. A tenant's
+// records are in its own namespace and the control plane's are in the root, and a
+// request reads one namespace for each root field, so:
+//
+//   - a type is in one plane: it cannot implement an interface of each
+//   - a control type cannot hold an edge to a tenant type: there is no one
+//     namespace to follow it into
+//   - a tenant type may hold an edge to a control type, which is read from the root
+//     namespace, but only one way: the edge cannot have an inverse, because the
+//     inverse would be a write to the control plane from inside a tenant
+func scopeDirectiveValidation(sch *ast.Schema, definitions []string) gqlerror.List {
+	if !usesPlanes(sch) {
+		return nil
+	}
+	var errs gqlerror.List
+	stored := func(def *ast.Definition) bool {
+		return def != nil && (def.Kind == ast.Object || def.Kind == ast.Interface) && !def.BuiltIn &&
+			!isQueryOrMutationType(def) && def.Directives.ForName(remoteDirective) == nil
+	}
+	for _, name := range definitions {
+		def := sch.Types[name]
+		if !stored(def) {
+			continue
+		}
+		planes := declaredPlanes(sch, def)
+		if len(planes) > 1 {
+			errs = append(errs, gqlerror.ErrorPosf(def.Position,
+				"Type %s; @scope puts it in two planes: tenant (from %s) and control (from %s). A type's records live in one.",
+				def.Name, planes[PlaneTenant], planes[PlaneControl]))
+			continue
+		}
+		from := planeOf(sch, def)
+		for _, f := range def.Fields {
+			to := sch.Types[f.Type.Name()]
+			if !stored(to) || f.Directives.ForName(customDirective) != nil || f.Directives.ForName(lambdaDirective) != nil {
+				continue
+			}
+			target := planeOf(sch, to)
+			if to.Kind == ast.Interface && target == PlaneTenant {
+				// an interface of both kinds of type is an edge into both planes
+				for _, impl := range sch.PossibleTypes[to.Name] {
+					if planeOf(sch, impl) == PlaneControl {
+						target = "both"
+					}
+				}
+			}
+			switch {
+			case from == target:
+			case from == PlaneControl:
+				errs = append(errs, gqlerror.ErrorPosf(f.Position,
+					"Type %s; Field %s: a control type cannot hold an edge to %s, which is %s.",
+					def.Name, f.Name, to.Name, map[bool]string{true: "a tenant type", false: "implemented by tenant types"}[target == PlaneTenant]))
+			case target == "both":
+				errs = append(errs, gqlerror.ErrorPosf(f.Position,
+					"Type %s; Field %s: %s is implemented by tenant types and by control types, so the edge has no one namespace to be read from.",
+					def.Name, f.Name, to.Name))
+			default: // tenant -> control
+				if inv := f.Directives.ForName(inverseDirective); inv != nil {
+					errs = append(errs, gqlerror.ErrorPosf(f.Position,
+						"Type %s; Field %s: an edge from a tenant type to the control type %s is read-only and cannot have @hasInverse.",
+						def.Name, f.Name, to.Name))
+				}
+			}
 		}
 	}
 	return errs

@@ -564,7 +564,7 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 							Err:   err,
 						}
 					}, gqlReq.Query)
-				allResolved[storeAt] = r.resolvers.queryResolverFor(q).Resolve(ctx, q)
+				allResolved[storeAt] = r.resolvers.queryResolverFor(q).Resolve(planeContext(ctx, q.ConstructedFor()), q)
 			}(q, i)
 		}
 		wg.Wait()
@@ -618,10 +618,11 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 			}
 
 			var res *Resolved
-			res, allSuccessful = r.resolvers.mutationResolverFor(m).Resolve(ctx, m)
+			mctx := planeContext(ctx, m.MutatedType())
+			res, allSuccessful = r.resolvers.mutationResolverFor(m).Resolve(mctx, m)
 			addResult(resp, res)
 			if allSuccessful && res != nil && len(res.Data) > 0 {
-				triggerMutationInvalidation(ctx, m, res.Data, res.Change)
+				triggerMutationInvalidation(mctx, m, res.Data, res.Change)
 			}
 		}
 	case op.IsSubscription():
@@ -795,6 +796,23 @@ func newtimer(ctx context.Context, Duration *schema.OffsetDuration) schema.Offse
 	resolveStartTime, _ := ctx.Value(resolveStartTime).(time.Time)
 	tf := schema.NewOffsetTimerFactory(resolveStartTime)
 	return tf.NewOffsetTimer(Duration)
+}
+
+// planeContext returns the context a root field runs in. A request is attributed to
+// one namespace, its tenant's. A root field whose type the schema places in the
+// control plane (@scope) is run in the root namespace instead, where that type's
+// records are, under that type's own rules: so one request can read its tenant's
+// records and the control plane's side by side. Nothing changes for a request that
+// is already in the root namespace, or for a tenant type.
+func planeContext(ctx context.Context, typ schema.Type) context.Context {
+	if typ == nil || typ.Plane() != schema.PlaneControl {
+		return ctx
+	}
+	ns, err := x.ExtractNamespace(ctx)
+	if err != nil || !x.IsPartitionNamespace(ns) {
+		return ctx
+	}
+	return x.AttachNamespace(ctx, x.TemplateNamespace(ns))
 }
 
 // InvalidationFunc is registered by the subscription package to avoid circular package imports.
