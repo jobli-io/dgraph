@@ -21,8 +21,8 @@ import (
 const planeSchema = `
 type Workspace @tenant(claim: "ws", name: "name") { id: ID! name: String! @id }
 type Vendor @scope(plane: control) { id: ID! name: String }
-type App @scope(plane: control) { clientId: String! @id title: String madeBy: Vendor }
-type Plugin { id: ID! label: String! hasApp: App notes: [Note] }
+type App @scope(plane: control) { clientId: String! @id title: String @search(by: [exact]) madeBy: Vendor }
+type Plugin { id: ID! label: String! hasApp: App @search notes: [Note] }
 type Note { id: ID! text: String }
 `
 
@@ -62,4 +62,15 @@ func TestAnEdgeIntoTheControlPlaneIsReadInTheTemplateNamespace(t *testing.T) {
 		walk(gq)
 	}
 	require.Equal(t, []string{"Plugin.hasApp"}, marked)
+}
+
+// A parent filtered by a field of the control record its edge leads to: the control
+// records that match are found in the root namespace, and the edge, which has no
+// inverse to walk back along, is tested against them where the parent is.
+func TestAParentIsFilteredByItsControlRecordForward(t *testing.T) {
+	q := rewritten(t, `{ queryPlugin(filter: {hasApp: {title: {eq: "Web app"}}}) { label } }`)
+	require.Contains(t, q, `as var(func: type(App)) @filter(eq(App.title, "Web app")) @template`)
+	require.Contains(t, q, `uid_in(Plugin.hasApp, uid(`)
+	require.NotContains(t, q, "~Plugin.hasApp", "nothing is walked back from the control record")
+	require.Equal(t, 1, strings.Count(q, "@template"), "only the block that finds the control records")
 }

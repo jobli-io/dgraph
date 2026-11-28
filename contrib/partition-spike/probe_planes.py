@@ -32,13 +32,13 @@ type Workspace @tenant(claim: "ws", name: "name") {
 
 type App %s {
   clientId: String! @id
-  title: String
+  title: String @search(by: [exact])
 }
 
 type Plugin {
   id: ID!
   label: String! @search(by: [exact])
-  hasApp: App
+  hasApp: App @search
 }
 
 type Note {
@@ -90,6 +90,10 @@ def main():
               '{ queryPlugin { label hasApp(filter: {clientId: {eq: "web"}}) { title } } }'))
         print("  its plugins of the app seek only:    %s" % gql(c, acme,
               '{ queryPlugin { label hasApp(filter: {clientId: {eq: "seek"}}) { title } } }'))
+        print("  its plugins whose app is 'Web app':   %s" % gql(c, acme,
+              '{ queryPlugin(filter: {hasApp: {title: {eq: "Web app"}}}) { label } }'))
+        print("  its plugins whose app is 'Seek':      %s" % gql(c, acme,
+              '{ queryPlugin(filter: {hasApp: {title: {eq: "Seek"}}}) { label } }'))
         r = c.post("/query", "{ q(func: type(Plugin)) { Plugin.label Plugin.hasApp @template { App.title } } }",
                    ctype="application/dql", headers=R.auth(acme))
         print("  the same reach by hand-written DQL:  %s" % ((r.get("errors") or [{}])[0].get("message") or json.dumps(r.get("data")))[:120])

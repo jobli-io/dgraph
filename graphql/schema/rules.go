@@ -1132,6 +1132,12 @@ func searchValidation(
 		// It's not enough to just check for the @hasInverse directive as it
 		// may be defined in the inverse type.
 		if isCustomType(sch, field.Type) {
+			// SPIKE: an edge from a tenant's record into the control plane has no
+			// inverse (scopeDirectiveValidation) and is filtered forward: the control
+			// records that match are found first, and the edge is tested against them.
+			if planeOf(sch, typ) != PlaneControl && planeOf(sch, sch.Types[field.Type.Name()]) == PlaneControl {
+				return nil
+			}
 			if !hasInverse(sch, typ, field) {
 				errs = append(errs, gqlerror.ErrorPosf(
 					dir.Position,

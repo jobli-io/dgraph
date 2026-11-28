@@ -4372,6 +4372,15 @@ func buildFilter(typ schema.Type,
 					}
 				}
 
+				// SPIKE: a filter through an edge from a tenant's record into the control
+				// plane. The edge has no inverse to walk back along, and the records it
+				// leads to are in the root namespace: they are found there first, and the
+				// edge is tested against them where the parent is read.
+				crossing := typ.Plane() != schema.PlaneControl && fd.Type().Plane() == schema.PlaneControl
+				if crossing {
+					resolvedStrategy = "FORWARD"
+				}
+
 				// For interface-typed nested fields: extract memberTypes before calling
 				// buildFilter so it scopes the nested var query's func: type(...) rather
 				// than being silently dropped.
@@ -4599,6 +4608,10 @@ func buildFilter(typ schema.Type,
 						nestedQrys = applySimilarToPreFilter(nestedQrys, qs)
 					}
 
+					if crossing {
+						markTemplate(qs)
+						markTemplate(nestedQrys)
+					}
 					varQry = append(varQry, nestedQrys...)
 					continue
 				}
