@@ -203,6 +203,66 @@ def main():
                           'set: {description: "changed from %s"}}) { numUids } }' % P.WS, {})
         print("  change an app of another workspace: %s" % short(r))
 
+        # a release of the new app, and installing it: lambda's manifest hooks read the app in
+        # the catalogue, and its installer writes the plugin in the partition with its edges to
+        # the app and the manifest, which it has to find in the catalogue
+        if made[0].get("id"):
+            print("\na release of the new app, and installing it, as the web app does:")
+            # a release that was accepted before, of an app a developer made, under the new app's ID
+            donors = [m for m in root('{ q(func: type(IntegrationAppManifest)) @filter(eq(IntegrationAppManifest.status, "PUBLISHED", "PRIVATE_PUBLISHED")) '
+                                      "{ t: IntegrationAppManifest.manifest a: IntegrationAppManifest.forApp { c: IntegrationApp.clientId } } }")["q"]
+                      if m.get("t") and m.get("a")]
+            ident = lambda m: (m["a"][0] if isinstance(m["a"], list) else m["a"])["c"]
+            donor = sorted(donors, key=lambda m: (not ident(m).startswith("app_"), len(m["t"])))[0]
+            donor_id = ident(donor)
+            release = "1.0.0"
+            try:
+                doc = json.loads(donor["t"])
+                doc["appId"] = made[0]["clientId"]
+                release = doc.get("version") or release
+                text = json.dumps(doc)
+            except ValueError:
+                text = donor["t"].replace(donor_id, made[0]["clientId"])
+            calls0, log0 = len(tap.calls), len(L.logs())
+            r = P.gql(c, tok, "mutation($in: [AddIntegrationAppManifestInput!]!) { data: addIntegrationAppManifest(input: $in) "
+                              "{ integrationAppManifest { id sId status manifestDigest tags forApp { clientId } } } }",
+                      {"in": [{"forApp": {"id": made[0]["id"]}, "version": release, "manifest": text}]})
+            man = (((r.get("data") or {}).get("data") or {}).get("integrationAppManifest") or [{}])[0]
+            print("  add a release (a copy of %s's manifest, %d bytes): %s" % (donor_id, len(text), short(r, 260)))
+            if man.get("id"):
+                r = P.gql(c, tok, "mutation($id: [ID!]) { data: updateIntegrationAppManifest(input: {filter: {id: $id}, set: {status: PRIVATE_PUBLISHED}}) "
+                                  "{ integrationAppManifest { status publishedAt isLatest } } }", {"id": [man["id"]]})
+                print("  publish it privately:   %s" % short(r))
+                roots0 = root("{ q(func: has(dgraph.type)) { count(uid) } }")["q"][0]["count"]
+                tap.quiet(0.8, 20)
+                t0 = time.perf_counter()
+                r = P.gql(c, tok, P.app_query("api/plugin.ts", "ADD_PLUGIN"), {"input": [{"installedManifest": {"id": man["id"]}, "deleted": False}]})
+                took = (time.perf_counter() - t0) * 1000
+                tap.quiet()
+                print("  install it:             %s in %.0f ms" % (short(r, 220) if r.get("errors") else "numUids %s" % (
+                    ((r.get("data") or {}).get("data") or {}).get("numUids")), took))
+                got = mine('{ q(func: type(Plugin)) @filter(eq(Plugin.clientId, "%s")) { uid s: Plugin.lifecycleState w: count(WorkspaceMember.inWorkspace) '
+                           "a: Plugin.hasApp { uid } m: Plugin.installedManifest { uid } b: count(Plugin.hasIAMBinding) r: count(Plugin.managesResource) } }"
+                           % made[0]["clientId"])["q"]
+                one = lambda v: (v[0] if isinstance(v, list) else v) if v else {}
+                for g in got:
+                    print("    in the partition: state %s; its app edge is the catalogue's app: %s; its manifest edge is the release: %s; "
+                          "%s bindings, %s resources it manages" % (g.get("s"), one(g.get("a")).get("uid") == made[0]["id"],
+                                                                    one(g.get("m")).get("uid") == man["id"], g.get("b", 0), g.get("r", 0)))
+                if not got:
+                    print("    no plugin of the new app is in the partition")
+                rr = P.gql(c, P.token(azp=made[0]["clientId"]), 'query($id: ID) { data: getWorkspace(id: $id) { hasPlugin(filter: {clientId: {eq: "%s"}}) '
+                           "{ lifecycleState hasApp { clientId displayName } installedManifest { version status forApp { clientId } } } } }"
+                           % made[0]["clientId"], {"id": ws})
+                print("    read back as that app:  %s" % short(rr, 260))
+                print("    records in the root namespace: %d before the install, %d after" % (
+                    roots0, root("{ q(func: has(dgraph.type)) { count(uid) } }")["q"][0]["count"]))
+            asked = tap.calls[calls0:]
+            print("  for the three steps lambda asked the alpha %d times: %d as the caller, %d of the catalogue (no caller's token), %d refused or failed" % (
+                len(asked), sum(1 for x in asked if x["token"]), sum(1 for x in asked if not x["token"]), sum(1 for x in asked if T.failed(x))))
+            for l in [l for l in L.logs()[log0:].splitlines() if ('"severity":"ERROR"' in l or "[ERROR]" in l) and "GEMINI_API_KEY" not in l][:5]:
+                print("    lambda logged: %s" % l[:260])
+
         # the account: the person's, in the control plane
         print("\nthe caller's account, from inside the partition:")
         acct = root('{ q(func: eq(UserAccount.userId, "%s")) { uid f: UserAccount.firstName t: count(UserAccount.hasDeviceToken) '
