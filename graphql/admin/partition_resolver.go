@@ -133,8 +133,8 @@ func holdsAnything(ns uint64, headerName, token string) (bool, error) {
 	gh.resolverMux.RLock()
 	r := gh.resolver[schemaNs]
 	gh.resolverMux.RUnlock()
-	if r == nil {
-		return false, errors.New("the partition has no GraphQL schema")
+	if r == nil || r.Schema() == nil {
+		return false, errors.New("the GraphQL schema is not loaded, so its rules cannot be asked")
 	}
 	questions := resolve.DoorQuestions(r.Schema())
 	if len(questions) == 0 {
@@ -190,24 +190,96 @@ func InstallJWTTenantResolver(claim string, dirTTL time.Duration) {
 
 // rootAuthMeta returns the JWT settings of the root namespace's GraphQL schema,
 // or nil if the root has no schema yet or declares no authorization.
+//
+// The settings are one line of the schema's text and do not depend on the rest
+// of it. So when the schema is stored but cannot be loaded (it calls lambda
+// while it loads, and lambda may be down; or it uses something this build does
+// not know), they are read from the stored text. Without that the resolver would
+// not know which header carries the token, would see no token on any request,
+// and would serve every request from the root namespace, token or not.
 func rootAuthMeta() *authorization.AuthMeta {
 	if adminServerVar == nil {
 		return nil
 	}
-	if err := adminServerVar.lazyLoadSchema(x.RootNamespace); err != nil {
+	if err := adminServerVar.lazyLoadSchema(x.RootNamespace); err == nil {
+		if gh, ok := adminServerVar.gqlServer.(*graphqlHandler); ok {
+			gh.resolverMux.RLock()
+			r := gh.resolver[x.RootNamespace]
+			gh.resolverMux.RUnlock()
+			if r != nil && r.Schema() != nil && r.Schema().Meta() != nil {
+				if meta := r.Schema().Meta().AuthMeta(); meta != nil {
+					return meta
+				}
+			}
+		}
+	}
+	// Nothing loaded says how a token is carried. A first load that failed leaves the
+	// schema marked as loaded with nothing in it, so this is not only the error case.
+	return storedAuthMeta()
+}
+
+// stored is the JWT settings last read from the stored schema's text, kept for a
+// few seconds so that an alpha whose schema will not load does not read the
+// schema from disk on every request.
+var stored struct {
+	mu    sync.Mutex
+	until time.Time
+	meta  *authorization.AuthMeta
+}
+
+const storedAuthTTL = 5 * time.Second
+
+func storedAuthMeta() *authorization.AuthMeta {
+	stored.mu.Lock()
+	defer stored.mu.Unlock()
+	now := time.Now()
+	if now.Before(stored.until) {
+		return stored.meta
+	}
+	stored.meta = nil
+	sch, err := getCurrentGraphQLSchema(x.RootNamespace)
+	if err != nil || sch == nil {
+		// Not read: an alpha that is still starting cannot read it yet. Nothing is
+		// remembered, so the next request tries again.
+		stored.until = time.Time{}
 		return nil
 	}
-	gh, ok := adminServerVar.gqlServer.(*graphqlHandler)
-	if !ok {
+	stored.until = now.Add(storedAuthTTL)
+	if sch.Schema == "" {
+		// nothing stored: there is no token to know of, and every request is the root's
 		return nil
 	}
-	gh.resolverMux.RLock()
-	r := gh.resolver[x.RootNamespace]
-	gh.resolverMux.RUnlock()
-	if r == nil || r.Schema() == nil || r.Schema().Meta() == nil {
+	// The settings are the comment line that begins "# Dgraph.Authorization", read
+	// here as the schema generator reads it: that line and nothing else.
+	line := ""
+	for _, text := range strings.Split(sch.Schema, "\n") {
+		text = strings.TrimSpace(text)
+		if strings.HasPrefix(text, "#") &&
+			strings.HasPrefix(strings.TrimSpace(text[1:]), authorization.AuthMetaHeader) {
+			line = text
+		}
+	}
+	if line == "" {
 		return nil
 	}
-	return r.Schema().Meta().AuthMeta()
+	meta, err := authorization.ParseAuthMeta(line)
+	if err != nil {
+		glog.Errorf("the root schema will not load and its Dgraph.Authorization cannot be read: %v", err)
+		return nil
+	}
+	if meta != nil && len(meta.JWKUrls) != 0 {
+		meta.InitHttpClient()
+		if err := meta.FetchJWKs(); err != nil {
+			glog.Errorf("the root schema will not load and its JWKs cannot be fetched: %v", err)
+			return nil
+		}
+	}
+	if meta != nil {
+		glog.Warningf("the root namespace's GraphQL schema is stored but not loaded; " +
+			"reading Dgraph.Authorization from its text so that requests are still attributed by their token")
+	}
+	stored.meta = meta
+	return meta
 }
 
 // attach copies the auth JWT of an HTTP request into the context metadata. It
