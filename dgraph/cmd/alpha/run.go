@@ -883,13 +883,17 @@ func run() {
 				admin.EnablePartitionDoor(featureFlagsConf.GetDuration("partition-door-ttl"))
 				glog.Infof("SPIKE: a partition is entered only by a caller who holds something in it")
 			}
+		case "acl":
+			// The built-in resolver: the namespace is the one in Dgraph's own ACL
+			// access token, as on any multi-tenant cluster. Needs --acl.
+			glog.Infof("SPIKE: partition namespaces are on; the namespace comes from the ACL access token")
 		case "header":
 			x.SetTenantCredentialAttacher(x.AttachPartitionNs)
 			x.SetTenantResolver(x.PartitionHeaderResolver)
 			glog.Warningf("SPIKE: partition namespaces are on; the namespace comes from the "+
 				"unauthenticated %s header", x.PartitionNsHeader)
 		default:
-			glog.Fatalf("unknown partition-resolver %q: use header or jwt", resolver)
+			glog.Fatalf("unknown partition-resolver %q: use header, jwt or acl", resolver)
 		}
 		if featureFlagsConf.GetBool("partition-fast-path") {
 			resolve.EnablePartitionGrants(featureFlagsConf.GetDuration("partition-grants-ttl"),

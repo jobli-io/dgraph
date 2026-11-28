@@ -97,7 +97,13 @@ func (s *Server) CreateNamespaceInternal(ctx context.Context, passwd string) (ui
 	if x.IsPartitionNamespace(ns) {
 		// A partition inherits its schema, types and tablets from the template, so
 		// creating one is only the ID lease above: nothing is written, and Zero
-		// gains no tablets. (ACL principals per partition are out of the spike.)
+		// gains no tablets.
+		//
+		// It is given no guardians group and no groot user of its own, as a stock
+		// namespace is. The people who may enter a partition directly are the
+		// guardians of the root namespace, under their own names (see
+		// authenticateLogin), so a partition holds no ACL records and has no
+		// password to keep.
 		glog.V(2).Infof("Created partition namespace: %d", ns)
 		return ns, nil
 	}

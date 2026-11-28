@@ -121,7 +121,7 @@ func (s *Server) authenticateLogin(ctx context.Context, request *api.LoginReques
 		}
 
 		userId := userData.userId
-		ctx = x.AttachNamespace(ctx, userData.namespace)
+		ctx = x.AttachNamespace(ctx, usersNamespace(userData.namespace))
 		user, err = authorizeUser(ctx, userId, "")
 		if err != nil {
 			return nil, errors.Wrapf(err, "while querying user with id %v", userId)
@@ -129,6 +129,9 @@ func (s *Server) authenticateLogin(ctx context.Context, request *api.LoginReques
 
 		if user == nil {
 			return nil, errors.Errorf("unable to authenticate: invalid credentials")
+		}
+		if err := mayEnter(user, userData.namespace); err != nil {
+			return nil, err
 		}
 
 		user.Namespace = userData.namespace
@@ -138,7 +141,7 @@ func (s *Server) authenticateLogin(ctx context.Context, request *api.LoginReques
 
 	// In case of login, we can't extract namespace from JWT because we have not yet given JWT
 	// to the user, so the login request should contain the namespace, which is then set to ctx.
-	ctx = x.AttachNamespace(ctx, request.Namespace)
+	ctx = x.AttachNamespace(ctx, usersNamespace(request.Namespace))
 
 	// authorize the user using password
 	var err error
@@ -154,8 +157,38 @@ func (s *Server) authenticateLogin(ctx context.Context, request *api.LoginReques
 	if !user.PasswordMatch {
 		return nil, x.ErrorInvalidLogin
 	}
+	if err := mayEnter(user, request.Namespace); err != nil {
+		return nil, err
+	}
 	user.Namespace = request.Namespace
 	return user, nil
+}
+
+// usersNamespace returns the namespace whose users may log in to ns. A stock
+// namespace has users of its own. A partition has none: the users who may enter
+// it are those of the namespace it inherits from, the root.
+func usersNamespace(ns uint64) uint64 {
+	if x.IsPartitionNamespace(ns) {
+		return x.TemplateNamespace(ns)
+	}
+	return ns
+}
+
+// mayEnter says whether a user who has proved who they are may be given a token
+// for ns. Any user may enter their own namespace. A partition is entered only by a
+// guardian of the root namespace: an operator, under their own name, so that what
+// they do there is recorded as theirs.
+func mayEnter(user *acl.User, ns uint64) error {
+	if !x.IsPartitionNamespace(ns) {
+		return nil
+	}
+	for _, g := range user.Groups {
+		if g.GroupID == x.SuperAdminId {
+			return nil
+		}
+	}
+	return errors.Errorf("user %s is not a guardian of the root namespace and cannot log in to partition %d",
+		user.UserID, ns)
 }
 
 type userData struct {
