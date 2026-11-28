@@ -858,6 +858,9 @@ var otherReservedPredicate = map[string]struct{}{
 	"dgraph.graphql.p_query": {},
 	"dgraph.namespace.id":    {},
 	"dgraph.namespace.name":  {},
+	// the namespace whose schema and tablets a namespace uses: itself, or the
+	// template a partition inherits from
+	"dgraph.namespace.template": {},
 }
 
 // internalPredicateMap stores a set of Dgraph's internal predicate. An internal

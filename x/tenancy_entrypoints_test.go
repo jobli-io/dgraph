@@ -42,6 +42,10 @@ var clearNamespaceSites = map[string]string{
 		"HTTP handlers and GetGQLSchema's trusted tenancy",
 	"worker/zero_proxy.go:forwardAssignUidsToZero": "gRPC entry point for UID leasing, and " +
 		"the only gate on it — without this an uncredentialed caller leases UIDs in any tenant",
+	"graphql/admin/partition_resolver.go:resolve": "a tenant resolver, not a continuation: it is " +
+		"what ResolveTenant runs for every entry point when the claim-based resolver is installed, " +
+		"and ResolveTenant never calls it for a context an in-process caller has already attributed. " +
+		"It derives the namespace from the token alone, so it drops whatever the client named first",
 }
 
 // clearNamespaceScanRoot is the repo root, walked in full: a scan that can miss a

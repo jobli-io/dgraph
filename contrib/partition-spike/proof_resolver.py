@@ -47,10 +47,6 @@ type Note @auth(
 # Dgraph.Authorization {"VerificationKey":"%s","Header":"%s","Algo":"HS256","Namespace":"%s","Audience":["%s"],"ClosedByDefault":true}
 ''' % (SECRET, HEADER, CLAIMS_NS, AUDIENCE)
 
-DIRECTORY = """
-WorkspaceEntry.name: string @index(exact) @upsert .
-WorkspaceEntry.namespace: int .
-"""
 
 
 def b64(raw):
@@ -110,11 +106,11 @@ def main():
     with Cluster("rs", 450, flags=flags) as c:
         r = c.admin("mutation($s: String!) { updateGQLSchema(input: { set: { schema: $s } }) { gqlSchema { id } } }",
                     variables={"s": SCHEMA})
-        r = c.alter(DIRECTORY)
-        t.check("schema and directory predicates in the root namespace", not r.get("errors"), r.get("errors", ""))
-        a, b = c.add_partition(), c.add_partition()
-        c.mutate('_:a <WorkspaceEntry.name> "acme" .\n_:a <WorkspaceEntry.namespace> "%d"^^<xs:int> .\n'
-                 '_:b <WorkspaceEntry.name> "globex" .\n_:b <WorkspaceEntry.namespace> "%d"^^<xs:int> .' % (a, b))
+        t.check("schema in the root namespace", not r.get("errors"), r.get("errors", ""))
+        a, b = c.add_partition("acme"), c.add_partition("globex")
+        reg = {e.get("name"): (e["id"], e.get("template")) for e in c.registry()}
+        t.check("each partition is in the registry under its name, with the root as its template",
+                reg == {"acme": (a, 0), "globex": (b, 0)}, reg)
         time.sleep(3)
         acme, globex = token("acme"), token("globex")
 
@@ -210,25 +206,27 @@ def main():
         t.check("globex drops its own data: acme is untouched",
                 note_texts(c, acme) == only_a and note_texts(c, globex) == [], note_texts(c, globex))
 
-        # -- the directory is the authority
-        uid_a = c.rows('{ q(func: eq(WorkspaceEntry.name, "acme")) { uid } }')[0]["uid"]
-        c.post("/mutate?commitNow=true", "{ delete { <%s> <WorkspaceEntry.name> * .\n"
-               "<%s> <WorkspaceEntry.namespace> * . } }" % (uid_a, uid_a), ctype="application/rdf")
-        t.check("acme's entry is removed from the directory",
-                c.rows('{ q(func: eq(WorkspaceEntry.name, "acme")) { uid } }') == [])
+        # -- the registry is the authority
+        why = c.name_partition(a, "acme-renamed")
+        t.check("acme's partition is given another name", why == "", why)
         time.sleep(4)
         d = note_texts(c, acme)
-        t.check("after acme leaves the directory its token is rejected within the cache time", rejected(d), d)
-        c.mutate('_:a <WorkspaceEntry.name> "acme" .\n_:a <WorkspaceEntry.namespace> "%d"^^<xs:int> .' % a)
+        t.check("after the name acme leaves the registry its token is rejected within the cache time", rejected(d), d)
+        c.name_partition(a, "acme")
         time.sleep(3)
-        t.check("and works again once the entry is back", note_texts(c, acme) == only_a, note_texts(c, acme))
-        c.mutate('_:x <WorkspaceEntry.name> "dup" .\n_:x <WorkspaceEntry.namespace> "%d"^^<xs:int> .\n'
-                 '_:y <WorkspaceEntry.name> "dup" .\n_:y <WorkspaceEntry.namespace> "%d"^^<xs:int> .' % (a, b))
-        d = note_texts(c, token("dup"))
-        t.check("a name with two directory entries is rejected", rejected(d), d)
-        c.mutate('_:z <WorkspaceEntry.name> "rootish" .\n_:z <WorkspaceEntry.namespace> "0"^^<xs:int> .')
+        t.check("and works again once the name is back", note_texts(c, acme) == only_a, note_texts(c, acme))
+        why = c.name_partition(b, "acme")
+        t.check("a name one namespace holds cannot be given to another", "held by another namespace" in why, why)
+        t.check("and globex still leads to its own partition", note_texts(c, globex) == [], note_texts(c, globex))
+        why = c.name_partition(0, "rootish")
+        t.check("the root namespace cannot be given a name", bool(why), why)
         d = note_texts(c, token("rootish"))
-        t.check("a directory entry cannot send a workspace to the root namespace", rejected(d), d)
+        t.check("so no name can send a workspace to the root namespace", rejected(d), d)
+        why = c.name_partition(a, "7")
+        t.check("a name that is a number is refused", bool(why), why)
+        r = c.admin("{ state { namespaces } }", check=False)
+        listed = sorted(((r.get("data") or {}).get("state") or {}).get("namespaces") or [])
+        t.check("the partitions are listed with the root namespace", listed == sorted([0, a, b]), listed)
 
         # -- cost of resolving on every request
         def timed(tokens):

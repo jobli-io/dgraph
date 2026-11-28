@@ -19,7 +19,6 @@ import (
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/dgraph/v25/edgraph"
 	"github.com/dgraph-io/dgraph/v25/graphql/authorization"
 	"github.com/dgraph-io/dgraph/v25/graphql/resolve"
@@ -32,8 +31,8 @@ import (
 // The namespace a request acts in is derived from a verified credential and
 // nothing else: the JWT the root namespace's GraphQL schema already declares in
 // its `# Dgraph.Authorization` line. The token's workspace claim is looked up in
-// a directory kept in the root namespace, which maps a workspace name to the
-// partition that holds it.
+// the engine's registry of namespaces (edgraph/namespace_registry.go), which
+// holds the name each partition was made under.
 //
 //	no token                      root namespace (the control plane)
 //	token fails verification      rejected
@@ -45,20 +44,12 @@ import (
 // verifies and names it. The root namespace holds no tenant data, so what an
 // unauthenticated caller can reach there is a question for the control plane's
 // own access rules, not for this resolver.
-//
-// The directory is two predicates in the root namespace, named as the GraphQL
-// type `WorkspaceEntry { name: String! @id, namespace: Int! }` would generate
-// them, so that type can be added to the schema later without moving data.
-
 const (
 	// tenantJwtMdKey carries the request's auth JWT from the HTTP edge to the
 	// resolver. It is a credential, not a claim: whatever arrives under it is
 	// verified before it is believed, so it does not matter that a gRPC client
 	// can set it directly.
 	tenantJwtMdKey = "partition-tenant-jwt"
-
-	dirNamePred = "WorkspaceEntry.name"
-	dirNsPred   = "WorkspaceEntry.namespace"
 
 	// A workspace that is not in the directory is re-checked after this long, so
 	// one created a moment ago becomes reachable quickly.
@@ -376,10 +367,10 @@ func (t *jwtTenantResolver) resolve(ctx context.Context) (context.Context, error
 	if ws != "" && ws != "*" {
 		found, ok, err := t.lookup(ws, now)
 		if err != nil {
-			return ctx, errors.Wrap(err, "workspace directory lookup failed")
+			return ctx, errors.Wrap(err, "namespace registry lookup failed")
 		}
 		if !ok {
-			return ctx, errors.Errorf("workspace %q is not in the directory", ws)
+			return ctx, errors.Errorf("no namespace is registered under the name %q", ws)
 		}
 		ns = found
 	}
@@ -426,7 +417,7 @@ func (t *jwtTenantResolver) resolve(ctx context.Context) (context.Context, error
 	return x.AttachNamespace(ctx, ns), nil
 }
 
-// lookup returns the namespace the directory files ws under.
+// lookup returns the namespace registered under the name ws.
 func (t *jwtTenantResolver) lookup(ws string, now time.Time) (uint64, bool, error) {
 	t.mu.RLock()
 	e, ok := t.dir[ws]
@@ -435,34 +426,14 @@ func (t *jwtTenantResolver) lookup(ws string, now time.Time) (uint64, bool, erro
 		return e.ns, e.found, nil
 	}
 
-	req := &api.Request{
-		Query: `query q($name: string) { q(func: eq(` + dirNamePred + `, $name), first: 2) { ns: ` +
-			dirNsPred + ` } }`,
-		Vars:     map[string]string{"$name": ws},
-		ReadOnly: true,
-	}
-	// The directory is read on the resolver's own authority, in the root namespace.
-	qctx := x.AttachTrustedTenant(context.Background(), x.RootNamespace)
-	resp, err := (&edgraph.Server{}).QueryNoAuth(qctx, req)
+	// The registry is read on the resolver's own authority.
+	ns, found, err := edgraph.NamespaceByName(context.Background(), ws)
 	if err != nil {
 		return 0, false, err
 	}
-	var out struct {
-		Q []struct {
-			Ns *uint64 `json:"ns"`
-		} `json:"q"`
-	}
-	if err := json.Unmarshal(resp.GetJson(), &out); err != nil {
-		return 0, false, err
-	}
-
 	e = dirEntry{until: now.Add(dirMissTTL)}
-	switch {
-	case len(out.Q) > 1:
-		// Two entries for one name: there is no safe answer.
-		glog.Errorf("workspace directory has more than one entry for %q", ws)
-	case len(out.Q) == 1 && out.Q[0].Ns != nil && *out.Q[0].Ns != x.RootNamespace:
-		e = dirEntry{ns: *out.Q[0].Ns, found: true, until: now.Add(t.dirTTL)}
+	if found {
+		e = dirEntry{ns: ns, found: true, until: now.Add(t.dirTTL)}
 	}
 	t.mu.Lock()
 	if len(t.dir) >= maxCached {

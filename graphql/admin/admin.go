@@ -511,6 +511,7 @@ var (
 		"updateGQLSchema": stdAdminMutMWs,
 		"addNamespace":    gogAclMutMWs,
 		"deleteNamespace": gogAclMutMWs,
+		"nameNamespace":   gogAclMutMWs,
 		"resetPassword":   gogAclMutMWs,
 		// for queries and mutations related to User/Group, dgraph handles Guardian auth,
 		// so no need to apply GuardianAuth Middleware
@@ -733,6 +734,7 @@ func newAdminResolverFactory() resolve.ResolverFactory {
 		"backup":          resolveBackup,
 		"config":          resolveUpdateConfig,
 		"deleteNamespace": resolveDeleteNamespace,
+		"nameNamespace":   resolveNameNamespace,
 		"draining":        resolveDraining,
 		"export":          resolveExport,
 		"login":           resolveLogin,

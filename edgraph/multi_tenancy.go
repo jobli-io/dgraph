@@ -83,7 +83,21 @@ func (s *Server) ResetPassword(ctx context.Context, inp *ResetPasswordInput) err
 // CreateNamespaceInternal creates a new namespace. Only superadmin is authorized to do so.
 // Authorization is handled by middlewares.
 func (s *Server) CreateNamespaceInternal(ctx context.Context, passwd string) (uint64, error) {
+	return s.CreateNamedNamespace(ctx, passwd, "")
+}
+
+// CreateNamedNamespace creates a namespace and writes its record in the registry
+// of namespaces, under name if one is given. A name that is taken is refused
+// before anything is made.
+func (s *Server) CreateNamedNamespace(ctx context.Context, passwd, name string) (uint64, error) {
 	glog.V(2).Info("Got create namespace request.")
+	if name != "" {
+		if _, taken, err := NamespaceByName(ctx, name); err != nil {
+			return 0, errors.Wrapf(err, "Creating namespace, reading the registry:")
+		} else if taken {
+			return 0, errors.Errorf("a namespace named %q already exists", name)
+		}
+	}
 
 	num := &pb.Num{Val: 1, Type: pb.Num_NS_ID}
 	ids, err := worker.AssignNsIdsOverNetwork(ctx, num)
@@ -104,6 +118,9 @@ func (s *Server) CreateNamespaceInternal(ctx context.Context, passwd string) (ui
 		// guardians of the root namespace, under their own names (see
 		// authenticateLogin), so a partition holds no ACL records and has no
 		// password to keep.
+		if err := RegisterNamespace(ctx, ns, name); err != nil {
+			return 0, err
+		}
 		glog.V(2).Infof("Created partition namespace: %d", ns)
 		return ns, nil
 	}
@@ -125,6 +142,9 @@ func (s *Server) CreateNamespaceInternal(ctx context.Context, passwd string) (ui
 		return 0, errors.Wrapf(err, "Failed to create guardian and groot: ")
 	}
 
+	if err := RegisterNamespace(ctx, ns, name); err != nil {
+		return 0, err
+	}
 	glog.V(2).Infof("Created namespace: %d", ns)
 	return ns, nil
 }
@@ -153,5 +173,8 @@ func (s *Server) DeleteNamespace(ctx context.Context, namespace uint64) error {
 	if _, ok := schema.State().Namespaces()[namespace]; !ok && !x.IsPartitionNamespace(namespace) {
 		return errors.Errorf("error deleting non-existing namespace %#x", namespace)
 	}
-	return worker.ProcessDeleteNsRequest(ctx, namespace)
+	if err := worker.ProcessDeleteNsRequest(ctx, namespace); err != nil {
+		return err
+	}
+	return UnregisterNamespace(ctx, namespace)
 }

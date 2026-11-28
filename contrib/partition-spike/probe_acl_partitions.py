@@ -88,7 +88,7 @@ def main():
         print("alter in the root namespace:           %s" % short(c.post("/alter", "name: string @index(exact) .\nsecret: string .",
                                                                     ctype="text/plain", headers={"X-Dgraph-AccessToken": root})))
         print("a read with no token:                  %s" % short(dql(c, "{ q(func: has(name)) { name } }", None)))
-        r = admin(c, 'mutation { addNamespace(input: {password: "%s"}) { namespaceId message } }' % PASSWORD, root)
+        r = admin(c, 'mutation { addNamespace(input: {password: "%s", name: "acme"}) { namespaceId message } }' % PASSWORD, root)
         ns = ((r.get("data") or {}).get("addNamespace") or {}).get("namespaceId")
         print("make a namespace as the root guardian: %s" % (ns if ns else short(r)))
         r = admin(c, 'mutation { addNamespace(input: {password: "%s"}) { namespaceId } }' % PASSWORD, None)
@@ -136,6 +136,13 @@ def main():
         enter("alice")
         print("the token alice already holds:         %s" % short(dql(c, "{ q(func: has(name)) { name } }", alice))[:90])
         part = alice
+        reg = dql(c, "{ q(func: type(dgraph.namespace)) { id: dgraph.namespace.id name: dgraph.namespace.name "
+                     "template: dgraph.namespace.template } }", root)
+        print("the registry, read by the root guardian: %s" % short(reg))
+        carol0, _ = login(c, "carol", 0, "password12")
+        print("the registry, read by carol:           %s" % short(dql(c, "{ q(func: type(dgraph.namespace)) { dgraph.namespace.name } }", carol0)))
+        r = mutate(c, '_:x <dgraph.namespace.name> "sneaked" .\n_:x <dgraph.namespace.id> "9"^^<xs:int> .', root)
+        print("the root guardian writes an entry by hand: %s" % short(r)[:110])
         r = admin(c, "{ state { namespaces } }", root)
         print("namespaces the root guardian is shown: %s" % short(r)[:120])
         r = admin(c, "mutation { deleteNamespace(input: {namespaceId: %d}) { namespaceId message } }" % ns, part)

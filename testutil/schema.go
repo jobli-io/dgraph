@@ -35,7 +35,8 @@ const (
 {"predicate":"dgraph.graphql.schema", "type": "string"},
 {"predicate":"dgraph.graphql.xid","type":"string","index":true,"tokenizer":["exact"],"upsert":true},
 {"predicate":"dgraph.namespace.name","type":"string","index":true,"tokenizer":["exact"],"unique":true,"upsert":true},
-{"predicate":"dgraph.namespace.id","type":"int","index":true,"tokenizer":["int"],"unique":true,"upsert":true}
+{"predicate":"dgraph.namespace.id","type":"int","index":true,"tokenizer":["int"],"unique":true,"upsert":true},
+{"predicate":"dgraph.namespace.template","type":"int"}
 `
 	aclTypes = `
 {
@@ -57,7 +58,7 @@ const (
 	"fields": [{"name": "dgraph.graphql.p_query"}],
 	"name": "dgraph.graphql.persisted_query"
 },{
-	"fields": [{"name": "dgraph.namespace.name"}, {"name": "dgraph.namespace.id"}],
+	"fields": [{"name": "dgraph.namespace.name"}, {"name": "dgraph.namespace.id"}, {"name": "dgraph.namespace.template"}],
 	"name": "dgraph.namespace"
 }
 `

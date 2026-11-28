@@ -75,6 +75,14 @@ func (s *Server) ListNamespaces(ctx context.Context, in *api.ListNamespacesReque
 	for ns := range schema.State().Namespaces() {
 		dataNsList[ns] = &api.Namespace{Id: ns}
 	}
+	// A partition has no schema of its own and is found only in the registry.
+	entries, err := RegisteredNamespaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		dataNsList[e.Id] = &api.Namespace{Id: e.Id}
+	}
 
 	return &api.ListNamespacesResponse{Namespaces: dataNsList}, nil
 }

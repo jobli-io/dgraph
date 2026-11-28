@@ -174,8 +174,23 @@ class Cluster:
         return self.post("/graphql", json.dumps({"query": query, "variables": variables or {}}),
                          ns, i=i, headers=headers)
 
-    def add_partition(self):
-        return self.admin("mutation { addNamespace { namespaceId } }")["addNamespace"]["namespaceId"]
+    def add_partition(self, name=None):
+        """Makes a partition, under a name in the registry of namespaces if one is given."""
+        if name is None:
+            return self.admin("mutation { addNamespace { namespaceId } }")["addNamespace"]["namespaceId"]
+        return self.admin("mutation($n: String) { addNamespace(input: {name: $n}) { namespaceId } }",
+                          variables={"n": name})["addNamespace"]["namespaceId"]
+
+    def name_partition(self, ns, name):
+        """Gives a namespace its name in the registry, or says why not."""
+        r = self.admin("mutation($i: Int!, $n: String!) { nameNamespace(input: {namespaceId: $i, name: $n}) { namespaceId } }",
+                       check=False, variables={"i": ns, "n": name})
+        return (r.get("errors") or [{}])[0].get("message", "") if r.get("errors") else ""
+
+    def registry(self):
+        """The registry of namespaces, as the root namespace holds it."""
+        return self.rows("{ q(func: type(dgraph.namespace)) { id: dgraph.namespace.id name: dgraph.namespace.name "
+                         "template: dgraph.namespace.template } }")
 
     def state(self, i=0):
         with urllib.request.urlopen(self.alpha_http(i) + "/state", timeout=300) as resp:

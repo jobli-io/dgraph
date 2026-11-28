@@ -92,10 +92,6 @@ CLIENTS, LOAD_S = 8, 15
 # these, and merges them into the results already saved for the arm.
 ONLY = [x for x in os.environ.get("SPIKE_ONLY", "").split(",") if x]
 
-DIRECTORY = """
-WorkspaceEntry.name: string @index(exact) @upsert .
-WorkspaceEntry.namespace: int .
-"""
 
 
 # ---------------------------------------------------------------- lambda stub
@@ -663,18 +659,15 @@ def stage_extract(t):
 def stage_load(t):
     with cluster(ON) as c:
         tok = token()
-        r = c.alter(DIRECTORY)
-        t.check("directory predicates added to the root namespace", not r.get("errors"), r.get("errors", ""))
-        found = c.rows('{ q(func: eq(WorkspaceEntry.name, "%s")) { ns: WorkspaceEntry.namespace } }' % WS)
+        found = [e for e in c.registry() if e.get("name") == WS]
         if found:
             # A rerun: empty the partition first. Only the token can name it; a namespace
             # header has no standing with the claim resolver and would act on the root.
-            ns = found[0]["ns"]
+            ns = found[0]["id"]
             r = c.post("/alter", '{"drop_op": "DATA"}', headers={HEADER: tok})
             t.check("partition %d emptied for the reload" % ns, not r.get("errors"), r.get("errors", ""))
         else:
-            ns = c.add_partition()
-            c.mutate('_:w <WorkspaceEntry.name> "%s" .\n_:w <WorkspaceEntry.namespace> "%d"^^<xs:int> .' % (WS, ns))
+            ns = c.add_partition(WS)
             time.sleep(3)
         empty = c.post("/query", "{ q(func: has(dgraph.type)) { count(uid) } }", ctype="application/dql",
                        headers={HEADER: tok})

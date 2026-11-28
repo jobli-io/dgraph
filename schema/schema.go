@@ -726,6 +726,10 @@ func initialTypesInternal(namespace uint64, all bool) []*pb.TypeUpdate {
 						Predicate: "dgraph.namespace.id",
 						ValueType: pb.Posting_INT,
 					},
+					{
+						Predicate: "dgraph.namespace.template",
+						ValueType: pb.Posting_INT,
+					},
 				},
 			})
 	}
@@ -855,6 +859,10 @@ func initialSchemaInternal(namespace uint64, all bool) []*pb.SchemaUpdate {
 				Tokenizer: []string{"int"},
 				Unique:    true,
 				Upsert:    true,
+			},
+			{
+				Predicate: "dgraph.namespace.template",
+				ValueType: pb.Posting_INT,
 			},
 		}...)
 	}

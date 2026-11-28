@@ -55,6 +55,20 @@ func resolveState(ctx context.Context, q schema.Query) *resolve.Resolved {
 	ns, _ := x.ExtractNamespace(ctx)
 	// map to graphql response structure. Only superadmin can list the namespaces.
 	state := convertToGraphQLResp(&ms, ns == x.RootNamespace)
+	if ns == x.RootNamespace {
+		// A partition has no tablets of its own and is found only in the registry.
+		if entries, err := edgraph.RegisteredNamespaces(ctx); err == nil {
+			listed := make(map[uint64]bool, len(state.Namespaces))
+			for _, n := range state.Namespaces {
+				listed[n] = true
+			}
+			for _, e := range entries {
+				if !listed[e.Id] {
+					state.Namespaces = append(state.Namespaces, e.Id)
+				}
+			}
+		}
+	}
 	b, err := json.Marshal(state)
 	if err != nil {
 		return resolve.EmptyResult(q, err)

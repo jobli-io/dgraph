@@ -20,6 +20,12 @@ import (
 
 type addNamespaceInput struct {
 	Password string
+	Name     string
+}
+
+type nameNamespaceInput struct {
+	NamespaceId int
+	Name        string
 }
 
 type deleteNamespaceInput struct {
@@ -36,7 +42,7 @@ func resolveAddNamespace(ctx context.Context, m schema.Mutation) (*resolve.Resol
 		req.Password = "password"
 	}
 	var ns uint64
-	if ns, err = (&edgraph.Server{}).CreateNamespaceInternal(ctx, req.Password); err != nil {
+	if ns, err = (&edgraph.Server{}).CreateNamedNamespace(ctx, req.Password, req.Name); err != nil {
 		return resolve.EmptyResult(m, err), false
 	}
 	return resolve.DataResult(
@@ -70,6 +76,30 @@ func resolveDeleteNamespace(ctx context.Context, m schema.Mutation) (*resolve.Re
 		map[string]interface{}{m.Name(): map[string]interface{}{
 			"namespaceId": json.Number(strconv.Itoa(req.NamespaceId)),
 			"message":     "Deleted namespace successfully",
+		}},
+		nil,
+	), true
+}
+
+// resolveNameNamespace gives a namespace its name in the registry of namespaces,
+// writing its record if it has none.
+func resolveNameNamespace(ctx context.Context, m schema.Mutation) (*resolve.Resolved, bool) {
+	inputByts, err := json.Marshal(m.ArgValue(schema.InputArgName))
+	if err != nil {
+		return resolve.EmptyResult(m, schema.GQLWrapf(err, "couldn't get input argument")), false
+	}
+	var req nameNamespaceInput
+	if err = json.Unmarshal(inputByts, &req); err != nil {
+		return resolve.EmptyResult(m, schema.GQLWrapf(err, "couldn't get input argument")), false
+	}
+	if err = (&edgraph.Server{}).NameNamespace(ctx, uint64(req.NamespaceId), req.Name); err != nil {
+		return resolve.EmptyResult(m, err), false
+	}
+	return resolve.DataResult(
+		m,
+		map[string]interface{}{m.Name(): map[string]interface{}{
+			"namespaceId": json.Number(strconv.Itoa(req.NamespaceId)),
+			"message":     "Named namespace successfully",
 		}},
 		nil,
 	), true

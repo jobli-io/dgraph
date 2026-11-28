@@ -456,10 +456,19 @@ const adminTypes = `
 		Enter a new password for groot in that namespace. If you leave it blank, the password will be the default.
 		"""
 		password: String
+		"""
+		A name for the namespace, unique in the cluster. A tenant resolver finds the namespace by it.
+		"""
+		name: String
 	}
 
 	input DeleteNamespaceInput {
 		namespaceId: Int!
+	}
+
+	input NameNamespaceInput {
+		namespaceId: Int!
+		name: String!
 	}
 
 	type NamespacePayload {
@@ -543,6 +552,11 @@ const adminMutations = `
 	Delete a namespace.
 	"""
 	deleteNamespace(input: DeleteNamespaceInput!): NamespacePayload
+
+	"""
+	Give a namespace its name in the registry of namespaces, or change it.
+	"""
+	nameNamespace(input: NameNamespaceInput!): NamespacePayload
 
 	"""
 	Reset password can only be used by the Guardians of the galaxy to reset password of
