@@ -12,6 +12,10 @@ IntegrationAppManifest in the control plane (decisions of 29 Nov 2026):
   - records of the control plane have their own photo type, GlobalPhoto, and the
     interface GlobalPhotoOwner for what has one. It is not the catalogue's alone: a
     photo takes its permission from the record it is a photo of
+  - the account (UserAccount, with DeviceToken, NotificationPreference and
+    CategoryPreference) is in the control plane too: it is the person's, not a
+    workspace's. A workspace's User still names its account; the account's list of the
+    person's profiles (hasUserProfile) goes
   - the one rule that walked from a workspace's record into the catalogue
     (PluginConnectionAsyncEventStatus) reads the plugin's own clientId
 
@@ -341,6 +345,22 @@ def place(schema):
         @cascadeAuth(operations:[query] variableContext: parent, bidirectional: false)
 }''', "}")
 
+    # the account: the person's own records, which belong to no workspace. A workspace's
+    # User names its account; the list back from the account into every workspace goes.
+    sub("\ntype UserAccount\n", "\ntype UserAccount implements GlobalPhotoOwner\n"
+        "    # The person's account is one record for every workspace: it is in the root namespace.\n"
+        "    @scope(plane: control)\n")
+    for t in ("DeviceToken", "NotificationPreference"):
+        sub("\ntype %s\n" % t, "\ntype %s\n    @scope(plane: control)\n" % t)
+    sub("\ntype CategoryPreference {\n", "\ntype CategoryPreference @scope(plane: control) {\n")
+    sub('''    """
+    All workspace membership profiles belonging to this human.
+    """
+    hasUserProfile: [User] @hasInverse(field: userAccount)
+
+''', "")
+    sub("    userAccount: UserAccount @hasInverse(field: hasUserProfile)\n", "    userAccount: UserAccount\n")
+
     # the photo type of the control plane and its owner interface, ahead of the manifest's status enum.
     # A photo that is of a record takes that record's rules; one that is of none (an icon,
     # a preview) keeps to the workspace it was added from.
@@ -429,16 +449,19 @@ def migrate_root(c):
         for ph in ([one(m.get("icon"))] if m.get("icon") else []) + (m.get("preview") or []):
             photo(ph, owner)
             photos += 1
+    accounts = _rows(c, "{ q(func: type(UserAccount)) { uid } }", 0).get("q") or []
+    rdf += ['<%s> <dgraph.type> "GlobalPhotoOwner" .' % a["uid"] for a in accounts]
     if rdf:
         c.mutate("\n".join(rdf), ns=0)
-    return {"apps": len(d.get("apps") or []), "apps that name an owner": named,
+    return {"accounts": len(accounts), "apps": len(d.get("apps") or []), "apps that name an owner": named,
             "manifests": len(d.get("manifests") or []), "photos given the control plane's type": photos}
 
 
 def strip_partition(c, ns):
-    """In a partition: the copies of the catalogue's records are removed, with their
-    photos and the workspace's list of its apps. The edges into the catalogue stay as
-    they are; the IDs they hold are the root's."""
+    """In a partition: the copies of the control plane's records are removed (apps and
+    manifests with their photos, accounts with their device tokens and preferences), and
+    the workspace's list of its apps. The edges into the control plane stay as they are;
+    the IDs they hold are the root's."""
     d = _rows(c, """{
       cat as var(func: type(IntegrationApp)) { ph as PhotoOwner.hasPhoto }
       man as var(func: type(IntegrationAppManifest)) { ic as IntegrationAppManifest.hasIcon pv as IntegrationAppManifest.hasPreview }
@@ -446,8 +469,13 @@ def strip_partition(c, ns):
       manifests(func: uid(man)) { uid }
       photos(func: uid(ph, ic, pv)) { uid }
       lists(func: has(Workspace.hasIntegrationApp)) { uid }
+      accounts(func: type(UserAccount)) { uid }
+      tokens(func: type(DeviceToken)) { uid }
+      preferences(func: type(NotificationPreference)) { uid }
+      categories(func: type(CategoryPreference)) { uid }
     }""", ns)
-    gone = [x["uid"] for k in ("apps", "manifests", "photos") for x in d.get(k) or []]
+    kinds = ("apps", "manifests", "photos", "accounts", "tokens", "preferences", "categories")
+    gone = [x["uid"] for k in kinds for x in d.get(k) or []]
     rdf = ["<%s> * * ." % u for u in gone]
     # predicates the node's types no longer list once the schema is placed
     for u in (x["uid"] for x in d.get("apps") or []):
@@ -457,6 +485,8 @@ def strip_partition(c, ns):
     for u in (x["uid"] for x in d.get("manifests") or []):
         rdf += ["<%s> <%s> * ." % (u, p) for p in ("IntegrationAppManifest.hasInstalledPlugin", "dgraph.type")]
     rdf += ["<%s> <Workspace.hasIntegrationApp> * ." % x["uid"] for x in d.get("lists") or []]
+    for u in (x["uid"] for x in d.get("accounts") or []):
+        rdf += ["<%s> <%s> * ." % (u, p) for p in ("UserAccount.hasUserProfile", "dgraph.type")]
     for i in range(0, len(rdf), 500):
         c.mutate("\n".join(rdf[i:i + 500]), ns=ns, delete=True)
     left = _rows(c, """{
@@ -465,8 +495,10 @@ def strip_partition(c, ns):
       created(func: has(IntegrationApp.hasCreated)) { count(uid) }
       edges(func: has(Recordable.fromSource)) { count(uid) }
       plugins(func: has(Plugin.hasApp)) { count(uid) }
+      accounts(func: has(UserAccount.userId)) { count(uid) }
+      users(func: has(User.userAccount)) { count(uid) }
     }""", ns)
-    return {"removed": {k: len(d.get(k) or []) for k in ("apps", "manifests", "photos")},
+    return {"removed": {k: len(d.get(k) or []) for k in kinds},
             "left in the partition": {k: v[0]["count"] for k, v in left.items()}}
 
 

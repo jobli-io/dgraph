@@ -203,6 +203,59 @@ def main():
                           'set: {description: "changed from %s"}}) { numUids } }' % P.WS, {})
         print("  change an app of another workspace: %s" % short(r))
 
+        # the account: the person's, in the control plane
+        print("\nthe caller's account, from inside the partition:")
+        acct = root('{ q(func: eq(UserAccount.userId, "%s")) { uid f: UserAccount.firstName t: count(UserAccount.hasDeviceToken) '
+                    'p: UserAccount.hasNotificationPreference { uid e: NotificationPreference.emailEnabled c: count(NotificationPreference.categorySettings) } } '
+                    'n(func: type(UserAccount)) { count(uid) } }' % P.SUB)
+        accounts, a = acct["n"][0]["count"], (acct["q"] or [{}])[0]
+        pref = a.get("p") or {}
+        pref = pref[0] if isinstance(pref, list) else pref
+        r = P.gql(c, tok, P.app_query("api/notification.ts", "QUERY_MY_NOTIFICATION_ACCOUNT"), {"userId": P.SUB})
+        got = (rows(r) or [{}])[0] if not r.get("errors") else {}
+        print("  the web app's account query: %s" % (short(r) if r.get("errors") else
+              "%d account; its preference %s; category rows %d (root: %d); device tokens %d (root: %d)" % (
+                  len(rows(r)), "read" if got.get("hasNotificationPreference") else "MISSING",
+                  len((got.get("hasNotificationPreference") or {}).get("categorySettings") or []), pref.get("c", 0),
+                  len(got.get("hasDeviceToken") or []), a.get("t", 0))))
+        r = P.gql(c, tok, "{ data: queryUserAccount { userId } }", {})
+        print("  every account it may read:   %s of %d" % (short(r) if r.get("errors") else len(rows(r)), accounts))
+        r = P.gql(c, tok, 'query($u: String) { data: queryUser(filter: {userId: {eq: $u}}) { userId userAccount { userId displayName } } }', {"u": P.SUB})
+        me = rows(r)
+        print("  its user profile in this workspace, with the account under it: %s" % (short(r) if r.get("errors") else
+              "%d record(s) of the caller in the partition; account read under %d, the caller's own in each: %s" % (
+                  len(me), sum(1 for x in me if x.get("userAccount")),
+                  all(x["userAccount"].get("userId") == P.SUB for x in me if x.get("userAccount")))))
+        if a.get("uid"):
+            was = a.get("f")
+            r = P.gql(c, tok, 'mutation($u: String) { data: updateUserAccount(input: {filter: {userId: {eq: $u}}, set: {firstName: "Spike"}}) { numUids } }', {"u": P.SUB})
+            print("  change its own account:      %s" % short(r))
+            back = ('set: {firstName: "%s"}' % was) if was else 'remove: {firstName: "Spike"}'
+            P.gql(c, tok, "mutation($u: String) { data: updateUserAccount(input: {filter: {userId: {eq: $u}}, %s}) { numUids } }" % back, {"u": P.SUB})
+            if pref.get("uid"):
+                flip = lambda v: P.gql(c, tok, P.app_query("api/notification.ts", "UPDATE_NOTIFICATION_PREFERENCE"),
+                                       {"input": {"filter": {"id": [pref["uid"]]}, "set": {"emailEnabled": v}}})
+                r = flip(not pref.get("e", True))
+                print("  the web app's preference update: %s" % short(r, 120))
+                flip(pref.get("e", True))
+            r = P.gql(c, tok, "mutation { data: addUserAccount(input: [{}], upsert: true) { userAccount { id } } }", {})
+            again = (((r.get("data") or {}).get("data") or {}).get("userAccount") or [{}])[0].get("id")
+            print("  find-or-make the account, as lambda does when it links a profile: %s; accounts in the root namespace: %d" % (
+                short(r) if r.get("errors") else ("the same account" if again == a["uid"] else "ANOTHER: %s" % again),
+                root("{ n(func: type(UserAccount)) { count(uid) } }")["n"][0]["count"]))
+            r = P.gql(c, tok, photo, {"in": [{"forResource": {"id": a["uid"]}}]})
+            print("  add a photo of its own account: %s" % short(r))
+            someone = root('{ q(func: type(UserAccount), first: 1) @filter(NOT eq(UserAccount.userId, "%s") AND NOT has(GlobalPhotoOwner.hasPhoto)) '
+                           "{ uid u: UserAccount.userId } }" % P.SUB)["q"]
+            if someone:
+                r = P.gql(c, tok, photo, {"in": [{"forResource": {"id": someone[0]["uid"]}}]})
+                print("  add a photo of another person's account: %s" % short(r))
+                r = P.gql(c, tok, 'mutation($u: String) { data: updateUserAccount(input: {filter: {userId: {eq: $u}}, set: {firstName: "Taken"}}) { numUids } }',
+                          {"u": someone[0]["u"]})
+                print("  change another person's account: %s" % short(r))
+        d = mine("{ a(func: type(UserAccount)) { count(uid) } u(func: has(User.userAccount)) { count(uid) } }")
+        print("  account records in the partition: %d; users there that name an account: %d" % (d["a"][0]["count"], d["u"][0]["count"]))
+
         # hand-written DQL from inside the partition
         d = mine('{ apps(func: type(IntegrationApp)) { count(uid) } byid(func: eq(IntegrationApp.clientId, "jobli-system")) { uid } '
                  "p(func: has(Plugin.hasApp), first: 1) { Plugin.clientId Plugin.hasApp { IntegrationApp.clientId } "
