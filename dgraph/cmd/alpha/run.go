@@ -316,6 +316,10 @@ they form a Raft group and provide synchronous replication.
 			"whose answer it can have changed: those that hold a record it wrote to, or that a record "+
 			"it made or wrote to could now be a row of. Each mutation then says which records it wrote "+
 			"to. Only reasons about subscriptions whose rules the partition fast path settled.").
+		Flag("partition-door", "SPIKE: with partition-resolver=jwt, refuse a request for a partition "+
+			"from a caller the partition's rules show no record that can hold a grant. Covers every "+
+			"kind of request, DQL included.").
+		Flag("partition-door-ttl", "SPIKE: how long the partition's answer about a token is believed.").
 		Flag("partition-mutation-grants", "SPIKE: with partition-fast-path, simplify the rules a "+
 			"mutation asks as a query's are. Without it mutations run the rules as written.").
 		String())
@@ -875,6 +879,10 @@ func run() {
 			admin.InstallJWTTenantResolver(claim, featureFlagsConf.GetDuration("partition-dir-ttl"))
 			glog.Infof("SPIKE: partition namespaces are on; the namespace comes from the %q "+
 				"claim of the root schema's auth JWT", claim)
+			if featureFlagsConf.GetBool("partition-door") {
+				admin.EnablePartitionDoor(featureFlagsConf.GetDuration("partition-door-ttl"))
+				glog.Infof("SPIKE: a partition is entered only by a caller who holds something in it")
+			}
 		case "header":
 			x.SetTenantCredentialAttacher(x.AttachPartitionNs)
 			x.SetTenantResolver(x.PartitionHeaderResolver)

@@ -125,10 +125,10 @@ def b64(raw):
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
-def token(ws=WS, sub=SUB, email=EMAIL):
+def token(ws=WS, sub=SUB, email=EMAIL, azp="integration-test"):
     """The shape graph/scripts/generate_token.py signs for local testing."""
     now = int(time.time())
-    body = {"aud": [AUDIENCE], "azp": "integration-test", "email": email, "exp": now + 24 * 3600, "iat": now,
+    body = {"aud": [AUDIENCE], "azp": azp, "email": email, "exp": now + 24 * 3600, "iat": now,
             "iss": "urn://api.jobli.io", "scope": ["_all"], "sub": sub, "ws": ws}
     signing = b64(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()) + "." + b64(json.dumps(body).encode())
     return signing + "." + b64(hmac.new(SECRET.encode(), signing.encode(), hashlib.sha256).digest())

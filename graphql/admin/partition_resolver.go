@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang/glog"
@@ -20,6 +21,8 @@ import (
 	"github.com/dgraph-io/dgo/v250/protos/api"
 	"github.com/dgraph-io/dgraph/v25/edgraph"
 	"github.com/dgraph-io/dgraph/v25/graphql/authorization"
+	"github.com/dgraph-io/dgraph/v25/graphql/resolve"
+	"github.com/dgraph-io/dgraph/v25/graphql/schema"
 	"github.com/dgraph-io/dgraph/v25/x"
 )
 
@@ -72,6 +75,68 @@ type dirEntry struct {
 type tokenEntry struct {
 	ns    uint64
 	until time.Time
+	// refused: the caller holds nothing in the partition its token names.
+	refused bool
+}
+
+// door is the membership check made before a request enters a partition.
+var door struct {
+	on  bool
+	ttl time.Duration
+	// asked counts the times a partition was asked about a caller, and refused
+	// the times the answer was no.
+	asked, refused atomic.Uint64
+}
+
+// EnablePartitionDoor makes the resolver refuse a request for a partition from a
+// caller who holds nothing in it. The answer about a token is believed for ttl,
+// so a caller whose last grant is revoked keeps getting in for up to that long.
+func EnablePartitionDoor(ttl time.Duration) {
+	door.on, door.ttl = true, ttl
+}
+
+// PartitionDoorStats returns how often a partition was asked about a caller and
+// how often it said no.
+func PartitionDoorStats() (asked, refused uint64) {
+	return door.asked.Load(), door.refused.Load()
+}
+
+func refusal(ws string) error {
+	return errors.Errorf("the caller holds nothing in workspace %q", ws)
+}
+
+// holdsAnything asks the partition whether its rules show the caller any record
+// that can hold a grant. The question is a GraphQL query resolved in the
+// partition with the caller's own token, on a context the resolver does not
+// attribute again.
+func holdsAnything(ns uint64, headerName, token string) (bool, error) {
+	gh, ok := adminServerVar.gqlServer.(*graphqlHandler)
+	if !ok {
+		return false, errors.New("no GraphQL server to ask")
+	}
+	schemaNs := x.TemplateNamespace(ns)
+	if err := adminServerVar.lazyLoadSchema(schemaNs); err != nil {
+		return false, err
+	}
+	gh.resolverMux.RLock()
+	r := gh.resolver[schemaNs]
+	gh.resolverMux.RUnlock()
+	if r == nil {
+		return false, errors.New("the partition has no GraphQL schema")
+	}
+	header := http.Header{}
+	header.Set(headerName, token)
+	door.asked.Add(1)
+	resp := r.Resolve(x.AttachTrustedTenant(context.Background(), ns),
+		&schema.Request{Query: resolve.DoorQuestion(), Header: header})
+	if len(resp.Errors) > 0 {
+		return false, resp.Errors
+	}
+	var out map[string][]json.RawMessage
+	if err := json.Unmarshal(resp.Data.Bytes(), &out); err != nil {
+		return false, err
+	}
+	return len(out[resolve.DoorField]) > 0, nil
 }
 
 type jwtTenantResolver struct {
@@ -188,6 +253,9 @@ func (t *jwtTenantResolver) resolve(ctx context.Context) (context.Context, error
 	cached, ok := t.tokens[token]
 	t.mu.RUnlock()
 	if ok && now.Before(cached.until) {
+		if cached.refused {
+			return ctx, refusal("named by the token")
+		}
 		return x.AttachNamespace(ctx, cached.ns), nil
 	}
 
@@ -224,13 +292,36 @@ func (t *jwtTenantResolver) resolve(ctx context.Context) (context.Context, error
 	if claims.ExpiresAt != nil && claims.ExpiresAt.Time.Before(until) {
 		until = claims.ExpiresAt.Time
 	}
+
+	// The door: a partition is entered only by a caller who holds something in
+	// it. What the partition says is believed for the door's ttl at most.
+	refused := false
+	if door.on && ns != x.RootNamespace {
+		in, err := holdsAnything(ns, meta.GetHeader(), token)
+		if err != nil {
+			return ctx, errors.Wrapf(err, "could not ask workspace %q about the caller", ws)
+		}
+		refused = !in
+		if now.Add(door.ttl).Before(until) {
+			until = now.Add(door.ttl)
+		}
+		if refused {
+			door.refused.Add(1)
+		}
+	}
+
 	t.mu.Lock()
 	if len(t.tokens) >= maxCached {
 		t.tokens = make(map[string]tokenEntry)
 	}
-	t.tokens[token] = tokenEntry{ns: ns, until: until}
+	if until.After(now) {
+		t.tokens[token] = tokenEntry{ns: ns, until: until, refused: refused}
+	}
 	t.mu.Unlock()
 
+	if refused {
+		return ctx, refusal(ws)
+	}
 	return x.AttachNamespace(ctx, ns), nil
 }
 
