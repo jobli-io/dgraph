@@ -179,6 +179,7 @@ input AuthRule {
 	or: [AuthRule]
 	not: AuthRule
 	rule: String
+	tenantRule: String
 }
 
 enum HTTPMethod {

@@ -6,6 +6,7 @@
 package schema
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -213,4 +214,98 @@ func TestTenantSaysWhichClaimNamesIt(t *testing.T) {
 			require.Contains(t, err.Error(), "@tenant")
 		})
 	}
+}
+
+func TestATenantRuleIsAskedOfTheTenant(t *testing.T) {
+	const base = `
+		type Member { id: ID! email: String! @search(by: [hash]) mayPublish: Boolean @search }
+		type Workspace @tenant(claim: "ws", name: "name") { name: String! @id members: [Member] }
+		# Dgraph.Authorization {"VerificationKey":"secret","Header":"X-Auth","Namespace":"https://x/claims","Algo":"HS256"}
+	`
+	const rule = `query($USER: String!) { queryWorkspace { members(filter: {email: {eq: $USER}, mayPublish: true}) { id } } }`
+	load := func(sch string) (Schema, error) {
+		h, err := NewHandler(sch, false)
+		if err != nil {
+			return nil, err
+		}
+		return FromString(h.GQLSchema(), 0)
+	}
+
+	t.Run("on a control type, beside a rule about the record", func(t *testing.T) {
+		sch, err := load(base + `
+			type App @scope(plane: control) @auth(update: { and: [
+				{ rule: "query($ws: String!) { queryApp(filter: {ownedBy: {eq: $ws}}) { slug } }" },
+				{ tenantRule: "` + rule + `" } ] }) {
+				slug: String! @id
+				ownedBy: String! @search(by: [hash])
+			}`)
+		require.NoError(t, err)
+		require.True(t, sch.HasTenantRules())
+
+		names := sch.TenantRulesOf("App")
+		require.Len(t, names, 1)
+		require.True(t, strings.HasPrefix(names[0], TenantRulePrefix))
+		require.Empty(t, sch.TenantRulesOf("Member"))
+
+		tenant, inner := sch.TenantRule(names[0])
+		require.NotNil(t, inner)
+		require.NotNil(t, inner.Rule)
+		require.Equal(t, "Workspace", tenant.Name())
+
+		// With no answer the rule does not pass; nor with one a token could not have set.
+		var leaf *RBACQuery
+		for typ, ta := range sch.(*schema).authRules {
+			if typ == "App" {
+				leaf = ta.Rules.Update.And[1].RBACRule
+			}
+		}
+		require.NotNil(t, leaf)
+		require.Equal(t, Negative, leaf.EvaluateRBACRule(map[string]interface{}{}))
+		require.Equal(t, Negative, leaf.EvaluateRBACRule(map[string]interface{}{names[0]: false}))
+		require.Equal(t, Negative, leaf.EvaluateRBACRule(map[string]interface{}{names[0]: "true"}))
+		require.Equal(t, Positive, leaf.EvaluateRBACRule(map[string]interface{}{names[0]: true}))
+	})
+
+	t.Run("the same text has the same name wherever it is written", func(t *testing.T) {
+		sch, err := load(base + `
+			type App @auth(update: { tenantRule: "` + rule + `" }) { slug: String! @id }
+			type Plan @auth(delete: { tenantRule: "` + rule + `" }) { code: String! @id }`)
+		require.NoError(t, err)
+		require.Equal(t, sch.TenantRulesOf("App"), sch.TenantRulesOf("Plan"))
+	})
+
+	t.Run("an interface answers for the types under it", func(t *testing.T) {
+		sch, err := load(base + `
+			interface Listed { slug: String! @id }
+			type App implements Listed @auth(query: { tenantRule: "` + rule + `" }) { title: String }`)
+		require.NoError(t, err)
+		require.Len(t, sch.TenantRulesOf("Listed"), 1)
+	})
+
+	t.Run("it needs a tenant type", func(t *testing.T) {
+		_, err := load(`
+			type App @auth(update: { tenantRule: "query { queryApp { slug } }" }) { slug: String! @id }`)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no type is marked @tenant")
+	})
+
+	t.Run("it is a query on the tenant type and no other", func(t *testing.T) {
+		_, err := load(base + `
+			type App @auth(update: { tenantRule: "query { queryApp { slug } }" }) { slug: String! @id }`)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "it must be one query on the tenant type, queryWorkspace")
+	})
+
+	t.Run("it takes no placeholders", func(t *testing.T) {
+		_, err := load(base + `
+			type App @auth(update: { tenantRule: "query { queryWorkspace(filter: <<SCOPE>>) { name } }" }) { slug: String! @id }`)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cannot use @authVariables placeholders")
+	})
+
+	t.Run("it stands alone in its place, like a rule", func(t *testing.T) {
+		_, err := load(base + `
+			type App @auth(update: { rule: "query { queryApp { slug } }", tenantRule: "` + rule + `" }) { slug: String! @id }`)
+		require.Error(t, err)
+	})
 }

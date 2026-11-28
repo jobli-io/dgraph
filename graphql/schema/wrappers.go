@@ -150,6 +150,13 @@ type Schema interface {
 	// declares them. Both are "" if the schema does not say.
 	TenantClaim() string
 	TenantNameField() string
+	// HasTenantRules reports whether any rule of the schema is a tenantRule: one
+	// asked of the caller's tenant. TenantRulesOf returns the names of those in the
+	// rules of the named type and, for an interface or union, of the types under it.
+	// TenantRule returns the tenant type and the rule to ask of it for one name.
+	HasTenantRules() bool
+	TenantRulesOf(typeName string) []string
+	TenantRule(name string) (Type, *RuleNode)
 	// GrantHolders returns the names of the stored object types whose records can hold
 	// a grant: those marked @grants or implementing an interface that is, in the order
 	// the schema declares them.
@@ -414,6 +421,12 @@ type schema struct {
 	// tenantLevel holds the text of the rules written under @access, read once.
 	tenantLevel     map[string]bool
 	tenantLevelOnce sync.Once
+	// tenantRules holds each rule written as a tenantRule, by the name its answer
+	// is supplied under (see tenant_rule.go); tenantRulesByType, read once, the
+	// names of those in the rules of each type.
+	tenantRules       map[string]*RuleNode
+	tenantRulesByType map[string][]string
+	tenantRulesOnce   sync.Once
 	// dgraphPredicate gives us the dgraph predicate corresponding to a typeName + fieldName.
 	// It is pre-computed so that runtime queries and mutations can look it
 	// up quickly.

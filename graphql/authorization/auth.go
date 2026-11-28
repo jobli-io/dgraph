@@ -321,7 +321,54 @@ func (a *AuthMeta) ExtractCustomClaims(ctx context.Context) (*CustomClaims, erro
 	if len(jwtToken) > 1 {
 		return nil, fmt.Errorf("invalid jwt auth token")
 	}
-	return a.validateJWTCustomClaims(jwtToken[0])
+	claims, err := a.validateJWTCustomClaims(jwtToken[0])
+	if err != nil || claims == nil {
+		return claims, err
+	}
+	// A name under DerivedPrefix is the engine's: whatever a token says under one is
+	// dropped, and what the request worked out for its caller is put in its place.
+	for k := range claims.AuthVariables {
+		if strings.HasPrefix(k, DerivedPrefix) {
+			delete(claims.AuthVariables, k)
+		}
+	}
+	if derived, _ := ctx.Value(derivedKey{}).(map[string]interface{}); len(derived) > 0 {
+		if claims.AuthVariables == nil {
+			claims.AuthVariables = make(map[string]interface{}, len(derived))
+		}
+		for k, v := range derived {
+			if strings.HasPrefix(k, DerivedPrefix) {
+				claims.AuthVariables[k] = v
+			}
+		}
+	}
+	return claims, nil
+}
+
+// DerivedPrefix starts the name of an auth variable that no token can set: its
+// value is worked out by the engine for the request's caller (SPIKE: the answer of
+// the caller's tenant to a tenantRule) and handed to the rules with the claims.
+const DerivedPrefix = "dgraph.derived."
+
+type derivedKey struct{}
+
+// WithDerivedVariables returns a context whose requests see vars, each under a name
+// that starts with DerivedPrefix, among the auth variables of their caller. It adds
+// to what the context already carries.
+func WithDerivedVariables(ctx context.Context, vars map[string]interface{}) context.Context {
+	if len(vars) == 0 {
+		return ctx
+	}
+	all := make(map[string]interface{}, len(vars))
+	if had, _ := ctx.Value(derivedKey{}).(map[string]interface{}); had != nil {
+		for k, v := range had {
+			all[k] = v
+		}
+	}
+	for k, v := range vars {
+		all[k] = v
+	}
+	return context.WithValue(ctx, derivedKey{}, all)
 }
 
 func GetJwtToken(ctx context.Context) string {

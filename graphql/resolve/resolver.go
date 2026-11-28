@@ -564,7 +564,8 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 							Err:   err,
 						}
 					}, gqlReq.Query)
-				allResolved[storeAt] = r.resolvers.queryResolverFor(q).Resolve(planeContext(ctx, q.ConstructedFor()), q)
+				qctx := withTenantRules(ctx, r.schema, q, nil)
+				allResolved[storeAt] = r.resolvers.queryResolverFor(q).Resolve(planeContext(qctx, q.ConstructedFor()), q)
 			}(q, i)
 		}
 		wg.Wait()
@@ -618,7 +619,7 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 			}
 
 			var res *Resolved
-			mctx := planeContext(ctx, m.MutatedType())
+			mctx := planeContext(withTenantRules(ctx, r.schema, m, m.MutatedType()), m.MutatedType())
 			if err := checkTenantRecord(mctx, m, r.schema); err != nil {
 				res, allSuccessful = EmptyResult(m, err), false
 			} else {

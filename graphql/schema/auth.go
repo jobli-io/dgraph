@@ -1255,6 +1255,14 @@ func parseAuthNode(sch *schema, typ *ast.Definition, val *ast.Value) (*RuleNode,
 		numChildren++
 	}
 
+	if tr := val.Children.ForName(tenantRuleArg); tr != nil {
+		// SPIKE: a rule asked of the caller's tenant, see tenant_rule.go.
+		var err error
+		result.RBACRule, err = parseTenantRule(sch, typ, tr.Raw)
+		errResult = AppendGQLErrs(errResult, err)
+		numChildren++
+	}
+
 	if numChildren != 1 || len(val.Children) > 1 {
 		errResult = AppendGQLErrs(errResult, gqlerror.Errorf("Type %s: @auth: there "+
 			"should be only one of \"and\", \"or\", \"not\" and \"rule\"", typ.Name))
