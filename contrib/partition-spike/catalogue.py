@@ -9,7 +9,9 @@ IntegrationAppManifest in the control plane (decisions of 29 Nov 2026):
   - an app names its owning workspace (ownerWorkspace) in place of an edge to it, and
     is maintained from that workspace by a caller who may: a rule on the record plus
     tenant rules asked of the caller's own workspace
-  - the catalogue has its own photo type, IntegrationAppPhoto
+  - records of the control plane have their own photo type, GlobalPhoto, and the
+    interface GlobalPhotoOwner for what has one. It is not the catalogue's alone: a
+    photo takes its permission from the record it is a photo of
   - the one rule that walked from a workspace's record into the catalogue
     (PluginConnectionAsyncEventStatus) reads the plugin's own clientId
 
@@ -21,7 +23,7 @@ import sys
 OWNED = '''                {
                     rule: """
                     query ($ws: String!) {
-                        query%(T)s (filter: { ownerWorkspace: { eq: $ws } }) {
+                        query%(T)s (filter: { ownerWorkspace: { eq: $ws }%(more)s }) {
                             __typename
                         }
                     }
@@ -87,16 +89,16 @@ MAY = '''                #* ... and the caller may maintain apps in that workspa
                 }'''
 
 
-def owner(T):
-    """The rule of a catalogue record a workspace made: it names the caller's workspace,
-    and the caller may maintain apps there."""
+def owner(T, more=""):
+    """The rule of a control record a workspace made: it names the caller's workspace,
+    and the caller may maintain apps there. more is a further condition on the record."""
     return ('''            and: [
                 #* the record names the caller's workspace as its owner ...
-''' + OWNED % {"T": T} + "\n" + MAY + '''
+''' + OWNED % {"T": T, "more": more} + "\n" + MAY + '''
             ]''')
 
 
-APP_HEAD = '''type IntegrationApp
+APP_HEAD = '''type IntegrationApp implements GlobalPhotoOwner
     # The catalogue is one copy for every workspace: its records are in the root namespace.
     # An app made by a workspace names that workspace (ownerWorkspace) and is maintained from it.
     @scope(plane: control)
@@ -150,16 +152,37 @@ OWNER
 '''
 
 PHOTO = '''"""
-Photo of a catalogue record: an application's photo, a release's icon or one of its previews.
-It is kept with the catalogue, so it is readable wherever the application is, and it is maintained
-from the workspace that owns the application.
+Implementable by global types, whose records belong to no workspace, that have a photo.
 """
-type IntegrationAppPhoto implements Publishable
+interface GlobalPhotoOwner
+    @scope(plane: control)
+    @generate(
+        query: { get: false, query: false, aggregate: false }
+        mutation: { add: false, update: false, delete: false }
+    ) {
+    """
+    Unique identifier
+    """
+    id: ID!
+    """
+    Profile photo
+    """
+    hasPhoto: GlobalPhoto @cascadeDelete @hasInverse(field: forResource, immutable: true) @bypassAuth
+}
+
+"""
+Photo of a global record: one that belongs to no workspace, such as an application, or a release's
+icon or preview. It is kept with the record, so it is readable wherever the record is.
+Who may change it is who may change the record it is a photo of (forResource). A photo that is
+of no record, such as a release's icon, is maintained from the workspace it was added from.
+"""
+type GlobalPhoto implements Publishable
     @scope(plane: control)
     @generate(
         query: { get: true, query: true, aggregate: false }
         mutation: { add: true, update: true, delete: true }
     )
+    @cascadeAuthPolicy(aggregation: "or", skipBidirectional: true)
     @lambdaOnMutate(add: true, update: true, delete: true)
     @auth(
         add: {
@@ -183,15 +206,14 @@ OWNER
     Secondary resource identifier
     """
     sId: String @id @search(by: [hash])
-        @dgraph(pred: "Identifiable.sId") @default(add: {expr: "\\"jobli::appphoto::\\" + uuid()"})
+        @dgraph(pred: "Identifiable.sId") @default(add: {expr: "\\"jobli::globalphoto::\\" + uuid()"})
         @generate(mutation: { add: false, update: false, delete: false })
     """
-    Name of the workspace the photo belongs to: the workspace it was added from (read-only).
+    Name of the workspace the photo was added from, if it was added from one (read-only).
     """
     ownerWorkspace: String @search(by: [hash])
-        @validate(add: {expr:""" auth.ws != nil && auth.ws != "" && auth.ws != "*" """, reason: "A photo is added from a workspace. Make sure to set the Jobli-Workspace header to the workspace name."})
         @generate(mutation: { add: false, update: false, delete: false })
-        @default(add: {expr: "auth.ws"})
+        @default(add: {expr: "auth.ws != nil && auth.ws != \\"\\" && auth.ws != \\"*\\" ? auth.ws : nil"})
     """
     Name of the file. This field is read-only.
     """
@@ -225,16 +247,19 @@ OWNER
     hash: String
         @validate(expr: """ auth.azp == "jobli-system" """, reason: "Cannot be mutated by App.")
     """
-    The application the photo is of, for an application's own photo.
+    The record the photo is of. It is given when the photo is added and does not change:
+    the photo is then maintained by whoever may maintain that record.
     """
-    forApp: IntegrationApp @bypassAuth
+    forResource: GlobalPhotoOwner @search @bypassAuth
+        @generate(mutation: { add: true, update: false, delete: false })
+        @cascadeAuth(operations: [query, add, update, delete], bidirectional: false, variableContext: parent)
 }
 
 '''
 
 
 def placed(schema):
-    return "\ntype IntegrationApp\n" in schema and "@scope(plane: control)" in schema
+    return "\ntype IntegrationApp implements GlobalPhotoOwner\n" in schema
 
 
 def place(schema):
@@ -287,11 +312,7 @@ def place(schema):
     """
     hasUpdated: [UpdateRecord] @hasInverse(field: fromSource)
         @generate(mutation: { add: false, update: false, delete: false })
-''', '''    """
-    Application photo
-    """
-    hasPhoto: IntegrationAppPhoto @cascadeDelete @hasInverse(field: forApp) @bypassAuth
-''')
+''', '')
     between('''    """
     The workspace the app belongs to
     """
@@ -310,8 +331,8 @@ def place(schema):
 
     # the manifest
     sub("type IntegrationAppManifest\n", "type IntegrationAppManifest\n    @scope(plane: control)\n")
-    sub("    hasPreview: [Photo] @cascadeDelete @bypassAuth\n", "    hasPreview: [IntegrationAppPhoto] @cascadeDelete @bypassAuth\n")
-    sub("    hasIcon: Photo @cascadeDelete @bypassAuth\n", "    hasIcon: IntegrationAppPhoto @cascadeDelete @bypassAuth\n")
+    sub("    hasPreview: [Photo] @cascadeDelete @bypassAuth\n", "    hasPreview: [GlobalPhoto] @cascadeDelete @bypassAuth\n")
+    sub("    hasIcon: Photo @cascadeDelete @bypassAuth\n", "    hasIcon: GlobalPhoto @cascadeDelete @bypassAuth\n")
     sub('''    """
     Active workspace plugin installations using this release version.
     """
@@ -320,9 +341,11 @@ def place(schema):
         @cascadeAuth(operations:[query] variableContext: parent, bidirectional: false)
 }''', "}")
 
-    # the catalogue's own photo type, ahead of the manifest's status enum
+    # the photo type of the control plane and its owner interface, ahead of the manifest's status enum.
+    # A photo that is of a record takes that record's rules; one that is of none (an icon,
+    # a preview) keeps to the workspace it was added from.
     anchor = '"""\nRelease lifecycle state of an application manifest version.\n"""\nenum AppReleaseStatus {'
-    sub(anchor, PHOTO.replace("OWNER", owner("IntegrationAppPhoto")) + anchor)
+    sub(anchor, PHOTO.replace("OWNER", owner("GlobalPhoto", ", not: { has: forResource }")) + anchor)
     return s[0]
 
 
@@ -350,7 +373,7 @@ def _lit(v):
 
 def migrate_root(c):
     """In the root namespace: every app names the workspace it has an edge to, and the
-    photos of apps and manifests are given the catalogue's own photo type. Nothing is
+    photos of apps and manifests are given the control plane's photo type. Nothing is
     removed: the root namespace still answers under the schema of today.
 
     Run it with the placed schema loaded: an edge written before its predicate is
@@ -379,19 +402,20 @@ def migrate_root(c):
     rdf, named, photos = [], 0, 0
 
     def photo(ph, owner, app=None):
-        rdf.append('<%s> <dgraph.type> "IntegrationAppPhoto" .' % ph["uid"])
+        rdf.append('<%s> <dgraph.type> "GlobalPhoto" .' % ph["uid"])
         rdf.append('<%s> <dgraph.type> "Publishable" .' % ph["uid"])
         for field in ("fileName", "fileSize", "hash", "imageSmall", "image"):
             if ph.get(field) is not None:
-                rdf.append("<%s> <IntegrationAppPhoto.%s> %s ." % (ph["uid"], field, _lit(ph[field])))
+                rdf.append("<%s> <GlobalPhoto.%s> %s ." % (ph["uid"], field, _lit(ph[field])))
         ws = (one(ph.get("ws")) or {}).get("n") or owner
         if ws:
-            rdf.append("<%s> <IntegrationAppPhoto.ownerWorkspace> %s ." % (ph["uid"], _lit(ws)))
+            rdf.append("<%s> <GlobalPhoto.ownerWorkspace> %s ." % (ph["uid"], _lit(ws)))
         if app:
-            rdf.append("<%s> <IntegrationAppPhoto.forApp> <%s> ." % (ph["uid"], app))
-            rdf.append("<%s> <IntegrationApp.hasPhoto> <%s> ." % (app, ph["uid"]))
+            rdf.append("<%s> <GlobalPhoto.forResource> <%s> ." % (ph["uid"], app))
+            rdf.append("<%s> <GlobalPhotoOwner.hasPhoto> <%s> ." % (app, ph["uid"]))
 
     for a in d.get("apps") or []:
+        rdf.append('<%s> <dgraph.type> "GlobalPhotoOwner" .' % a["uid"])
         ws = (one(a.get("ws")) or {}).get("n")
         if ws:
             rdf.append("<%s> <IntegrationApp.ownerWorkspace> %s ." % (a["uid"], _lit(ws)))
@@ -408,7 +432,7 @@ def migrate_root(c):
     if rdf:
         c.mutate("\n".join(rdf), ns=0)
     return {"apps": len(d.get("apps") or []), "apps that name an owner": named,
-            "manifests": len(d.get("manifests") or []), "photos given the catalogue's type": photos}
+            "manifests": len(d.get("manifests") or []), "photos given the control plane's type": photos}
 
 
 def strip_partition(c, ns):

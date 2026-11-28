@@ -128,6 +128,12 @@ def main():
                   len(p), own, sum(1 for x in p if x.get("hasApp")), sum(1 for x in p if x.get("installedManifest")),
                   sum(1 for x in p if x.get("installedManifest") and
                       (x["installedManifest"].get("forApp") or {}).get("clientId") == x.get("clientId")))))
+        exp = root('{ var(func: eq(IntegrationApp.ownerWorkspace, "%s")) { own as IntegrationApp.hasManifest } '
+                   'q(func: type(IntegrationAppManifest)) @filter(eq(IntegrationAppManifest.status, "PUBLISHED") OR uid(own)) { count(uid) } '
+                   'mine(func: uid(own)) @filter(NOT eq(IntegrationAppManifest.status, "PUBLISHED")) { count(uid) } }' % P.WS)
+        r = P.gql(c, tok, "{ data: queryIntegrationAppManifest { id status } }", {})
+        print("  every manifest it may read: %s (published, or of an app it owns: %d; %d of its own are not published)" % (
+            short(r) if r.get("errors") else len(rows(r)), exp["q"][0]["count"], exp["mine"][0]["count"]))
         r = P.gql(c, tok, "{ data: queryIntegrationApp { clientId displayName ownerWorkspace } }", {})
         print("  the apps it may maintain:   %s" % (short(r) if r.get("errors") else
               "%d, owned by %s" % (len(rows(r)), sorted({x.get("ownerWorkspace") for x in rows(r)}))))
@@ -182,6 +188,17 @@ def main():
             r = P.gql(c, tok, 'mutation($id: [ID!]) { data: updateIntegrationApp(input: {filter: {id: $id}, set: {description: "changed"}}) '
                               "{ numUids } }", {"id": [made[0]["id"]]})
             print("    change it:                %s" % short(r))
+        # photos of control records: who may change the record may change its photo
+        photo = 'mutation($in: [AddGlobalPhotoInput!]!) { data: addGlobalPhoto(input: $in) { globalPhoto { id ownerWorkspace forResource { id } } } }'
+        if made[0].get("id"):
+            r = P.gql(c, tok, photo, {"in": [{"forResource": {"id": made[0]["id"]}}]})
+            print("  add a photo of the new app:  %s" % short(r))
+            r = P.gql(c, tok, "query($id: ID!) { data: getIntegrationApp(id: $id) { clientId hasPhoto { id ownerWorkspace } } }", {"id": made[0]["id"]})
+            print("    the app with its photo:    %s" % short(r))
+        r = P.gql(c, tok, photo, {"in": [{"forResource": {"id": sysapp}}]})
+        print("  add a photo of an app of another workspace: %s" % short(r))
+        r = P.gql(c, tok, photo, {"in": [{}]})
+        print("  add a photo that is of no record (an icon): %s" % short(r))
         r = P.gql(c, tok, 'mutation { data: updateIntegrationApp(input: {filter: {clientId: {eq: "jobli-system"}}, '
                           'set: {description: "changed from %s"}}) { numUids } }' % P.WS, {})
         print("  change an app of another workspace: %s" % short(r))
@@ -205,6 +222,12 @@ def main():
                 r = P.gql(c, reader, 'mutation($id: [ID!]) { data: updateIntegrationApp(input: {filter: {id: $id}, set: {description: "reader"}}) '
                                      "{ numUids } }", {"id": [made[0]["id"]]})
                 print("  change the workspace's new app: %s" % short(r))
+            bare = root('{ q(func: eq(IntegrationApp.ownerWorkspace, "%s"), first: 1) @filter(NOT has(GlobalPhotoOwner.hasPhoto)) { uid } }' % P.WS)["q"]
+            if bare:
+                r = P.gql(c, reader, photo, {"in": [{"forResource": {"id": bare[0]["uid"]}}]})
+                print("  add a photo of an app of the workspace that has none: %s" % short(r))
+            r = P.gql(c, reader, photo, {"in": [{}]})
+            print("  add a photo that is of no record: %s" % short(r))
         logged = [l for l in L.logs().splitlines() if ('"severity":"ERROR"' in l or "[ERROR]" in l) and "GEMINI_API_KEY" not in l]
         print("\nlambda logged %d errors%s" % (len(logged), "".join("\n  " + l[:260] for l in logged[:8])))
     finally:
