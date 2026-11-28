@@ -24,9 +24,10 @@ from spikelib import Cluster
 
 SCOPED = os.environ.get("SCOPE", "1") == "1"
 SCHEMA = '''
-type Workspace @tenant {
+type Workspace @tenant(claim: "ws", name: "name") {
   id: ID!
   name: String! @id
+  title: String
 }
 
 type App %s {
@@ -63,7 +64,8 @@ def apps_in(c, tok):
 
 
 def main():
-    flags = "partition-namespaces=true; partition-resolver=jwt; partition-dir-ttl=3s"
+    # the alpha is started with a claim nobody sends: the schema's @tenant says which claim names the tenant
+    flags = "partition-namespaces=true; partition-resolver=jwt; partition-dir-ttl=3s; partition-claim=not-this-one"
     with Cluster("pl", 480, flags=flags) as c:
         r = c.admin("mutation($s: String!) { updateGQLSchema(input: { set: { schema: $s } }) { gqlSchema { id } } }",
                     variables={"s": SCHEMA}, check=False)
@@ -86,6 +88,13 @@ def main():
         print("  read the plugin with its app:        %s" % gql(c, acme, "{ queryPlugin { label hasApp { clientId title } } }"))
         print("  change the title of the app seek:    %s" % gql(c, acme,
               'mutation { updateApp(input: {filter: {clientId: {eq: "seek"}}, set: {title: "changed from acme"}}) { numUids } }'))
+        print("  add its Workspace record, as acme:   %s" % gql(c, acme, 'mutation { addWorkspace(input: [{name: "acme", title: "Acme"}]) { numUids } }'))
+        print("  add a Workspace under another name:  %s" % gql(c, acme, 'mutation { addWorkspace(input: [{name: "globex"}]) { numUids } }'))
+        print("  rename its Workspace record:         %s" % gql(c, acme,
+              'mutation { updateWorkspace(input: {filter: {name: {eq: "acme"}}, set: {name: "acme2"}}) { numUids } }'))
+        print("  change its Workspace's title:        %s" % gql(c, acme,
+              'mutation { updateWorkspace(input: {filter: {name: {eq: "acme"}}, set: {title: "Acme Ltd"}}) { numUids } }'))
+        print("  its Workspace records:               %s" % gql(c, acme, "{ queryWorkspace { name title } }"))
         print("\nApp records in the root namespace:     %s" % apps_in(c, None))
         print("App records in acme's partition:       %s" % apps_in(c, acme))
 

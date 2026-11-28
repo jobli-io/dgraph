@@ -183,3 +183,34 @@ func TestScopePlacesTypesInAPlane(t *testing.T) {
 		})
 	}
 }
+
+func TestTenantSaysWhichClaimNamesIt(t *testing.T) {
+	sch := func(s string) (Schema, error) {
+		h, err := NewHandler(s, false)
+		if err != nil {
+			return nil, err
+		}
+		return FromString(h.GQLSchema(), 0)
+	}
+	s, err := sch(`type Workspace @tenant(claim: "ws", name: "name") { name: String! @id title: String }`)
+	require.NoError(t, err)
+	require.Equal(t, "ws", s.TenantClaim())
+	require.Equal(t, "name", s.TenantNameField())
+
+	s, err = sch(`type Workspace @tenant { name: String! @id }`)
+	require.NoError(t, err)
+	require.Equal(t, "", s.TenantClaim(), "a bare marker says nothing about the claim")
+
+	for name, bad := range map[string]string{
+		"a claim with no name field":       `type Workspace @tenant(claim: "ws") { name: String! @id }`,
+		"a name field that does not exist": `type Workspace @tenant(claim: "ws", name: "slug") { name: String! @id }`,
+		"a name field that is not an @id":  `type Workspace @tenant(claim: "ws", name: "title") { name: String! @id title: String! }`,
+		"a name field that can be missing": `type Workspace @tenant(claim: "ws", name: "title") { name: String! @id title: String @id }`,
+	} {
+		t.Run(name+" is refused", func(t *testing.T) {
+			_, err := sch(bad)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "@tenant")
+		})
+	}
+}

@@ -619,7 +619,11 @@ func (r *RequestResolver) Resolve(ctx context.Context, gqlReq *schema.Request) (
 
 			var res *Resolved
 			mctx := planeContext(ctx, m.MutatedType())
-			res, allSuccessful = r.resolvers.mutationResolverFor(m).Resolve(mctx, m)
+			if err := checkTenantRecord(mctx, m, r.schema); err != nil {
+				res, allSuccessful = EmptyResult(m, err), false
+			} else {
+				res, allSuccessful = r.resolvers.mutationResolverFor(m).Resolve(mctx, m)
+			}
 			addResult(resp, res)
 			if allSuccessful && res != nil && len(res.Data) > 0 {
 				triggerMutationInvalidation(mctx, m, res.Data, res.Change)

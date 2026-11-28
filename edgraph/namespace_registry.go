@@ -188,6 +188,16 @@ func NamespaceByName(ctx context.Context, name string) (ns uint64, found bool, e
 	return 0, false, errors.Errorf("the namespace registry has more than one entry named %q", name)
 }
 
+// NamespaceName returns the name namespace ns is registered under, or "" if it has
+// no record or no name.
+func NamespaceName(ctx context.Context, ns uint64) (string, error) {
+	entries, err := readRegistry(ctx, fmt.Sprintf("eq(%s, %d)", nsIdPred, ns), nil)
+	if err != nil || len(entries) == 0 {
+		return "", err
+	}
+	return entries[0].Name, nil
+}
+
 // NameNamespace gives namespace ns the name, writing its record if it has none.
 // It is how a namespace made before the registry, or made without a name, is
 // brought into it.

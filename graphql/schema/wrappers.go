@@ -142,6 +142,11 @@ type Schema interface {
 	// Tenant returns the name of the type marked @tenant, the type a partition holds
 	// exactly one record of, or "" if the schema marks none.
 	Tenant() string
+	// TenantClaim returns the claim of a request's token that names its tenant, and
+	// TenantNameField the field of the tenant type that holds that name, as @tenant
+	// declares them. Both are "" if the schema does not say.
+	TenantClaim() string
+	TenantNameField() string
 	// GrantHolders returns the names of the stored object types whose records can hold
 	// a grant: those marked @grants or implementing an interface that is, in the order
 	// the schema declares them.
@@ -3345,6 +3350,21 @@ func (s *schema) Tenant() string {
 	}
 	return tenantOf(s.schema)
 }
+
+func (s *schema) tenantArg(name string) string {
+	if s == nil || s.schema == nil {
+		return ""
+	}
+	def := s.schema.Types[tenantOf(s.schema)]
+	if def == nil {
+		return ""
+	}
+	return tenantArg(def.Directives.ForName(tenantDirective), name)
+}
+
+func (s *schema) TenantClaim() string { return s.tenantArg("claim") }
+
+func (s *schema) TenantNameField() string { return s.tenantArg("name") }
 
 func (s *schema) GrantHolders() []string {
 	if s == nil || s.schema == nil {

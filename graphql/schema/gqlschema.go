@@ -352,7 +352,7 @@ directive @bypassAuth(except: [String!], if: String) on FIELD_DEFINITION
 directive @validate(rule: String, expr: String, reason: String, rules: [DgraphValidate], add: [DgraphValidate], update: [DgraphValidate]) on FIELD_DEFINITION | OBJECT | INTERFACE
 directive @postValidate(expr: String, reason: String, rules: [DgraphPostValidate], add: [DgraphPostValidate], update: [DgraphPostValidate]) on OBJECT | INTERFACE
 directive @referenceScope(claim: String!, path: String!) on OBJECT | INTERFACE
-directive @tenant on OBJECT
+directive @tenant(claim: String, name: String) on OBJECT
 directive @grants on OBJECT | INTERFACE
 directive @access(scope: AccessScope!) on OBJECT | INTERFACE
 directive @scope(plane: ScopePlane!) on OBJECT | INTERFACE
@@ -406,7 +406,7 @@ directive @cascadeDelete(onlyIfOrphan: Boolean, onlyIfOrphanScope: String, filte
 directive @validate(rule: String, expr: String, reason: String, rules: [DgraphValidate], add: [DgraphValidate], update: [DgraphValidate]) on FIELD_DEFINITION
 directive @postValidate(expr: String, reason: String, rules: [DgraphPostValidate], add: [DgraphPostValidate], update: [DgraphPostValidate]) on OBJECT | INTERFACE
 directive @referenceScope(claim: String!, path: String!) on OBJECT | INTERFACE
-directive @tenant on OBJECT
+directive @tenant(claim: String, name: String) on OBJECT
 directive @grants on OBJECT | INTERFACE
 directive @access(scope: AccessScope!) on OBJECT | INTERFACE
 directive @scope(plane: ScopePlane!) on OBJECT | INTERFACE

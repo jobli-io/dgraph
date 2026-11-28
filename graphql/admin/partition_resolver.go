@@ -362,7 +362,7 @@ func (t *jwtTenantResolver) resolve(ctx context.Context) (context.Context, error
 		return ctx, errors.Wrap(err, "auth token rejected")
 	}
 
-	ws, _ := claims.AuthVariables[t.claim].(string)
+	ws, _ := claims.AuthVariables[t.claimName()].(string)
 	ns := x.RootNamespace
 	if ws != "" && ws != "*" {
 		found, ok, err := t.lookup(ws, now)
@@ -415,6 +415,25 @@ func (t *jwtTenantResolver) resolve(ctx context.Context) (context.Context, error
 		return ctx, refusal(ws)
 	}
 	return x.AttachNamespace(ctx, ns), nil
+}
+
+// claimName returns the claim that names a request's tenant. The schema says which
+// it is, on the type it marks @tenant. An alpha whose schema is not loaded, or
+// whose schema does not say, uses the one it was started with.
+func (t *jwtTenantResolver) claimName() string {
+	if adminServerVar != nil {
+		if gh, ok := adminServerVar.gqlServer.(*graphqlHandler); ok {
+			gh.resolverMux.RLock()
+			r := gh.resolver[x.RootNamespace]
+			gh.resolverMux.RUnlock()
+			if r != nil && r.Schema() != nil {
+				if claim := r.Schema().TenantClaim(); claim != "" {
+					return claim
+				}
+			}
+		}
+	}
+	return t.claim
 }
 
 // lookup returns the namespace registered under the name ws.

@@ -2062,6 +2062,26 @@ func tenantDirectiveValidation(sch *ast.Schema, definitions []string) gqlerror.L
 			}
 		}
 	}
+	for _, typ := range tenants {
+		dir := typ.Directives.ForName(tenantDirective)
+		claim, name := tenantArg(dir, "claim"), tenantArg(dir, "name")
+		if (claim == "") != (name == "") {
+			errs = append(errs, gqlerror.ErrorPosf(dir.Position,
+				"Type %s; @tenant takes claim and name together: the claim of the token that names the tenant, "+
+					"and the field of this type that holds that name.", typ.Name))
+			continue
+		}
+		if name == "" {
+			continue
+		}
+		f := typ.Fields.ForName(name)
+		if f == nil || f.Type.Elem != nil || f.Type.NamedType != "String" || !f.Type.NonNull ||
+			f.Directives.ForName(idDirective) == nil {
+			errs = append(errs, gqlerror.ErrorPosf(dir.Position,
+				"Type %s; @tenant(name: %q) must name a field of this type declared String! @id: "+
+					"it holds the name a token's claim is matched to.", typ.Name, name))
+		}
+	}
 	for _, typ := range tenants[min(1, len(tenants)):] {
 		errs = append(errs, gqlerror.ErrorPosf(typ.Position,
 			"Type %s; @tenant is already on type %s, and a schema can have only one tenant type.",
@@ -2075,6 +2095,17 @@ func tenantDirectiveValidation(sch *ast.Schema, definitions []string) gqlerror.L
 		}
 	}
 	return errs
+}
+
+// tenantArg returns a string argument of @tenant, or "".
+func tenantArg(dir *ast.Directive, name string) string {
+	if dir == nil {
+		return ""
+	}
+	if a := dir.Arguments.ForName(name); a != nil && a.Value != nil {
+		return a.Value.Raw
+	}
+	return ""
 }
 
 // The two planes a type's records can live in.

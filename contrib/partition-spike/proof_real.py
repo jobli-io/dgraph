@@ -333,7 +333,7 @@ def restart(c, debug=False):
 # (graph/.graphql) says where they go. The schema restored from the dev backup is older
 # and has neither, so every schema a probe loads is given them, and they are taken out
 # again of what a probe reads back. With the partition flags off nothing reads them.
-MARKERS = ("@tenant", "@grants", "@access(scope: SHARED)", "@access(scope: TENANT)")
+MARKERS = ('@tenant(claim: "ws", name: "name")', "@grants", "@access(scope: SHARED)", "@access(scope: TENANT)")
 
 
 def marker_homes():
@@ -351,9 +351,15 @@ def marker_homes():
     return out
 
 
+# marker lines an earlier build wrote, taken out of a schema that still carries them
+RETIRED = ("@tenant",)
+
+
 def marked(schema):
     for head, marker in marker_homes():
         at = "\n" + head + "\n"
+        for old in RETIRED:
+            schema = schema.replace(at + "    " + old + "\n", at, 1)
         if schema.count(at) != 1:
             raise SystemExit("cannot place %s: %r is not in the schema once" % (marker, head[:60]))
         if at + "    " + marker + "\n" not in schema:
