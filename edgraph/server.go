@@ -1236,6 +1236,8 @@ type queryContext struct {
 	gmuList []*dql.Mutation
 	// dqlRes contains result of parsing the req.Query
 	dqlRes dql.Result
+	// fromGraphQL: the request is the GraphQL layer's own (see Request.graphql)
+	fromGraphQL bool
 	// condVars are conditional variables used in the (modified) query to figure out
 	// whether the condition in Conditional Upsert is true. The string would be empty
 	// if the corresponding mutation is not a conditional upsert.
@@ -1278,6 +1280,9 @@ type Request struct {
 	gqlField gqlSchema.Field
 	// doAuth tells whether this request needs ACL authorization or not
 	doAuth AuthMode
+	// graphql: the request is the GraphQL layer's own, rewritten from a GraphQL
+	// operation. Only such a request may read across to the template namespace.
+	graphql bool
 }
 
 // Health handles /health and /health?all requests.
@@ -1402,7 +1407,7 @@ func (s *Server) QueryGraphQL(ctx context.Context, req *api.Request,
 		}
 	}
 	// no need to attach namespace here, it is already done by GraphQL layer
-	return s.doQuery(ctx, &Request{req: req, gqlField: field, doAuth: getAuthMode(ctx)})
+	return s.doQuery(ctx, &Request{req: req, gqlField: field, doAuth: getAuthMode(ctx), graphql: true})
 }
 
 func (s *Server) Query(ctx context.Context, req *api.Request) (*api.Response, error) {
@@ -1584,6 +1589,8 @@ func (s *Server) doQuery(ctx context.Context, req *Request) (resp *api.Response,
 		span:     span,
 		graphql:  isGraphQL,
 		gqlField: req.gqlField,
+
+		fromGraphQL: req.graphql,
 	}
 	if rerr = parseRequest(ctx, qc); rerr != nil {
 		return
@@ -1859,7 +1866,26 @@ func parseRequest(ctx context.Context, qc *queryContext) error {
 	if err != nil {
 		return err
 	}
+	if !qc.fromGraphQL && usesTemplate(qc.dqlRes.Query) {
+		// @template reads across to another namespace. It is the GraphQL layer's,
+		// written where the schema places a type in the control plane; a request
+		// from anywhere else stays in the one namespace it was attributed to.
+		return errors.New("the @template directive is not available to this request")
+	}
 	return validateQuery(qc.dqlRes.Query)
+}
+
+// usesTemplate reports whether any block of the query carries @template.
+func usesTemplate(blocks []*dql.GraphQuery) bool {
+	for _, b := range blocks {
+		if b == nil {
+			continue
+		}
+		if b.Template || usesTemplate(b.Children) {
+			return true
+		}
+	}
+	return false
 }
 
 func predicateNameWithLang(pred *api.NQuad) string {

@@ -1813,6 +1813,7 @@ func cloneGraphQuery(q *dql.GraphQuery) *dql.GraphQuery {
 		ShortestPathArgs: q.ShortestPathArgs,
 		Cascade:          append([]string(nil), q.Cascade...),
 		IgnoreReflex:     q.IgnoreReflex,
+		Template:         q.Template,
 		Facets:           q.Facets,
 		FacetsFilter:     cloneFilterTree(q.FacetsFilter),
 		GroupbyAttrs:     append([]dql.GroupByAttr(nil), q.GroupbyAttrs...),
@@ -3715,6 +3716,11 @@ func addSelectionSetFrom(
 		child := &dql.GraphQuery{
 			Alias: f.DgraphAlias(),
 		}
+		// An edge from a tenant's record to a record of the control plane: the edge is
+		// in the tenant's namespace and what it leads to is in the root's. The block,
+		// and every block made for what is under it, is marked so (see planeEdge).
+		crossing := planeEdge(field, f)
+		child.Template = crossing
 
 		// if field of IDType has @external directive then it means that
 		// it stored as String with Hash index internally in the dgraph.
@@ -3727,6 +3733,9 @@ func addSelectionSetFrom(
 		filter, _ := f.ArgValue("filter").(map[string]interface{})
 		// if this field has been filtered out by the filter, then don't add it in DQL query
 		includeField, varQry := addFilter(child, f.Type(), filter, auth, f.Alias())
+		if crossing {
+			markTemplate(varQry)
+		}
 		if !includeField {
 			continue
 		}
@@ -3836,6 +3845,11 @@ func addSelectionSetFrom(
 			// selection query as a filter to child
 			commonAuthQueryVars.parentQry.Children[0].Filter = child.Filter
 			commonAuthQueryVars.selectionQry.Filter = authFilter
+			if crossing {
+				// both test the records the edge leads to
+				commonAuthQueryVars.parentQry.Children[0].Template = true
+				commonAuthQueryVars.selectionQry.Template = true
+			}
 			child.Filter = &dql.FilterTree{
 				Func: &dql.Function{
 					Name: "uid",
@@ -3852,6 +3866,10 @@ func addSelectionSetFrom(
 			authQueries = append(authQueries, commonAuthQueryVars.selectionQry)
 		} else {
 			authQueries = append(authQueries, fieldAuth...)
+		}
+		if crossing {
+			markTemplate(fieldAuth)
+			markTemplate(selectionAuth)
 		}
 		authQueries = append(authQueries, selectionAuth...)
 		restoreAuthState()

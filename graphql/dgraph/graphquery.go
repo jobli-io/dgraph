@@ -104,6 +104,10 @@ func writeQuery(b *strings.Builder, query *dql.GraphQuery, prefix string) {
 		}
 	}
 
+	if query.Template {
+		x.Check2(b.WriteString(" @template"))
+	}
+
 	if len(query.GroupbyAttrs) > 0 {
 		x.Check2(b.WriteString(" @groupby("))
 		for i, attr := range query.GroupbyAttrs {

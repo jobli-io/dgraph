@@ -359,8 +359,13 @@ func (mr *dgraphResolver) rewriteAndExecute(
 		return emptyResult(schema.GQLWrapf(err, "couldn't rewrite mutation %s", mutation.Name())),
 			resolverFailed
 	}
+	// A record the mutation names by its ID or key is looked for where records of its
+	// type live. For a type the schema places in the control plane that is the root
+	// namespace, not the tenant's partition the mutation writes in.
+	localQueries, controlQueries, controlCtx := splitByPlane(ctx, mutation, queries, filterTypes)
+
 	// Execute queries and parse its result into a map
-	qry := dgraph.AsString(queries)
+	qry := dgraph.AsString(localQueries)
 	req.Query = qry
 
 	// The query will be empty in case there is no reference XID / UID in the mutation.
@@ -404,6 +409,21 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	queryResultMap := make(map[string][]idExistenceRes)
 	if mutResp != nil {
 		err = json.Unmarshal(mutResp.Json, &queryResultMap)
+	}
+	if err == nil && len(controlQueries) > 0 {
+		// Read in the root namespace, outside the mutation's transaction: what is
+		// written is an edge to the record, never the record.
+		var controlResp *dgoapi.Response
+		controlResp, err = mr.executor.Execute(controlCtx,
+			&dgoapi.Request{Query: dgraph.AsString(controlQueries), ReadOnly: true}, nil)
+		if err == nil {
+			found := make(map[string][]idExistenceRes)
+			if err = json.Unmarshal(controlResp.GetJson(), &found); err == nil {
+				for name, rows := range found {
+					queryResultMap[name] = rows
+				}
+			}
+		}
 	}
 	if err != nil {
 		gqlErr := schema.GQLWrapLocationf(
@@ -522,6 +542,10 @@ func (mr *dgraphResolver) rewriteAndExecute(
 	if err != nil {
 		return emptyResult(schema.GQLWrapf(err, "couldn't rewrite mutation %s", mutation.Name())),
 			resolverFailed
+	}
+	if err := noControlRecordsMade(ctx, upserts); err != nil {
+		return emptyResult(schema.GQLWrapLocationf(err, mutation.Location(),
+			"mutation %s failed", mutation.Name())), resolverFailed
 	}
 	if len(upserts) == 0 {
 		return &Resolved{

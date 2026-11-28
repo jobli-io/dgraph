@@ -86,6 +86,21 @@ def main():
         print("  add a plugin for the app web:        %s" % gql(c, acme,
               'mutation { addPlugin(input: [{label: "acme web", hasApp: {clientId: "web"}}]) { numUids plugin { label hasApp { clientId title } } } }'))
         print("  read the plugin with its app:        %s" % gql(c, acme, "{ queryPlugin { label hasApp { clientId title } } }"))
+        print("  its plugins of the app web only:     %s" % gql(c, acme,
+              '{ queryPlugin { label hasApp(filter: {clientId: {eq: "web"}}) { title } } }'))
+        print("  its plugins of the app seek only:    %s" % gql(c, acme,
+              '{ queryPlugin { label hasApp(filter: {clientId: {eq: "seek"}}) { title } } }'))
+        r = c.post("/query", "{ q(func: type(Plugin)) { Plugin.label Plugin.hasApp @template { App.title } } }",
+                   ctype="application/dql", headers=R.auth(acme))
+        print("  the same reach by hand-written DQL:  %s" % ((r.get("errors") or [{}])[0].get("message") or json.dumps(r.get("data")))[:120])
+        r = c.post("/query", "{ q(func: type(Plugin)) { Plugin.label Plugin.hasApp { App.title } } }",
+                   ctype="application/dql", headers=R.auth(acme))
+        print("  plain DQL through the edge:          %s" % json.dumps(r.get("data"))[:120])
+        print("  add a plugin for an app nobody made: %s" % gql(c, acme,
+              'mutation { addPlugin(input: [{label: "acme ghost", hasApp: {clientId: "ghost"}}]) { numUids } }'))
+        print("  add a plugin with a new app inside:  %s" % gql(c, acme,
+              'mutation { addPlugin(input: [{label: "acme own", hasApp: {clientId: "own", title: "Our own"}}]) { numUids } }'))
+        print("  its plugins:                         %s" % gql(c, acme, "{ queryPlugin { label } }"))
         print("  change the title of the app seek:    %s" % gql(c, acme,
               'mutation { updateApp(input: {filter: {clientId: {eq: "seek"}}, set: {title: "changed from acme"}}) { numUids } }'))
         print("  add its Workspace record, as acme:   %s" % gql(c, acme, 'mutation { addWorkspace(input: [{name: "acme", title: "Acme"}]) { numUids } }'))

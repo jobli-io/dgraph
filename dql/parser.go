@@ -62,11 +62,16 @@ type GraphQuery struct {
 	ShortestPathArgs ShortestPathArgs
 	Cascade          []string
 	IgnoreReflex     bool
-	Facets           *pb.FacetParams
-	FacetsFilter     *FilterTree
-	GroupbyAttrs     []GroupByAttr
-	FacetVar         map[string]string
-	FacetsOrder      []*FacetOrder
+	// Template is set by @template: what is under this block is read in the namespace
+	// its request's namespace takes its schema from, not in the request's own. The
+	// GraphQL layer writes it for an edge into the control plane; a request that is
+	// not the GraphQL layer's is refused if it carries it (edgraph).
+	Template     bool
+	Facets       *pb.FacetParams
+	FacetsFilter *FilterTree
+	GroupbyAttrs []GroupByAttr
+	FacetVar     map[string]string
+	FacetsOrder  []*FacetOrder
 
 	// Used for ACL enabled queries to curtail results to only accessible params
 	AllowedPreds []string
@@ -1116,6 +1121,8 @@ L:
 				}
 			case "ignorereflex":
 				gq.IgnoreReflex = true
+			case "template":
+				gq.Template = true
 			case "recurse":
 				gq.Recurse = true
 				if err := parseRecurseArgs(it, gq); err != nil {
@@ -2864,6 +2871,8 @@ func parseDirective(it *lex.ItemIterator, curp *GraphQuery) error {
 		}
 	case item.Val == "normalize":
 		curp.Normalize = true
+	case item.Val == "template":
+		curp.Template = true
 	case peek[0].Typ == itemLeftRound:
 		// this is directive
 		switch item.Val {

@@ -154,6 +154,12 @@ type params struct {
 	Cascade *CascadeArgs
 	// IgnoreReflex is true if the @ignorereflex directive is specified.
 	IgnoreReflex bool
+	// Template: this node's own predicate is read in the template namespace of the
+	// request's namespace. TemplateBelow: what hangs under it is (its filters, its
+	// order, its children). A block marked @template reads its own edge where its
+	// parent is read, and everything the edge leads to in the template namespace.
+	Template      bool
+	TemplateBelow bool
 
 	// ShortestPathArgs contains the from and to functions to execute a shortest path query.
 	ShortestPathArgs dql.ShortestPathArgs
@@ -485,6 +491,7 @@ func filterCopy(sg *SubGraph, ft *dql.FilterTree) error {
 	}
 	for _, ftc := range ft.Child {
 		child := &SubGraph{}
+		child.Params.Template, child.Params.TemplateBelow = sg.Params.Template, sg.Params.TemplateBelow
 		if err := filterCopy(child, ftc); err != nil {
 			return err
 		}
@@ -556,22 +563,24 @@ func treeCopy(gq *dql.GraphQuery, sg *SubGraph) error {
 		attrsSeen[key] = struct{}{}
 
 		args := params{
-			Alias:        gchild.Alias,
-			Expand:       gchild.Expand,
-			Facet:        gchild.Facets,
-			FacetsOrder:  gchild.FacetsOrder,
-			FacetVar:     gchild.FacetVar,
-			GetUid:       sg.Params.GetUid,
-			IgnoreReflex: sg.Params.IgnoreReflex,
-			Langs:        gchild.Langs,
-			NeedsVar:     append(gchild.NeedsVar[:0:0], gchild.NeedsVar...),
-			Normalize:    gchild.Normalize || sg.Params.Normalize,
-			Order:        gchild.Order,
-			Var:          gchild.Var,
-			GroupbyAttrs: gchild.GroupbyAttrs,
-			IsGroupBy:    gchild.IsGroupby,
-			IsInternal:   gchild.IsInternal,
-			Cascade:      &CascadeArgs{},
+			Alias:         gchild.Alias,
+			Expand:        gchild.Expand,
+			Facet:         gchild.Facets,
+			FacetsOrder:   gchild.FacetsOrder,
+			FacetVar:      gchild.FacetVar,
+			GetUid:        sg.Params.GetUid,
+			Template:      sg.Params.TemplateBelow,
+			TemplateBelow: sg.Params.TemplateBelow || gchild.Template,
+			IgnoreReflex:  sg.Params.IgnoreReflex,
+			Langs:         gchild.Langs,
+			NeedsVar:      append(gchild.NeedsVar[:0:0], gchild.NeedsVar...),
+			Normalize:     gchild.Normalize || sg.Params.Normalize,
+			Order:         gchild.Order,
+			Var:           gchild.Var,
+			GroupbyAttrs:  gchild.GroupbyAttrs,
+			IsGroupBy:     gchild.IsGroupby,
+			IsInternal:    gchild.IsInternal,
+			Cascade:       &CascadeArgs{},
 		}
 
 		// Inherit from the parent.
@@ -643,6 +652,8 @@ func treeCopy(gq *dql.GraphQuery, sg *SubGraph) error {
 
 		if gchild.Filter != nil {
 			dstf := &SubGraph{}
+			// a filter is on the records the edge leads to
+			dstf.Params.Template, dstf.Params.TemplateBelow = dst.Params.TemplateBelow, dst.Params.TemplateBelow
 			if err := filterCopy(dstf, gchild.Filter); err != nil {
 				return err
 			}
@@ -819,6 +830,8 @@ func newGraph(ctx context.Context, gq *dql.GraphQuery) (*SubGraph, error) {
 		Alias:            gq.Alias,
 		Cascade:          &CascadeArgs{Fields: gq.Cascade},
 		GetUid:           isDebug(ctx),
+		Template:         gq.Template,
+		TemplateBelow:    gq.Template,
 		IgnoreReflex:     gq.IgnoreReflex,
 		IsEmpty:          gq.IsEmpty,
 		Langs:            gq.Langs,
@@ -878,6 +891,7 @@ func newGraph(ctx context.Context, gq *dql.GraphQuery) (*SubGraph, error) {
 	// Copy roots filter.
 	if gq.Filter != nil {
 		sgf := &SubGraph{}
+		sgf.Params.Template, sgf.Params.TemplateBelow = sg.Params.TemplateBelow, sg.Params.TemplateBelow
 		if err := filterCopy(sgf, gq.Filter); err != nil {
 			return nil, errors.Wrapf(err, "while copying filter")
 		}
@@ -922,8 +936,21 @@ func toFacetsFilter(gft *dql.FilterTree) (*pb.FilterTree, error) {
 }
 
 // createTaskQuery generates the query buffer.
+// namespaceFor returns the namespace a node's predicate is read in: the request's,
+// or the one it takes its schema from when the node is under a @template block.
+func namespaceFor(ctx context.Context, template bool) (uint64, error) {
+	ns, err := x.ExtractNamespace(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if template {
+		return x.TemplateNamespace(ns), nil
+	}
+	return ns, nil
+}
+
 func createTaskQuery(ctx context.Context, sg *SubGraph) (*pb.Query, error) {
-	namespace, err := x.ExtractNamespace(ctx)
+	namespace, err := namespaceFor(ctx, sg.Params.Template)
 	if err != nil {
 		return nil, errors.Wrapf(err, "While creating query task")
 	}
@@ -953,7 +980,7 @@ func createTaskQuery(ctx context.Context, sg *SubGraph) (*pb.Query, error) {
 
 	// first is to limit how many results we want.
 	first, offset := calculatePaginationParams(sg)
-	ns, err := x.ExtractNamespace(ctx)
+	ns, err := namespaceFor(ctx, sg.Params.TemplateBelow)
 	if err != nil {
 		return nil, errors.Wrapf(err, "While ordering and paginating")
 	}
@@ -2057,7 +2084,7 @@ func expandSubgraph(ctx context.Context, sg *SubGraph) ([]*SubGraph, error) {
 	stop := x.SpanTimer(span, "expandSubgraph: "+sg.Attr)
 	defer stop()
 
-	namespace, err := x.ExtractNamespace(ctx)
+	namespace, err := namespaceFor(ctx, sg.Params.TemplateBelow)
 	if err != nil {
 		return nil, errors.Wrapf(err, "While expanding subgraph")
 	}
@@ -2566,7 +2593,7 @@ func (sg *SubGraph) applyOrderAndPagination(ctx context.Context) error {
 
 	x.AssertTrue(len(sg.Params.Order) > 0)
 
-	ns, err := x.ExtractNamespace(ctx)
+	ns, err := namespaceFor(ctx, sg.Params.TemplateBelow)
 	if err != nil {
 		return errors.Wrapf(err, "While ordering and paginating")
 	}

@@ -142,6 +142,9 @@ type Schema interface {
 	// Tenant returns the name of the type marked @tenant, the type a partition holds
 	// exactly one record of, or "" if the schema marks none.
 	Tenant() string
+	// PlaneOf returns the plane the records of the named type live in: PlaneControl
+	// for a type placed there with @scope, PlaneTenant for any other name.
+	PlaneOf(typeName string) string
 	// TenantClaim returns the claim of a request's token that names its tenant, and
 	// TenantNameField the field of the tenant type that holds that name, as @tenant
 	// declares them. Both are "" if the schema does not say.
@@ -3360,6 +3363,13 @@ func (s *schema) tenantArg(name string) string {
 		return ""
 	}
 	return tenantArg(def.Directives.ForName(tenantDirective), name)
+}
+
+func (s *schema) PlaneOf(typeName string) string {
+	if s == nil || s.schema == nil {
+		return PlaneTenant
+	}
+	return planeOf(s.schema, s.schema.Types[typeName])
 }
 
 func (s *schema) TenantClaim() string { return s.tenantArg("claim") }
