@@ -327,6 +327,9 @@ type Type interface {
 	HoldsGrants() bool
 	// Tenant returns the name of the schema's @tenant type, or "".
 	Tenant() string
+	// TenantLevel reports whether rule is written on a type or interface that declares,
+	// with @access, that its query rule is decided by the tenant and the caller alone.
+	TenantLevel(rule *RuleNode) bool
 }
 
 // A FieldDefinition is a field as defined in some Type in the schema.  As opposed
@@ -397,6 +400,9 @@ type astType struct {
 
 type schema struct {
 	schema *ast.Schema
+	// tenantLevel holds the text of the rules written under @access, read once.
+	tenantLevel     map[string]bool
+	tenantLevelOnce sync.Once
 	// dgraphPredicate gives us the dgraph predicate corresponding to a typeName + fieldName.
 	// It is pre-computed so that runtime queries and mutations can look it
 	// up quickly.
@@ -3371,6 +3377,32 @@ func (t *astType) definition() (*ast.Schema, *ast.Definition) {
 		return nil, nil
 	}
 	return t.inSchema.schema, t.inSchema.schema.Types[t.typ.Name()]
+}
+
+// tenantLevelRules returns the text of every rule written under @access in sch.
+func tenantLevelRules(sch *ast.Schema) map[string]bool {
+	out := make(map[string]bool)
+	if sch == nil {
+		return out
+	}
+	for _, def := range sch.Types {
+		if def.Directives.ForName(accessDirective) == nil {
+			continue
+		}
+		for _, rule := range accessRuleTexts(def) {
+			out[rule] = true
+		}
+	}
+	return out
+}
+
+func (t *astType) TenantLevel(rule *RuleNode) bool {
+	if t == nil || t.inSchema == nil || rule == nil || rule.RuleTemplate == "" {
+		return false
+	}
+	s := t.inSchema
+	s.tenantLevelOnce.Do(func() { s.tenantLevel = tenantLevelRules(s.schema) })
+	return s.tenantLevel[rule.RuleTemplate]
 }
 
 func (t *astType) IsTenant() bool {

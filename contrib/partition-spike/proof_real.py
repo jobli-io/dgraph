@@ -331,12 +331,13 @@ def restart(c, debug=False):
     c.wait_ready(0, timeout=900)
 
 
-# The engine reads which type a partition is built around, and which types' records can
-# hold a grant, from two markers in the schema: @tenant and @grants. Jobli's schema
+# The engine reads which type a partition is built around, which types' records can hold
+# a grant, and which query rules are decided by the tenant alone, from markers in the
+# schema: @tenant, @grants and @access. Jobli's schema
 # (graph/.graphql) says where they go. The schema restored from the dev backup is older
 # and has neither, so every schema a probe loads is given them, and they are taken out
 # again of what a probe reads back. With the partition flags off nothing reads them.
-MARKERS = ("@tenant", "@grants")
+MARKERS = ("@tenant", "@grants", "@access(scope: SHARED)", "@access(scope: TENANT)")
 
 
 def marker_homes():

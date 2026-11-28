@@ -605,11 +605,17 @@ func (g *callerGrants) authorityHolds(cur schema.Type, wrap *schema.RuleNode) bo
 	return !a.unknown && a.all
 }
 
-// tenantRuleHolds reports whether rule is one that only tests the Workspace the
-// record is in, and the Workspace passes it. The answer is remembered by rule,
+// tenantRuleHolds reports whether rule is one the schema declares to test only the
+// tenant the record is in (@access), and the tenant passes it. The answer is remembered by rule,
 // so it relies on every type that carries the rule declaring the edge alike.
 func (g *callerGrants) tenantRuleHolds(cur schema.Type, rule *schema.RuleNode) bool {
 	if !grantsConf.tenantRules || cur == nil {
+		return false
+	}
+	if !cur.TenantLevel(rule) {
+		// Only a rule the schema declares with @access is asked of the tenant. One
+		// that merely has the shape is left as written, and said so once.
+		g.noteUndeclared(cur, rule)
 		return false
 	}
 	a := g.answerFor(cur, rule, true)
@@ -617,6 +623,24 @@ func (g *callerGrants) tenantRuleHolds(cur schema.Type, rule *schema.RuleNode) b
 		g.waiting++
 	}
 	return !a.unknown && a.all
+}
+
+// undeclared remembers the rules already looked at by noteUndeclared.
+var undeclared sync.Map
+
+// noteUndeclared logs, once for each rule text, a rule that tests only the tenant but
+// is not written under @access. It runs as written; the log says what to declare.
+func (g *callerGrants) noteUndeclared(cur schema.Type, rule *schema.RuleNode) {
+	if rule == nil || rule.RuleTemplate == "" || !glog.V(2) {
+		return
+	}
+	if _, seen := undeclared.LoadOrStore(rule.RuleTemplate, true); seen {
+		return
+	}
+	if _, ok := g.compileTenant(cur, rule); ok {
+		glog.Infof("partition grants: a rule on type %s tests only the tenant but is not declared "+
+			"with @access; it runs as written: %.160q", cur.Name(), strings.Join(strings.Fields(rule.RuleTemplate), " "))
+	}
 }
 
 // answerFor returns what the partition says about rule, which sits in the rules

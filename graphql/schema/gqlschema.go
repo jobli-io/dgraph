@@ -47,6 +47,7 @@ const (
 	referenceScopeDirective      = "referenceScope"
 	tenantDirective              = "tenant"
 	grantsDirective              = "grants"
+	accessDirective              = "access"
 	oldValueDirective            = "oldValue"
 	cascadeDeleteDirective       = "cascadeDelete"
 	cascadeAuthDirective         = "cascadeAuth"
@@ -337,6 +338,7 @@ enum CascadeAuthVariableContext { self parent adaptive }
 enum CascadeAuthOperation { query add update delete }
 enum CascadeAuthStrategy { FORWARD REVERSE AUTO }
 enum LookupStrategy { FORWARD REVERSE DYNAMIC }
+enum AccessScope { TENANT SHARED }
 input FilterMetadata { lookup: LookupStrategy }
 enum DateTimeGranularity { year quarter month fortnight week day hour }
 type GroupByKeyValue { path: String! value: String }
@@ -350,6 +352,7 @@ directive @postValidate(expr: String, reason: String, rules: [DgraphPostValidate
 directive @referenceScope(claim: String!, path: String!) on OBJECT | INTERFACE
 directive @tenant on OBJECT
 directive @grants on OBJECT | INTERFACE
+directive @access(scope: AccessScope!) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
@@ -402,6 +405,7 @@ directive @postValidate(expr: String, reason: String, rules: [DgraphPostValidate
 directive @referenceScope(claim: String!, path: String!) on OBJECT | INTERFACE
 directive @tenant on OBJECT
 directive @grants on OBJECT | INTERFACE
+directive @access(scope: AccessScope!) on OBJECT | INTERFACE
 directive @oldValue(fields: [String!], first: Int, sort: String) on FIELD_DEFINITION
 directive @withSubscription on OBJECT | INTERFACE | FIELD_DEFINITION
 directive @secret(field: String!, pred: String) on OBJECT | INTERFACE
@@ -705,6 +709,7 @@ var directiveValidators = map[string]directiveValidator{
 	referenceScopeDirective:    ValidatorNoOp, // type-level; the path is checked in referenceScopeDirectiveValidation (typeValidations)
 	tenantDirective:            ValidatorNoOp, // type-level; checked across the schema in tenantDirectiveValidation
 	grantsDirective:            ValidatorNoOp, // type-level; checked across the schema in tenantDirectiveValidation
+	accessDirective:            ValidatorNoOp, // type-level; the rule it marks is checked in accessDirectiveValidation (typeValidations)
 	postValidateDirective:      ValidatorNoOp, // type-level; compile-time expr check in postValidateDirectiveValidation (typeValidations)
 	oldValueDirective:          oldValueDirectiveValidation,
 	cascadeDeleteDirective:     cascadeDeleteDirectiveValidation,
@@ -744,6 +749,7 @@ var directiveLocationMap = map[string]map[ast.DefinitionKind]bool{
 	referenceScopeDirective:      {ast.Object: true, ast.Interface: true},
 	tenantDirective:              {ast.Object: true},
 	grantsDirective:              {ast.Object: true, ast.Interface: true},
+	accessDirective:              {ast.Object: true, ast.Interface: true},
 	cascadeAuthPolicyDirective:   {ast.Object: true, ast.Interface: true},
 	authVariablesDirective:       {ast.Object: true, ast.Interface: true},
 	generateDirective:            {ast.Object: true, ast.Interface: true},

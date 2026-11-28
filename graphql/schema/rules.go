@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,7 +41,7 @@ func init() {
 		passwordDirectiveValidation, conflictingDirectiveValidation, nonIdFieldsCheck,
 		remoteTypeValidation, generateDirectiveValidation, apolloKeyValidation,
 		apolloExtendsValidation, lambdaOnMutateValidation, postValidateDirectiveValidation,
-		referenceScopeDirectiveValidation,
+		referenceScopeDirectiveValidation, accessDirectiveValidation,
 		validateInterfacePolicy, validateTypeDirectiveValidation)
 	fieldValidations = append(fieldValidations, listValidityCheck, fieldArgumentCheck,
 		fieldNameCheck, isValidFieldForList, hasAuthDirective, fieldDirectiveCheck)
@@ -2072,6 +2073,141 @@ func tenantDirectiveValidation(sch *ast.Schema, definitions []string) gqlerror.L
 				"Type %s; @grants needs a type with @tenant in the schema: a grant is held inside a tenant.",
 				typ.Name))
 		}
+	}
+	return errs
+}
+
+// accessRuleTexts returns the text of every rule in the query rule of def's @auth.
+func accessRuleTexts(def *ast.Definition) []string {
+	auth := def.Directives.ForName(authDirective)
+	if auth == nil {
+		return nil
+	}
+	qry := auth.Arguments.ForName("query")
+	if qry == nil || qry.Value == nil {
+		return nil
+	}
+	var out []string
+	var walk func(v *ast.Value)
+	walk = func(v *ast.Value) {
+		if v == nil {
+			return
+		}
+		for _, c := range v.Children {
+			if c.Name == "rule" && c.Value != nil {
+				out = append(out, c.Value.Raw)
+				continue
+			}
+			walk(c.Value)
+		}
+	}
+	walk(qry.Value)
+	return out
+}
+
+var authVarPlaceholder = regexp.MustCompile(`<<[^>]*>>`)
+
+// tenantOnlyRule reports why a rule, as written on a type, is not one that tests only
+// the tenant the record is in, or "" if it is one. Such a rule asks nothing of the
+// record itself and selects one thing from it: its non-null edge to the tenant type.
+// What it asks under that edge is the rule's business. A rule about claims alone
+// (it starts with "{") asks nothing of any record and passes.
+func tenantOnlyRule(sch *ast.Schema, tenant, rule string) string {
+	text := strings.TrimSpace(rule)
+	if strings.HasPrefix(text, RBACQueryPrefix) {
+		return ""
+	}
+	// placeholders of @authVariables stand for lists and are not GraphQL
+	doc, err := parser.ParseQuery(&ast.Source{Input: authVarPlaceholder.ReplaceAllString(text, "[]")})
+	if err != nil {
+		return "it does not parse: " + err.Error()
+	}
+	if len(doc.Operations) != 1 || len(doc.Operations[0].SelectionSet) != 1 {
+		return "it must be one query with one field"
+	}
+	root, ok := doc.Operations[0].SelectionSet[0].(*ast.Field)
+	if !ok || !strings.HasPrefix(root.Name, "query") {
+		return "it must be a query<Type> field"
+	}
+	if len(root.Arguments) > 0 {
+		return "it filters or orders the records themselves (" + root.Name + " has arguments)"
+	}
+	edges := 0
+	var walk func(on string, set ast.SelectionSet) string
+	walk = func(on string, set ast.SelectionSet) string {
+		for _, sel := range set {
+			switch f := sel.(type) {
+			case *ast.InlineFragment:
+				if why := walk(f.TypeCondition, f.SelectionSet); why != "" {
+					return why
+				}
+			case *ast.Field:
+				if f.Name == "__typename" {
+					continue
+				}
+				def := sch.Types[on]
+				if def == nil {
+					return "type " + on + " is not in the schema"
+				}
+				fd := def.Fields.ForName(f.Name)
+				if fd == nil {
+					return "type " + on + " has no field " + f.Name
+				}
+				if fd.Type.NamedType != tenant || !fd.Type.NonNull {
+					return "it selects " + on + "." + f.Name + ", which is not a non-null edge to " + tenant
+				}
+				edges++
+			default:
+				return "it uses a named fragment"
+			}
+		}
+		return ""
+	}
+	if why := walk(strings.TrimPrefix(root.Name, "query"), root.SelectionSet); why != "" {
+		return why
+	}
+	if edges != 1 {
+		return fmt.Sprintf("it must select the edge to %s once, and selects it %d times", tenant, edges)
+	}
+	return ""
+}
+
+// accessDirectiveValidation checks the declaration @access makes: that the query rule
+// written on this type is decided by the tenant and the caller alone, so that every
+// record of the tenant passes it or none does. The engine relies on that to ask the
+// tenant once in place of walking from every record, so a rule that says more than
+// that under @access fails the schema load.
+func accessDirectiveValidation(sch *ast.Schema, typ *ast.Definition) gqlerror.List {
+	dir := typ.Directives.ForName(accessDirective)
+	if dir == nil {
+		return nil
+	}
+	scope := ""
+	if a := dir.Arguments.ForName("scope"); a != nil && a.Value != nil {
+		scope = a.Value.Raw
+	}
+	tenant := tenantOf(sch)
+	if tenant == "" {
+		return gqlerror.List{gqlerror.ErrorPosf(dir.Position,
+			"Type %s; @access(scope: %s) needs a type with @tenant in the schema.", typ.Name, scope)}
+	}
+	rules := accessRuleTexts(typ)
+	graph := 0
+	var errs gqlerror.List
+	for _, rule := range rules {
+		if !strings.HasPrefix(strings.TrimSpace(rule), RBACQueryPrefix) {
+			graph++
+		}
+		if why := tenantOnlyRule(sch, tenant, rule); why != "" {
+			errs = append(errs, gqlerror.ErrorPosf(dir.Position,
+				"Type %s; @access(scope: %s) says the query rule here tests only the tenant, but a rule does not: %s.",
+				typ.Name, scope, why))
+		}
+	}
+	if graph == 0 {
+		errs = append(errs, gqlerror.ErrorPosf(dir.Position,
+			"Type %s; @access(scope: %s) needs a query rule in @auth on this type that tests the tenant.",
+			typ.Name, scope))
 	}
 	return errs
 }
